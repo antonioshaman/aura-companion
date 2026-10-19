@@ -9,7 +9,7 @@
 // The exhaustive `switch(reason)` with `const _: never = reason;`
 // tail is the EC-37/AP-14 sibling on the frontend: adding a sixth
 // `CliFailedReason` is a TYPECHECK error here. The wire union is
-// closed at 5 variants in `web/server/cli-failed-frame.ts`; this
+// closed at 6 variants in `web/server/cli-failed-frame.ts`; this
 // helper closes the read side.
 
 import type { CliFailedReason } from "./types.js";
@@ -26,6 +26,10 @@ export interface CliFailedCopy {
    *  resolves to the same surface — start a fresh session, optionally
    *  carrying the user’s typed draft. */
   action: string;
+  /** P4/FIX-RECONNECT-RELAUNCH: label for an in-place relaunch, offered for
+   *  reasons where the agent — not the container or the image — is what
+   *  failed. Absent → the banner shows only {@link action}. */
+  relaunchAction?: string;
 }
 
 /**
@@ -44,6 +48,7 @@ export function cliFailedCopy(reason: CliFailedReason): CliFailedCopy {
         body:
           "The agent process exited repeatedly and used up its retry budget. Aura stopped relaunching it to protect your workspace from a crash loop.",
         action: "Start a new session with this draft",
+        relaunchAction: "Relaunch agent",
       };
     case "container_missing":
       return {
@@ -84,6 +89,17 @@ export function cliFailedCopy(reason: CliFailedReason): CliFailedCopy {
         body:
           "This tab disconnected and didn’t come back before the queue grace window expired. Your queued messages were saved here so you can continue them in a fresh session.",
         action: "Start a new session with this draft",
+      };
+    case "backend_dead":
+      // P4/FIX-RECONNECT-RELAUNCH: the drain grace expired while the agent
+      // was down, so the queue was never deliverable. The cause is the
+      // agent, not the user’s tab — and a relaunch is the first remedy.
+      return {
+        headline: "The agent stopped responding",
+        body:
+          "The agent behind this session disconnected and did not come back, so your queued messages never reached it. They were saved here. Relaunch the agent to continue this session, or start a fresh one with this draft.",
+        action: "Start a new session with this draft",
+        relaunchAction: "Relaunch agent",
       };
     default: {
       // Exhaustiveness tripwire — adding a sixth variant to

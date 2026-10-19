@@ -267,3 +267,59 @@ describe("Phase F — getSessionMemoryStats reachability axis", () => {
     expect(stats[0].reachable).toBe(false);
   });
 });
+
+describe("browser-close drain: service frames + backend_dead (P4/FIX-RECONNECT-RELAUNCH)", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  const poll = JSON.stringify({ type: "mcp_get_status" });
+  const typed = JSON.stringify({ type: "user_message", content: "hello" });
+
+  function sentFrames(ws: { send: { mock: { calls: unknown[][] } } }) {
+    return ws.send.mock.calls.map((c) => JSON.parse(c[0] as string));
+  }
+
+  // Replay of the prod shape (2026-09-29 22:37): only browser status polls
+  // queued, backend dead, last tab closed -> no cli_failed, queue kept so
+  // the polls still reach the next backend.
+  it("does not arm or fire for a queue of only mcp_get_status polls", () => {
+    const sid = "sess_polls_only";
+    const ws = makeBrowserSocket(sid);
+    bridge.handleBrowserOpen(ws, sid);
+    const session = bridge.getSession(sid)!;
+    session.pendingMessages.push(poll, poll);
+    bridge.handleBrowserClose(ws);
+    vi.advanceTimersByTime(300_001);
+    expect(session.pendingMessages).toEqual([poll, poll]);
+    // Even a direct dispatch is suppressed.
+    expect(bridge.dispatchCliFailedDrain(sid, "browser_closed_no_reconnect")).toEqual({ fired: false, drainedCount: 0 });
+    const ws2 = makeBrowserSocket(sid);
+    bridge.handleBrowserOpen(ws2, sid);
+    expect(sentFrames(ws2).some((m: any) => m.type === "cli_failed")).toBe(false);
+  });
+
+  it("names the backend, not the tab, when the backend is down at grace expiry", () => {
+    const sid = "sess_backend_dead";
+    const ws = makeBrowserSocket(sid);
+    bridge.handleBrowserOpen(ws, sid);
+    const session = bridge.getSession(sid)!;
+    session.pendingMessages.push(poll, typed);
+    bridge.handleBrowserClose(ws);
+    vi.advanceTimersByTime(300_001);
+    expect(session.pendingMessages).toEqual([]);
+    // The frame lands in the replay buffer; a returning tab sees it.
+    const frame = session.eventBuffer.map((e: any) => e.message).find((m: any) => m.type === "cli_failed");
+    expect(frame).toMatchObject({ reason: "backend_dead", drainedCount: 1, subprocessAlive: false });
+  });
+
+  it("keeps browser_closed_no_reconnect when the backend is connected", () => {
+    const sid = "sess_backend_alive";
+    const ws = makeBrowserSocket(sid);
+    bridge.handleBrowserOpen(ws, sid);
+    const session = bridge.getSession(sid)!;
+    session.backendAdapter = { isConnected: () => true } as never;
+    session.pendingMessages.push(typed);
+    bridge.handleBrowserClose(ws);
+    vi.advanceTimersByTime(300_001);
+    const frame = session.eventBuffer.map((e: any) => e.message).find((m: any) => m.type === "cli_failed");
+    expect(frame).toMatchObject({ reason: "browser_closed_no_reconnect", drainedCount: 1, subprocessAlive: true });
+  });
+});

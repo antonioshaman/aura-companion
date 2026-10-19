@@ -4,9 +4,12 @@ import { api, type ArchiveInfo } from "../api.js";
 import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinearModal.js";
 import { connectAllSessions, disconnectSession } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
+import { continueInNewSession } from "../use-continue-in-new-session.js";
 import { ProjectGroup } from "./ProjectGroup.js";
 import { GlobalUsageBadge } from "./GlobalUsageBadge.js";
-import { SessionItem } from "./SessionItem.js";
+import { TelemetryNudge } from "./TelemetryNudge.js";
+import { SessionItem, type CouncilConvergenceInfo } from "./SessionItem.js";
+import { isUnresolvedStop } from "../observer-panel-state.js";
 import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
 interface NavItem {
@@ -81,6 +84,22 @@ const NAV_ITEMS: NavItem[] = [
     activePages: ["sandboxes"],
   },
   {
+    id: "sweep",
+    label: "Sweep",
+    hash: "#/sweep",
+    viewBox: "0 0 16 16",
+    iconPath: "M10.97 1.53a.75.75 0 011.06 0l2.44 2.44a.75.75 0 010 1.06l-6.5 6.5a.75.75 0 01-.34.196l-3.5.94a.75.75 0 01-.92-.92l.94-3.5a.75.75 0 01.196-.34l6.5-6.5zm.53 1.59L5.7 8.92l-.5 1.88 1.88-.5 5.8-5.8-1.38-1.38zM2 14a.75.75 0 01.75-.75h5.5a.75.75 0 010 1.5h-5.5A.75.75 0 012 14z",
+    activePages: ["sweep"],
+  },
+  {
+    id: "diagnostics",
+    label: "Diagnostics",
+    hash: "#/diagnostics",
+    viewBox: "0 0 16 16",
+    iconPath: "M1.5 8a.75.75 0 01.75-.75h2.04l1.52-3.8a.75.75 0 011.4.02l2.3 6.6 1.17-2.34A.75.75 0 0111.36 7.3h2.39a.75.75 0 010 1.5h-1.93l-1.6 3.2a.75.75 0 01-1.38-.09L6.6 5.6 5.45 8.48a.75.75 0 01-.7.47h-2.5A.75.75 0 011.5 8z",
+    activePages: ["diagnostics"],
+  },
+  {
     id: "agents",
     label: "Agents",
     hash: "#/agents",
@@ -108,7 +127,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"], defaultCollapsed: true },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "agents", "settings"], defaultCollapsed: false },
+  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "sweep", "diagnostics", "agents", "settings"], defaultCollapsed: false },
 ] as const;
 
 const SIDEBAR_NAV_COLLAPSED_KEY = "aura-sidebar-nav-collapsed";
@@ -179,7 +198,7 @@ interface CollapsibleSessionListProps {
   sessionNames: Map<string, string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
-  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
+  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer"; convergence?: CouncilConvergenceInfo };
   /** PLAN T12 (Phase G) - per-session terminal-failure reason map. */
   cliFailures: Map<string, { reason: import("../store/cli-status-slice.js").CliFailure["reason"] }>;
   sessionItemProps: SessionItemSharedProps;
@@ -232,6 +251,7 @@ function CollapsibleSessionList({
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
                 councilRole={council.role}
+                councilConvergence={council.convergence}
                 cliFailedReason={failed?.reason}
                 {...sessionItemProps}
               />
@@ -304,7 +324,22 @@ export function Sidebar() {
         const list = await api.listSessions();
         if (active) {
           const store = useStore.getState();
-          store.setSdkSessions(list);
+          store.setSdkSessions(list, { fromServer: true });
+          for (const s of list) {
+            if (s.archived) continue;
+            if (s.state !== "connected") continue;
+            // Once the browser WS is live for this session it is the authoritative
+            // source of CLI liveness (cli_connected / cli_disconnected /
+            // session_phase in ws.ts). A REST snapshot can be up to one poll
+            // interval stale, so re-asserting "connected" here would override a
+            // fresher WS-observed disconnect and mask a dead socket (Composer
+            // gates sending on cliConnected). Only hydrate optimistically BEFORE
+            // the WS connects; after that, defer to the WS.
+            if (store.connectionStatus.get(s.sessionId) === "connected") continue;
+            store.setCliConnected(s.sessionId, true);
+            store.setCliReconnecting(s.sessionId, false);
+            store.setConnectionStatus(s.sessionId, "connected");
+          }
           // Remove client-side sessions the server no longer knows about.
           // Re-read state AFTER setSdkSessions so we get the freshest snapshot —
           // a session_init WebSocket message may have arrived while listSessions()
@@ -483,17 +518,13 @@ export function Sidebar() {
   // Continue-in-new-session: spawn a fresh session in the same workspace
   // with a text-only handoff file written to cwd, then navigate the user to
   // the new session with the pickup-prompt draft pre-loaded in the composer.
-  // Designed to recover from wedged sessions (e.g. >2000px image in history
-  // that trips Anthropic's many-image API limit) without losing context.
+  // Designed to recover from wedged sessions (oversized context, or a >2000px
+  // image in history that trips Anthropic's many-image API limit) without
+  // losing context. Shared with the in-chat context-overflow banner.
   const handleContinueInNew = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     try {
-      const result = await api.continueInNewSession(sessionId);
-      useStore.getState().setPickupDraft(result.newSessionId, result.draft);
-      navigateToSession(result.newSessionId);
-      if (window.innerWidth < 768) {
-        useStore.getState().setSidebarOpen(false);
-      }
+      await continueInNewSession(sessionId);
     } catch (err) {
       // Surface failure without crashing the sidebar. The handoff endpoint
       // can fail if the session has no cwd or filesystem write is denied;
@@ -562,7 +593,7 @@ export function Sidebar() {
     useStore.getState().removeBridgeSession(sessionId);
     try {
       const list = await api.listSessions();
-      useStore.getState().setSdkSessions(list);
+      useStore.getState().setSdkSessions(list, { fromServer: true });
     } catch {
       // best-effort
     }
@@ -601,7 +632,7 @@ export function Sidebar() {
     }
     try {
       const list = await api.listSessions();
-      useStore.getState().setSdkSessions(list);
+      useStore.getState().setSdkSessions(list, { fromServer: true });
     } catch {
       // best-effort
     }
@@ -638,6 +669,7 @@ export function Sidebar() {
       cronJobName: bridgeState?.cronJobName || sdkInfo?.cronJobName,
       agentId: bridgeState?.agentId || sdkInfo?.agentId,
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
+      worktree: sdkInfo?.worktree,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
@@ -688,7 +720,12 @@ export function Sidebar() {
    * from the store maps. Hoisted out of the JSX so the closure cost stays
    * bounded as the session list grows.
    */
-  function councilInfoFor(sessionId: string): { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" } {
+  function councilInfoFor(sessionId: string): {
+    pairing?: string;
+    unreadStops?: number;
+    role?: "orchestrator" | "observer";
+    convergence?: CouncilConvergenceInfo;
+  } {
     const groupId = groupBySessionId.get(sessionId);
     if (!groupId) return {};
     const group = groups.get(groupId);
@@ -696,10 +733,9 @@ export function Sidebar() {
     const groupFindings = findings.get(groupId) ?? [];
     let unread = 0;
     for (const f of groupFindings) {
-      if (f.severity !== "STOP") continue;
-      if (f.wasDowngraded === true) continue;
-      if (dismissedStopIds.has(f.id)) continue;
-      unread++;
+      // Same predicate as the banner: weak (B2) and disputed (B2b) STOPs never
+      // count; a finding holding auto-proceed (FIX-AP-3) always does.
+      if (isUnresolvedStop(f, dismissedStopIds)) unread++;
     }
     // Council Review 2026-05-15 Item 17 — derive role from GroupRecord
     // membership rather than plumbing a new field through SessionItem's
@@ -709,7 +745,26 @@ export function Sidebar() {
     let role: "orchestrator" | "observer" | undefined;
     if (group.primarySessionId === sessionId) role = "orchestrator";
     else if (group.observerSessionId === sessionId) role = "observer";
-    return { pairing: group.pairing, unreadStops: unread, role };
+    // Bidirectional pipeline Story 4.1.5 — convergence badge data. Emit when
+    // the pair is degraded (badge shows the frozen ⚠️ state) OR when the
+    // server has published convergence progress. Absent otherwise so a
+    // freshly-paired, never-checkpointed group shows no badge.
+    const degraded = group.status === "degraded";
+    const hasConvergenceData =
+      typeof group.convergenceState === "string" &&
+      typeof group.cycleNumber === "number" &&
+      typeof group.convergenceThreshold === "number";
+    const convergence: CouncilConvergenceInfo | undefined =
+      degraded || hasConvergenceData
+        ? {
+            state: group.convergenceState,
+            cycleNumber: group.cycleNumber,
+            threshold: group.convergenceThreshold,
+            degraded,
+            ...(group.lastReviewNotCounted ? { notCounted: group.lastReviewNotCounted } : {}),
+          }
+        : undefined;
+    return { pairing: group.pairing, unreadStops: unread, role, convergence };
   }
 
   return (
@@ -990,6 +1045,7 @@ export function Sidebar() {
           </div>
         </div>
         <GlobalUsageBadge />
+        <TelemetryNudge />
       </div>
 
       {/* Delete confirmation modal */}

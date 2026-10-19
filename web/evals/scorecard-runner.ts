@@ -22,7 +22,12 @@
 
 import { fileURLToPath } from "node:url";
 import { scorePrecisionCorpus } from "./scorers/precision-corpus.js";
-import { buildEvalScorecard } from "./reports/eval-scorecard.js";
+import {
+  buildEvalScorecard,
+  evidenceVerdict,
+  renderEvidenceVerdict,
+  renderGroundingBeforeAfter,
+} from "./reports/eval-scorecard.js";
 import { renderScorecardMarkdown, renderScorecardText } from "./reports/scorecard.js";
 
 const DEFAULT_CORPUS_DIR = fileURLToPath(new URL("./__fixtures__/precision", import.meta.url));
@@ -59,7 +64,19 @@ function main(): number {
   const { summary } = scorePrecisionCorpus(args.dir);
   const card = buildEvalScorecard(summary);
   const out = args.markdown ? renderScorecardMarkdown(card) : renderScorecardText(card);
-  process.stdout.write(out + "\n");
+  // B3: labeled STOPs in this corpus = STOP findings carrying a TP/FP verdict.
+  const verdict = evidenceVerdict(
+    summary.raw.true_positive + summary.raw.false_positive,
+    summary.grounded.precision,
+  );
+  process.stdout.write(
+    out +
+      "\n\n" +
+      renderGroundingBeforeAfter(summary, args.markdown) +
+      "\n\n" +
+      renderEvidenceVerdict(verdict, args.markdown) +
+      "\n",
+  );
   return card.passed ? 0 : 1;
 }
 

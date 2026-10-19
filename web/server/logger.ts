@@ -26,6 +26,7 @@ import {
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { countFileLines } from "./fs-utils.js";
+import { redactSecretsInText } from "./secret-redaction.js";
 
 type LogLevel = "info" | "warn" | "error";
 
@@ -39,6 +40,55 @@ interface LogEntry {
 
 const STRUCTURED = process.env.COMPANION_LOG_FORMAT === "json";
 
+// ─── Secret masking ─────────────────────────────────────────────────────────
+// Applied to every formatted line before it reaches stdout (journald) or the
+// log file, so a caller that drops an API key, auth token or OAuth credential
+// into `msg` or `data` does not persist it. Order matters: the key=value rule
+// runs first so the whole value is replaced, not just an inner match.
+const REDACTED = "[REDACTED]";
+const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  // OAuth fields in JSON / query / key=value form, incl. escaped JSON:
+  //   "access_token":"…", refresh_token=…, accessToken=…, \"refreshToken\":\"…\"
+  [/((?:access|refresh)[_-]?token\\?"?\s*[:=]\s*\\?"?)[^"'\s&,}\\]+/gi, `$1${REDACTED}`],
+  // Authorization header values.
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${REDACTED}`],
+  // Anthropic / OpenAI style keys, incl. Claude OAuth sk-ant-oat01-… / sk-ant-ort01-….
+  [/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED],
+];
+
+// 64-hex values: the Companion auth token is randomBytes(32).toString("hex"),
+// but so is every diagnostic sha256 (wakeBodySha256, observerPromptSha256,
+// argvSha256). A 64-hex value is masked only in a secret context, see maskHex64.
+const HEX64 = /\b[0-9a-fA-F]{64}\b/g;
+// Key directly assigned to the value: `name=`, `name: `, `"name":"`, `\"name\":\"`.
+const ASSIGNED_KEY = /([A-Za-z_][\w-]*)\\?"?\s*[:=]\s*\\?"?$/;
+const SECRET_WORD = /token|secret|passw(?:or)?d|api[_-]?key|authorization|bearer|credential/i;
+const HASH_KEY = /(?:sha\d*|hash|digest|checksum|id)$/i;
+const HEX64_LOOKBEHIND = 32;
+
+function maskHex64(line: string): string {
+  return line.replace(HEX64, (hex, offset: number) => {
+    const before = line.slice(Math.max(0, offset - HEX64_LOOKBEHIND), offset);
+    const key = ASSIGNED_KEY.exec(before)?.[1];
+    // A named field decides by its own name: `wakeBodySha256=` / `tokenHash=`
+    // keep the value, `authToken=` / `"secret":` mask it.
+    if (key) return !HASH_KEY.test(key) && SECRET_WORD.test(key) ? REDACTED : hex;
+    // Prose such as "token is <hex>": mask when a secret word is nearby.
+    return SECRET_WORD.test(before) ? REDACTED : hex;
+  });
+}
+
+/** Replace secret-looking substrings in a log line with `[REDACTED]`. */
+export function maskSecrets(line: string): string {
+  let out = line;
+  for (const [re, replacement] of SECRET_PATTERNS) out = out.replace(re, replacement);
+  // Shared recorder/session-store policy (npm_, gnk-, Telegram, GitHub, JWT,
+  // KEY=value assignments, ...). The bare-hex rule is skipped: the logger
+  // keeps its context-aware maskHex64 so diagnostic sha256 values survive.
+  out = redactSecretsInText(out, { skip: ["hex64"] });
+  return maskHex64(out);
+}
+
 function formatEntry(level: LogLevel, module: string, msg: string, data?: Record<string, unknown>): string {
   if (STRUCTURED) {
     const entry: LogEntry = {
@@ -48,7 +98,7 @@ function formatEntry(level: LogLevel, module: string, msg: string, data?: Record
       module,
       msg,
     };
-    return JSON.stringify(entry);
+    return maskSecrets(JSON.stringify(entry));
   }
 
   // Human-readable format (default): [module] msg key=value key=value
@@ -59,7 +109,7 @@ function formatEntry(level: LogLevel, module: string, msg: string, data?: Record
       .join(" ");
     if (pairs) line += ` | ${pairs}`;
   }
-  return line;
+  return maskSecrets(line);
 }
 
 // ─── Log File Writer ────────────────────────────────────────────────────────

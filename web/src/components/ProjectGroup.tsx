@@ -1,6 +1,6 @@
 import type { RefObject } from "react";
 import type { ProjectGroup as ProjectGroupType } from "../utils/project-grouping.js";
-import { SessionItem } from "./SessionItem.js";
+import { SessionItem, type CouncilConvergenceInfo } from "./SessionItem.js";
 
 interface ProjectGroupProps {
   group: ProjectGroupType;
@@ -15,7 +15,7 @@ interface ProjectGroupProps {
    *  in `SessionItem`. Forgot to plumb it through here originally (PR #68
    *  fix); the bug surfaced as "glyph absent for active session pairs"
    *  even when the group record was present in the store. */
-  getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
+  getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer"; convergence?: CouncilConvergenceInfo };
   /** PLAN T12 (Phase G) - per-session terminal-failure reason map. */
   cliFailures?: Map<string, { reason: import("../store/cli-status-slice.js").CliFailure["reason"] }>;
   onSelect: (id: string) => void;
@@ -125,6 +125,7 @@ export function ProjectGroup({
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
                 councilRole={council.role}
+                councilConvergence={council.convergence}
                 cliFailedReason={failed?.reason}
                 onSelect={onSelect}
                 onStartRename={onStartRename}

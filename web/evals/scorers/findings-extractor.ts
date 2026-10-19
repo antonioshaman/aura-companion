@@ -133,27 +133,48 @@ function confidence(v: unknown): ExtractedFinding["confidence"] {
  * otherwise-good review is counted in `malformed_findings`.
  */
 export function extractFindings(paths: string[]): FindingsExtract {
+  const docs: ReviewSource[] = [];
+  let unreadable = 0;
+  for (const path of paths) {
+    try {
+      docs.push({ name: basename(path), text: readFileSync(path, "utf8") });
+    } catch {
+      unreadable++;
+    }
+  }
+  const out = extractFindingsFromDocs(docs);
+  out.skipped += unreadable;
+  return out;
+}
+
+/** One review document's raw text plus the name it is reported under (a
+ *  review-file basename, or a recording-derived label). */
+export interface ReviewSource {
+  name: string;
+  text: string;
+}
+
+/**
+ * Same normalization as {@link extractFindings}, over review texts already in
+ * memory — the recording exporter (B3) recovers review JSON from protocol
+ * frames rather than from `.council/reviews/` on disk, and must derive the
+ * exact same `efnd_<hex>` ids so labels join across both paths.
+ */
+export function extractFindingsFromDocs(docs: ReviewSource[]): FindingsExtract {
   const findings: ExtractedFinding[] = [];
   const by_severity: Record<EvalFindingSeverity, number> = { STOP: 0, WARN: 0, NOTE: 0, INFO: 0 };
   let reviews = 0;
   let skipped = 0;
   let malformed_findings = 0;
 
-  for (const path of paths) {
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8");
-    } catch {
-      skipped++;
-      continue;
-    }
-    const doc = parseReviewDoc(text);
+  for (const src of docs) {
+    const doc = parseReviewDoc(src.text);
     if (doc === null) {
       skipped++;
       continue;
     }
     reviews++;
-    const review_file = basename(path);
+    const review_file = src.name;
     for (const raw of doc.findings) {
       if (typeof raw !== "object" || raw === null) {
         malformed_findings++;

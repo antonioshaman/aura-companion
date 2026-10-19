@@ -19,6 +19,29 @@ import {
 } from "./backends.js";
 
 describe("toModelOptions", () => {
+  it("carries the server's untested flag through (and omits it when absent)", () => {
+    // Registry-unknown models arrive flagged `untested: true`; the dropdown
+    // renders an honest hint from it. Absent stays absent (shape unchanged).
+    const options = toModelOptions([
+      { value: "claude-opus-5", label: "Opus 5", description: "", untested: true },
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "" },
+    ]);
+    expect(options[0].untested).toBe(true);
+    expect(options[1]).not.toHaveProperty("untested");
+  });
+
+  it("carries the server's verifiedBy=observed flag through", () => {
+    // A registry-unknown model a session already ran successfully arrives as
+    // `verifiedBy: "observed"` (never together with `untested`).
+    const options = toModelOptions([
+      { value: "gpt-6-sol", label: "gpt-6-sol", description: "", verifiedBy: "observed" },
+      { value: "gpt-5.2", label: "gpt-5.2", description: "" },
+    ]);
+    expect(options[0].verifiedBy).toBe("observed");
+    expect(options[0]).not.toHaveProperty("untested");
+    expect(options[1]).not.toHaveProperty("verifiedBy");
+  });
+
   it("converts server model info to frontend ModelOption with icons", () => {
     const models = [
       { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier" },
@@ -432,5 +455,63 @@ describe("toModelOptions — Claude entries are icon-less (Task 13)", () => {
       { value: "gpt-5.2-codex", label: "GPT-5.2", description: "" },
     ]);
     expect(options[0].icon).not.toBe("");
+  });
+});
+
+// ── Owner bug 2026-10-16: static fallback topped out at Opus 4.8 ───────────
+describe("CLAUDE_MODELS static fallback — fresh models", () => {
+  // When the dynamic fetch fails, the dropdown renders this list; the
+  // owner's daily model and the other launchable fresh models must be in it.
+  it("includes the fresh launchable models (opus-5-5, opus-5, fable-5-1, fable-5, sonnet-5)", () => {
+    const values = CLAUDE_MODELS.map((m) => m.value);
+    for (const id of [
+      "claude-opus-5-5",
+      "claude-opus-5",
+      "claude-fable-5-1",
+      "claude-fable-5",
+      "claude-sonnet-5",
+    ]) {
+      expect(values).toContain(id);
+    }
+  });
+
+  // The default stays on the registry-verified model.
+  it("keeps [0] = claude-opus-4-8 (the default)", () => {
+    expect(CLAUDE_MODELS[0]!.value).toBe("claude-opus-4-8");
+    expect(CLAUDE_MODELS[0]!.untested).toBeUndefined();
+  });
+
+  // Non-registry entries carry the same `untested` flag the server's
+  // enrichModelsWithRegistry adds on the dynamic path, so the dropdown shows
+  // the same "Untested" hint regardless of which list fed it.
+  // 2026-10-17: opus-5-5 / opus-5 / fable-5 / fable-5-1 joined the server
+  // registry (verified on CLI 2.1.283), so they lose the flag here too;
+  // sonnet-5 is still registry-unknown and keeps it.
+  it("marks the non-registry fresh models untested, keeps the registry ones unflagged", () => {
+    const byId = new Map(CLAUDE_MODELS.map((m) => [m.value, m]));
+    expect(byId.get("claude-sonnet-5")?.untested).toBe(true);
+    expect(byId.get("claude-opus-5-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-opus-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-fable-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-fable-5-1")?.untested).toBeUndefined();
+    expect(byId.get("claude-sonnet-4-6")?.untested).toBeUndefined();
+    expect(byId.get("claude-haiku-4-5-20251001")?.untested).toBeUndefined();
+  });
+
+  it("has no duplicate model ids", () => {
+    const values = CLAUDE_MODELS.map((m) => m.value);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  // Adding fresh models to the fallback must NOT change the auto-picked
+  // default: a dynamic list leading with opus-5-5 still anchors to the
+  // newest registry-verified model, never an untested one.
+  it("pickSessionDefaultModel still skips untested fallback entries for the default", () => {
+    const dynamic = [
+      { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
+      { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+    ];
+    expect(pickSessionDefaultModel("claude", dynamic)).toBe("claude-opus-4-8");
   });
 });

@@ -11,6 +11,7 @@ import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
 import { MentionMenu } from "./MentionMenu.js";
+import { CacheRewriteHint } from "./CacheRewriteHint.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
@@ -464,6 +465,11 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
           className="hidden"
           aria-label="Attach images"
         />
+
+        {/* W7(b) prompt-cache hint — only while composing, never blocks send */}
+        {text.trim().length > 0 && !isRunning && (
+          <CacheRewriteHint sessionId={sessionId} reason="idle" className="px-3 sm:px-4 pb-1.5" />
+        )}
 
         {/* Prompt suggestion chips */}
         {promptSuggestions.length > 0 && (

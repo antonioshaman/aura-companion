@@ -18,12 +18,19 @@ interface MockStoreState {
   notificationDesktop: boolean;
   diffBase: string;
   publicUrl: string;
+  sdkSessions: Array<{ sessionId: string; archived?: boolean; backendType?: "claude" | "codex" }>;
+  // Council groups carry the authoritative observer identity; SettingsPage
+  // reads `observerSessionId` off each to exclude observer halves from relaunch.
+  groups: Map<string, { observerSessionId: string }>;
   toggleDarkMode: ReturnType<typeof vi.fn>;
   toggleNotificationSound: ReturnType<typeof vi.fn>;
   setNotificationDesktop: ReturnType<typeof vi.fn>;
   setDiffBase: ReturnType<typeof vi.fn>;
   setPublicUrl: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
+  hydrateSettings: ReturnType<typeof vi.fn>;
+  setProviderConfigured: ReturnType<typeof vi.fn>;
+  loadBackendModels: ReturnType<typeof vi.fn>;
 }
 
 let mockState: MockStoreState;
@@ -35,12 +42,17 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     notificationDesktop: false,
     diffBase: "last-commit",
     publicUrl: "",
+    sdkSessions: [],
+    groups: new Map(),
     toggleDarkMode: vi.fn(),
     toggleNotificationSound: vi.fn(),
     setNotificationDesktop: vi.fn(),
     setDiffBase: vi.fn(),
     setPublicUrl: vi.fn(),
     setEditorTabEnabled: vi.fn(),
+    hydrateSettings: vi.fn(),
+    setProviderConfigured: vi.fn(),
+    loadBackendModels: vi.fn(),
     ...overrides,
   };
 }
@@ -52,6 +64,10 @@ const mockApi = {
   regenerateAuthToken: vi.fn(),
   getAuthQr: vi.fn(),
   verifyAnthropicKey: vi.fn(),
+  relaunchSession: vi.fn(),
+  refreshModels: vi.fn(),
+  getModelDiagnostics: vi.fn(),
+  getDeliveryMetrics: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -67,6 +83,10 @@ vi.mock("../api.js", () => ({
     regenerateAuthToken: (...args: unknown[]) => mockApi.regenerateAuthToken(...args),
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
     verifyAnthropicKey: (...args: unknown[]) => mockApi.verifyAnthropicKey(...args),
+    relaunchSession: (...args: unknown[]) => mockApi.relaunchSession(...args),
+    refreshModels: (...args: unknown[]) => mockApi.refreshModels(...args),
+    getModelDiagnostics: (...args: unknown[]) => mockApi.getModelDiagnostics(...args),
+    getDeliveryMetrics: (...args: unknown[]) => mockApi.getDeliveryMetrics(...args),
   },
 }));
 
@@ -113,10 +133,142 @@ beforeEach(() => {
       { label: "Tailscale", url: "http://100.118.112.23:3456", qrDataUrl: "data:image/png;base64,TS_QR" },
     ],
   });
+  mockApi.relaunchSession.mockResolvedValue({ ok: true });
+  mockApi.refreshModels.mockResolvedValue({ claude: "ok", codex: "ok" });
+  mockApi.getDeliveryMetrics.mockResolvedValue({
+    stallThresholdMs: 60_000,
+    global: { userMessages: 5, firstOutputs: 5, stalledMessages: 0, noResponseRequestedReplies: 0, driftRecoveries: 0, nudges: 0, backgroundTasksKilled: 0, awaitingReply: 0 },
+    timeToFirstOutputMs: { count: 5, avg: 2000, p50Bucket: 2500, p95Bucket: 5000, max: 4000 },
+    sessions: {},
+  });
+  mockApi.getModelDiagnostics.mockResolvedValue({
+    companionHome: "/home/tester/.companion",
+    anthropic: {
+      keyConfigured: true,
+      cachePresent: true,
+      cacheFetchedAt: 1_700_000_000_000,
+      cacheModelCount: 12,
+    },
+    codex: {
+      present: true,
+      fetchedAt: "2026-07-01T10:00:00.000Z",
+      clientVersion: "0.9.1",
+      listedModelCount: 4,
+    },
+  });
   mockTelemetry.getTelemetryPreferenceEnabled.mockReturnValue(true);
 });
 
 describe("SettingsPage", () => {
+  // The reply-delivery indicator lives next to the model diagnostics and
+  // loads its own snapshot from GET /api/metrics/delivery.
+  it("shows the reply delivery indicator in the diagnostics area", async () => {
+    render(<SettingsPage />);
+    expect(await screen.findByText("Reply delivery")).toBeInTheDocument();
+    expect(await screen.findByText("All messages answered")).toBeInTheDocument();
+    expect(mockApi.getDeliveryMetrics).toHaveBeenCalled();
+  });
+
+  describe("Session defaults (aura-diet: solo by default, KB on demand)", () => {
+    it("shows solo + KB auto-load off when the server omits the fields (older server)", async () => {
+      render(<SettingsPage />);
+      const solo = await screen.findByRole("radio", { name: /Solo/ });
+      await waitFor(() => expect(solo).toBeChecked());
+      expect(screen.getByRole("switch", { name: "Load knowledge base at session start" })).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("hydrates council + KB on from the server", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        defaultSessionMode: "council",
+        kbAutoPrime: true,
+      });
+      render(<SettingsPage />);
+      await waitFor(() => expect(screen.getByRole("radio", { name: /Council/ })).toBeChecked());
+      expect(screen.getByRole("switch", { name: "Load knowledge base at session start" })).toHaveAttribute("aria-checked", "true");
+    });
+
+    it("persists a mode change and a KB toggle via updateSettings", async () => {
+      render(<SettingsPage />);
+      const council = await screen.findByRole("radio", { name: /Council/ });
+      await waitFor(() => expect(council).not.toBeDisabled());
+      fireEvent.click(council);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ defaultSessionMode: "council" }));
+      fireEvent.click(screen.getByRole("switch", { name: "Load knowledge base at session start" }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAutoPrime: true }));
+    });
+
+    // Usage-limit auto-resume: default on (older server omits the field),
+    // hydrates an opt-out, and persists a toggle via updateSettings.
+    it("shows auto-resume on by default and persists switching it off", async () => {
+      render(<SettingsPage />);
+      const sw = await screen.findByRole("switch", { name: "Автопродолжение после лимита" });
+      await waitFor(() => expect(sw).not.toBeDisabled());
+      expect(sw).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(sw);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ autoResumeAfterLimit: false }));
+      expect(sw).toHaveAttribute("aria-checked", "false");
+    });
+
+    // Diagnostics Knowledge analysis block (review beck #7, abramov P2-1):
+    // saves send the documented payload; a failed save rolls back to the last
+    // server-confirmed value and shows the error; only the latest save wins.
+    it("persists thresholds and the memory switch, and rolls back a failed save", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
+      });
+      render(<SettingsPage />);
+      const days = await screen.findByLabelText("Maximum days between analyses");
+      await waitFor(() => expect(days).not.toBeDisabled());
+
+      mockApi.updateSettings.mockResolvedValueOnce({ kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 7 } });
+      fireEvent.change(days, { target: { value: "7" } });
+      fireEvent.blur(days);
+      await waitFor(() =>
+        expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 7 } }),
+      );
+      await waitFor(() => expect(days).toHaveValue(7));
+
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("disk full"));
+      fireEvent.change(days, { target: { value: "3" } });
+      fireEvent.blur(days);
+      await waitFor(() => expect(days).toHaveValue(7)); // last confirmed, not the 14 from page load
+      expect(await screen.findByText(/disk full/)).toBeInTheDocument();
+
+      const sw = screen.getByRole("switch", { name: "Memory report on the Diagnostics page" });
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("nope"));
+      fireEvent.click(sw);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ diagnosticsMemoryReport: true }));
+      await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "false"));
+    });
+
+    it("hydrates auto-resume off from the server", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        autoResumeAfterLimit: false,
+      });
+      render(<SettingsPage />);
+      await waitFor(() =>
+        expect(screen.getByRole("switch", { name: "Автопродолжение после лимита" })).toHaveAttribute("aria-checked", "false"),
+      );
+    });
+
+    it("reverts the KB toggle and shows the error when saving fails", async () => {
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("save failed"));
+      render(<SettingsPage />);
+      const sw = await screen.findByRole("switch", { name: "Load knowledge base at session start" });
+      await waitFor(() => expect(sw).not.toBeDisabled());
+      fireEvent.click(sw);
+      await screen.findByText("save failed");
+      expect(sw).toHaveAttribute("aria-checked", "false");
+    });
+  });
+
   it("loads settings on mount and shows configured status", async () => {
     render(<SettingsPage />);
 
@@ -317,6 +469,19 @@ describe("SettingsPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Usage analytics and errors/i }));
     expect(mockTelemetry.setTelemetryPreferenceEnabled).toHaveBeenCalledWith(false);
+  });
+
+  // The anonymous usage counter is a SEPARATE, server-side opt-out (persisted
+  // via PUT /settings telemetryEnabled) distinct from the PostHog preference
+  // above. It defaults On (opt-out model); clicking turns it off and writes
+  // the change to the server so the install stops reporting to the global
+  // usage aggregator.
+  it("toggles the anonymous usage counter and persists to the server", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    fireEvent.click(screen.getByRole("button", { name: /Anonymous usage counter/i }));
+    expect(mockApi.updateSettings).toHaveBeenCalledWith({ telemetryEnabled: false });
   });
 
   it("navigates to environments page from settings", async () => {
@@ -1013,6 +1178,214 @@ describe("SettingsPage", () => {
     });
   });
 
+  // Credential-only save (Friedman F1 / #3): saving must NOT silently relaunch
+  // live sessions. Instead it discloses how many still run on the old creds so
+  // the user can apply them via the explicit Relaunch button(s).
+  it("does not auto-relaunch on save; discloses affected sessions instead", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+        { sessionId: "codex-archived", backendType: "codex", archived: true },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: false,
+      openaiApiKeyConfigured: false,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+    mockApi.updateSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: false,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token not configured");
+
+    fireEvent.change(screen.getByLabelText("OpenAI API Key (Codex)"), {
+      target: { value: "sk-test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
+
+    await screen.findByText("Provider settings saved.");
+    // No relaunch happens on save.
+    expect(mockApi.relaunchSession).not.toHaveBeenCalled();
+    // Only the active codex session (codex-live) is affected; the archived one
+    // is excluded.
+    expect(
+      screen.getByText(/1 active session\(s\) still use the previous credentials/),
+    ).toBeInTheDocument();
+  });
+
+  it("manually relaunches active claude sessions via the explicit button", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    // Label carries the live count of affected sessions (P3 #15).
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Claude Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("claude-live");
+    });
+    // findByText (not getByText): the notice is set after `await Promise.allSettled`
+    // resolves, one microtask AFTER the awaited relaunchSession call the waitFor
+    // above gates on — so a synchronous getByText races the state update.
+    expect(await screen.findByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+  });
+
+  // The codex relaunch button is independently wired to the codex session set.
+  it("manually relaunches active codex sessions via the explicit button", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Codex Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("codex-live");
+    });
+    // findByText (not getByText): the notice is set after `await Promise.allSettled`
+    // resolves, one microtask AFTER the awaited relaunchSession call the waitFor
+    // above gates on — so a synchronous getByText races the state update.
+    expect(await screen.findByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+  });
+
+  // Council OBSERVER halves are server-managed companions; the relaunch filter
+  // must exclude them so Settings never restarts an observer mid-review (#2).
+  it("excludes council observer sessions from the relaunch count", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-orchestrator", backendType: "claude" },
+        { sessionId: "claude-observer", backendType: "claude" },
+      ],
+      groups: new Map([
+        ["grp_1", { observerSessionId: "claude-observer" }],
+      ]),
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    // Two claude sessions exist but one is an observer → count is 1.
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Claude Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("claude-orchestrator");
+    });
+  });
+
+  // Promise.allSettled partial-failure surfaces ONE error message rather than a
+  // conflicting info+error pair (Friedman F5 / #11).
+  it("surfaces a single error message on partial relaunch failure", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-a", backendType: "claude" },
+        { sessionId: "claude-b", backendType: "claude" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+    mockApi.relaunchSession
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error("boom"));
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 2 Active Claude Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      await screen.findByText(/Relaunched 1 of 2 session\(s\); 1 could not be relaunched/),
+    ).toBeInTheDocument();
+  });
+
+  // When no active sessions match a provider, the relaunch button is disabled
+  // via aria-disabled (kept focusable for SR users, a11y F3) and labelled so the
+  // disabled reason is self-evident (#12).
+  it("aria-disables relaunch buttons with an explanatory label when no sessions match", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "codex-archived", backendType: "codex", archived: true },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    const claudeBtn = screen.getByRole("button", { name: "No Active Claude Sessions" });
+    const codexBtn = screen.getByRole("button", { name: "No Active Codex Sessions" });
+    expect(claudeBtn).toHaveAttribute("aria-disabled", "true");
+    expect(codexBtn).toHaveAttribute("aria-disabled", "true");
+
+    // The guard prevents the API call even if a click lands on the control.
+    fireEvent.click(claudeBtn);
+    expect(mockApi.relaunchSession).not.toHaveBeenCalled();
+  });
+
   // Verifies that the save button is disabled when both provider inputs are empty
   it("disables Save Provider Settings button when no inputs have values", async () => {
     mockApi.getSettings.mockResolvedValueOnce({
@@ -1051,6 +1424,112 @@ describe("SettingsPage", () => {
     expect(providersSection).toBeInTheDocument();
 
     const results = await axe(providersSection!);
+    expect(results).toHaveNoViolations();
+  });
+
+  // ─── Model list / diagnostics section tests ──────────────────────────────
+  //
+  // The Model list panel force-refreshes the Anthropic + Codex model caches and
+  // surfaces which COMPANION_HOME the running server reads plus per-cache
+  // freshness — so a key saved under a diverging home (the original bug that
+  // made fable-5 appear billable) is diagnosable rather than a mystery.
+
+  // On mount the panel fetches diagnostics and renders the config home + both
+  // cache summaries from the GET /settings/diagnostics response.
+  it("loads and renders model diagnostics on mount", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    await waitFor(() => {
+      expect(mockApi.getModelDiagnostics).toHaveBeenCalled();
+    });
+
+    // Config home path is surfaced verbatim (feature's whole point).
+    expect(await screen.findByText("/home/tester/.companion")).toBeInTheDocument();
+    // Anthropic cache summary: "<count> models · <formatted ts>".
+    expect(screen.getByText(/12 models/)).toBeInTheDocument();
+    // Codex cache summary: "<count> models · v<version> · <formatted ts>".
+    expect(screen.getByText(/4 models · v0\.9\.1/)).toBeInTheDocument();
+  });
+
+  // Clicking "Refresh models" calls the force-refresh endpoint, repopulates
+  // BOTH backend dropdowns from the store, re-fetches diagnostics, and shows the
+  // per-backend result banner.
+  it("refreshes models and shows the result banner", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+    // Clear the mount-time diagnostics call so we can assert the refresh re-fetch.
+    mockApi.getModelDiagnostics.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    await waitFor(() => {
+      expect(mockApi.refreshModels).toHaveBeenCalledTimes(1);
+    });
+    // Both dropdowns repopulate from the freshly-primed caches.
+    expect(mockState.loadBackendModels).toHaveBeenCalledWith("claude");
+    expect(mockState.loadBackendModels).toHaveBeenCalledWith("codex");
+    // Diagnostics are re-fetched after the refresh so the panel reflects new mtimes.
+    await waitFor(() => {
+      expect(mockApi.getModelDiagnostics).toHaveBeenCalled();
+    });
+    // The per-backend outcome banner is shown.
+    expect(await screen.findByText(/Refreshed — Claude: ok, Codex: ok\./)).toBeInTheDocument();
+  });
+
+  // A failing refresh surfaces the error message in the panel rather than
+  // silently swallowing it, and the button returns to its idle label.
+  it("shows an error when refresh fails and re-enables the button", async () => {
+    mockApi.refreshModels.mockRejectedValueOnce(new Error("refresh boom"));
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    expect(await screen.findByText("refresh boom")).toBeInTheDocument();
+    // Button label reverts from "Refreshing..." back to the idle state.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Refresh models" })).toBeEnabled();
+    });
+  });
+
+  // When the Codex CLI is not installed the diagnostics response carries
+  // { present: false } and the panel shows the "not installed" fallback rather
+  // than a malformed summary string.
+  it("shows 'not installed' when the Codex model cache is absent", async () => {
+    mockApi.getModelDiagnostics.mockResolvedValue({
+      companionHome: "/home/tester/.companion",
+      anthropic: {
+        keyConfigured: false,
+        cachePresent: false,
+        cacheFetchedAt: null,
+        cacheModelCount: null,
+      },
+      codex: { present: false },
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    expect(await screen.findByText("not installed")).toBeInTheDocument();
+    // With no key and no cache, the anthropic row shows the "no key" fallback.
+    expect(screen.getByText("no key configured")).toBeInTheDocument();
+  });
+
+  // Axe accessibility scan for the Model list panel (button + dl/dt/dd list).
+  it("passes axe accessibility checks for the Model list panel", async () => {
+    const { axe } = await import("vitest-axe");
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+    // Ensure the diagnostics have loaded so the dl is present in the scan.
+    await screen.findByText("/home/tester/.companion");
+
+    const anthropicSection = document.getElementById("anthropic");
+    expect(anthropicSection).toBeInTheDocument();
+
+    const results = await axe(anthropicSection!);
     expect(results).toHaveNoViolations();
   });
 });

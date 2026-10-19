@@ -1,0 +1,60 @@
+# AuraBench task mined from PR #10 ("feat(council): add POST /api/sessions/:id/council/checkpoint producer endpoint").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-checkpoint-producer-endpoint
+title: "Council orchestrator sessions can publish checkpoints over REST"
+start_commit: 1fa3aa11721a132d6c2343717c7deb437ee598b3
+prompt: |
+  Council Mode has a checkpoint schema, a filesystem watcher on
+  `.council/checkpoints/` and an observer wake pipeline — but nothing in
+  production ever writes a checkpoint, so observers are never woken.
+
+  Add `POST /api/sessions/:id/council/checkpoint` that lets the orchestrator
+  half of a Council pair publish a checkpoint payload into its workspace's
+  `.council/checkpoints/<phase>.json`, where the observer's wake pipeline
+  picks it up. Responses (JSON with an `error`
+  message on failure):
+  - 404 when the session does not exist ("not found");
+  - 409 when the session is not part of a Council group ("… council group …");
+  - 403 when the caller is the observer half ("only the orchestrator …");
+  - 400 when the body fails checkpoint schema validation ("… schema
+    validation …") or when its `session_group_id` does not match the caller's
+    group ("session_group_id … does not match …");
+  - 200 `{ ok: true, sessionGroupId, checkpointId, phase, sequence, written }`
+    on success, where `written` is the absolute path of the file.
+
+  To authorize callers, add a public
+  `SessionOrchestrator.getCouncilGroupBySessionId(sessionId)` returning
+  `{ sessionGroupId, role: "orchestrator" | "observer" }` or `null`, without
+  exposing the orchestrator's internal group map.
+expected_files:
+  - web/server/routes.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/routes.test.ts
+failure_modes:
+  - "the observer half can write checkpoints"
+  - "a checkpoint can be written into another group's workspace"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 10
+  merge_commit: 4e381ec547ad86e07605839f62739c040e1fbbb5
+  class: feature
+  hidden_tests:
+    - web/server/routes.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:15:12.517Z"

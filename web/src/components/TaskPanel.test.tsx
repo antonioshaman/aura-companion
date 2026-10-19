@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { getDefaultConfig, type TaskPanelConfig } from "./task-panel-sections.js";
+import { axe } from "vitest-axe";
+import { getDefaultConfig, getInitialTaskPanelConfig, type TaskPanelConfig } from "./task-panel-sections.js";
 
 vi.mock("../api.js", () => ({
   api: {
@@ -59,6 +60,7 @@ interface TaskItemMock {
 interface MockStoreState {
   sessionTasks: Map<string, TaskItemMock[]>;
   sessionTasksUpdatedAt: Map<string, number>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
   sessions: Map<string, {
     backend_type?: string;
     cwd?: string;
@@ -97,6 +99,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
   mockState = {
     sessionTasks: new Map(),
     sessionTasksUpdatedAt: new Map(),
+    sessionStatus: new Map(),
     sessions: new Map([["s1", { backend_type: "codex" }]]),
     sdkSessions: [],
     taskPanelOpen: true,
@@ -125,7 +128,7 @@ vi.mock("../store.js", () => ({
   ),
 }));
 
-import { TaskPanel, GitHubPRDisplay, CodexRateLimitsSection, CodexTokenDetailsSection } from "./TaskPanel.js";
+import { TaskPanel, GitHubPRDisplay, CodexRateLimitsSection, CodexTokenDetailsSection, ClaudeContextSection } from "./TaskPanel.js";
 import { api } from "../api.js";
 import type { GitHubPRInfo } from "../api.js";
 
@@ -147,8 +150,9 @@ describe("TaskPanel", () => {
   });
 
   it("keeps a single scroll container for long MCP content even without tasks", () => {
-    // Regression coverage: Codex sessions do not render the Tasks list,
-    // so the panel itself must still provide vertical scrolling.
+    // Regression coverage: with no seeded tasks the Tasks section renders only
+    // its empty-state hint (no inner scroll container), so the panel itself
+    // must still provide the single vertical scroller.
     const { container } = render(<TaskPanel sessionId="s1" />);
 
     expect(screen.getByTestId("mcp-section")).toBeInTheDocument();
@@ -171,15 +175,17 @@ describe("TaskPanel", () => {
     expect(screen.queryByTestId("task-panel-content")).not.toBeInTheDocument();
   });
 
-  it("does not show tasks section for Codex sessions (backend filter)", () => {
-    // The "tasks" section is claude-only — it should not appear for Codex
+  it("shows tasks section for Codex sessions (backend-agnostic)", () => {
+    // The "tasks" section is no longer claude-only: Codex plan updates feed the
+    // same `sessionTasks` store via synthetic TodoWrite frames, so the section
+    // and its config row must appear for Codex too.
     resetStore({
       sessions: new Map([["s1", { backend_type: "codex" }]]),
       taskPanelConfigMode: true,
     });
     render(<TaskPanel sessionId="s1" />);
-    // Tasks section config row should not exist for Codex
-    expect(screen.queryByTestId("config-section-tasks")).not.toBeInTheDocument();
+    // Tasks section config row now exists for Codex
+    expect(screen.getByTestId("config-section-tasks")).toBeInTheDocument();
     // Other sections should still be present
     expect(screen.getByTestId("config-section-usage-limits")).toBeInTheDocument();
   });
@@ -213,7 +219,8 @@ describe("TaskPanel", () => {
   });
 
   it("renders toggle switches for all applicable sections in config mode", () => {
-    // Codex should see 5 sections (all except "tasks" which is claude-only)
+    // Every section is backend-agnostic now, so Codex (the default s1 backend)
+    // sees all 6 toggles including "tasks".
     resetStore({ taskPanelConfigMode: true });
     render(<TaskPanel sessionId="s1" />);
     expect(screen.getByTestId("toggle-usage-limits")).toBeInTheDocument();
@@ -221,6 +228,7 @@ describe("TaskPanel", () => {
     expect(screen.getByTestId("toggle-github-pr")).toBeInTheDocument();
     expect(screen.getByTestId("toggle-linear-issue")).toBeInTheDocument();
     expect(screen.getByTestId("toggle-mcp-servers")).toBeInTheDocument();
+    expect(screen.getByTestId("toggle-tasks")).toBeInTheDocument();
   });
 
   it("calls toggleSectionEnabled when toggle is clicked", () => {
@@ -258,6 +266,102 @@ describe("TaskPanel", () => {
     const rows = screen.getAllByTestId(/^config-section-/);
     expect(rows[0]).toHaveAttribute("data-testid", "config-section-mcp-servers");
     expect(rows[1]).toHaveAttribute("data-testid", "config-section-usage-limits");
+  });
+});
+
+describe("TasksSection — Codex", () => {
+  // Codex plan updates arrive as synthetic TodoWrite frames (codex-adapter
+  // `handleTurnPlanUpdated`) and land in `sessionTasks` exactly like Claude's
+  // TodoWrite. The section was previously gated claude-only; these tests lock
+  // in that it renders, is accessible, and safely displays LLM-authored text
+  // for a Codex session.
+  const CODEX_TASKS = [
+    { id: "1", subject: "Plan the migration", status: "completed" },
+    { id: "2", subject: "Write the adapter", status: "in_progress", activeForm: "Writing the adapter" },
+    { id: "3", subject: "Add tests", status: "pending" },
+  ];
+
+  function seedCodex(extra: Record<string, unknown> = {}) {
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "codex" }]]),
+      sessionTasks: new Map([["s1", CODEX_TASKS]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
+      sessionStatus: new Map([["s1", "running"]]),
+      ...extra,
+    });
+  }
+
+  it("renders the agent task list for a Codex session", () => {
+    seedCodex();
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByText("Plan the migration")).toBeInTheDocument();
+    expect(screen.getByText("Write the adapter")).toBeInTheDocument();
+    expect(screen.getByText("Add tests")).toBeInTheDocument();
+  });
+
+  it("has no axe violations with Codex tasks rendered", async () => {
+    seedCodex();
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("shows the completed/total badge for Codex tasks", () => {
+    // useSectionBadge renders `${completed}/${total}` — 1 of 3 completed here.
+    seedCodex();
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByText("1/3")).toBeInTheDocument();
+  });
+
+  it("renders a todo subject containing markup as inert text (no injection)", () => {
+    // Codex plan text is LLM-authored; it must render escaped, never parsed.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "codex" }]]),
+      sessionTasks: new Map([["s1", [
+        { id: "1", subject: "<b>x</b> <script>alert(1)</script>", status: "pending" },
+      ]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
+    });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByText("<b>x</b> <script>alert(1)</script>")).toBeInTheDocument();
+    expect(container.querySelector("b")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("exposes the tasks section in the config view for Codex (customizable)", () => {
+    seedCodex({ taskPanelConfigMode: true });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByTestId("config-section-tasks")).toBeInTheDocument();
+    expect(screen.getByTestId("toggle-tasks")).toBeInTheDocument();
+  });
+
+  it("keeps tasks visible for a Codex session from a legacy persisted config", () => {
+    // Existing Codex users already have `tasks` in their stored order/enabled
+    // (the old gate was a render filter, never a persistence filter). Flipping
+    // backends:null must not hide it for them on the next load. The fixture is
+    // a LITERAL pre-Task-6 stored config (review B-8), loaded through the real
+    // forward-merge loader — not today's getDefaultConfig().
+    const legacy = {
+      order: ["tasks", "usage-limits", "git-branch", "github-pr", "linear-issue", "mcp-servers"],
+      enabled: { tasks: true, "usage-limits": true, "git-branch": false, "github-pr": true, "linear-issue": true, "mcp-servers": true },
+    };
+    localStorage.setItem("cc-task-panel-config", JSON.stringify(legacy));
+    try {
+      const loaded = getInitialTaskPanelConfig();
+      expect(loaded.order).toContain("tasks");
+      expect(loaded.enabled.tasks).toBe(true);
+      seedCodex({ taskPanelConfig: loaded });
+      render(<TaskPanel sessionId="s1" />);
+      expect(screen.getByText("Add tests")).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("cc-task-panel-config");
+    }
+  });
+
+  it("toggling the tasks section in the Codex config view calls the store action (review B-9)", () => {
+    seedCodex({ taskPanelConfigMode: true });
+    render(<TaskPanel sessionId="s1" />);
+    fireEvent.click(screen.getByTestId("toggle-tasks"));
+    expect(mockState.toggleSectionEnabled).toHaveBeenCalledWith("tasks");
   });
 });
 
@@ -425,6 +529,45 @@ describe("CodexTokenDetailsSection", () => {
   });
 });
 
+// Claude sessions never surfaced context% even though the value is already in
+// the store (derived from result.modelUsage.contextWindow). This section adds
+// parity with Codex's context meter.
+describe("ClaudeContextSection", () => {
+  it("renders nothing when context_used_percent is 0 (fresh session, no turns yet)", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 0 }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText("Context")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing when context_used_percent is absent", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("renders the Context meter with the stored percent once usage exists", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 37 }]]) });
+    render(<ClaudeContextSection sessionId="s1" />);
+    expect(screen.getByText("Context")).toBeInTheDocument();
+    expect(screen.getByText("37%")).toBeInTheDocument();
+  });
+
+  it("uses the server-computed (capped) percent verbatim", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 100 }]]) });
+    render(<ClaudeContextSection sessionId="s1" />);
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks", async () => {
+    const { axe } = await import("vitest-axe");
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 42 }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+
 describe("TaskPanel — close button behavior", () => {
   it("calls setTaskPanelOpen(false) when close button is clicked in normal mode", () => {
     // In normal mode, clicking the close button should close the panel entirely
@@ -491,10 +634,11 @@ describe("TaskPanel — config mode interactions", () => {
     // The first section's up button and last section's down button should be disabled
     resetStore({ taskPanelConfigMode: true });
     render(<TaskPanel sessionId="s1" />);
-    // For Codex, "usage-limits" is first, "mcp-servers" is last (tasks is claude-only)
+    // All sections are backend-agnostic now: "usage-limits" is first, "tasks"
+    // is last (default order), for Codex and Claude alike.
     const upFirst = screen.getByTestId("move-up-usage-limits");
     expect(upFirst).toBeDisabled();
-    const downLast = screen.getByTestId("move-down-mcp-servers");
+    const downLast = screen.getByTestId("move-down-tasks");
     expect(downLast).toBeDisabled();
   });
 });
@@ -589,8 +733,9 @@ describe("TasksSection (Claude Code sessions)", () => {
     expect(taskText.className).toContain("line-through");
   });
 
-  it("does not render TasksSection for Codex sessions", () => {
-    // Codex backend sessions should not show the Tasks section at all
+  it("renders TasksSection for Codex sessions (backend-agnostic)", () => {
+    // Codex plan updates feed the same `sessionTasks` store, so the Tasks
+    // section now renders for Codex backends too (was previously hidden).
     resetStore({
       sessions: new Map([["s1", { backend_type: "codex" }]]),
       sessionTasks: new Map([
@@ -598,37 +743,43 @@ describe("TasksSection (Claude Code sessions)", () => {
       ]),
     });
     render(<TaskPanel sessionId="s1" />);
-    expect(screen.queryByText("Tasks")).not.toBeInTheDocument();
-    expect(screen.queryByText("Some task")).not.toBeInTheDocument();
+    expect(screen.getByText("Tasks")).toBeInTheDocument();
+    expect(screen.getByText("Some task")).toBeInTheDocument();
   });
 
-  it("shows a fresh snapshot hint when tasks were updated recently", () => {
-    // The "updated N ago" line makes explicit that the panel is a point-in-time
-    // mirror of the agent's last TodoWrite, not a live progress tracker.
+  it("shows a fresh 'Updated' hint (muted) when an idle session's list is recent", () => {
+    // Fresh + idle is the plain healthy snapshot: the panel mirrors the agent's
+    // last TodoWrite and it is recent, so the copy is a bare "Updated N ago" in
+    // the muted color — no warning framing.
     resetStore({
       sessions: new Map([["s1", { backend_type: "claude" }]]),
-      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "completed", subject: "Work" }]]]),
       sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
     });
     render(<TaskPanel sessionId="s1" />);
-    const hint = screen.getByText(/Snapshot · updated/);
+    const hint = screen.getByText(/^Updated /);
     expect(hint).toBeInTheDocument();
-    // Recent snapshot uses the muted (not warning) color
     expect(hint.className).toContain("text-cc-muted");
     expect(hint.className).not.toContain("text-cc-warning");
   });
 
-  it("flags the snapshot as stale (warning color) when older than 5 minutes", () => {
-    // A frozen/abandoned todo list (agent finished but never emitted a closing
-    // TodoWrite) is the worst case — the warning color signals it may not reflect reality.
+  it("gives idle + stale its own distinct 'Idle · list last updated' sentence (muted)", () => {
+    // The abandoned-list case: session idle, list old. It must NOT read identical
+    // to a fresh snapshot (Council Review #5/Friedman #1) — it gets its own
+    // sentence so the user can tell "finished and abandoned" from "healthy fresh".
+    // It stays MUTED, not amber: an idle old snapshot is not an active alarm, and
+    // amber here would be warning-fatigue (Council Review #6).
     resetStore({
       sessions: new Map([["s1", { backend_type: "claude" }]]),
-      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "completed", subject: "Work" }]]]),
       sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "idle"]]),
     });
     render(<TaskPanel sessionId="s1" />);
-    const hint = screen.getByText(/Snapshot · updated/);
-    expect(hint.className).toContain("text-cc-warning");
+    const hint = screen.getByText(/Idle · list last updated/);
+    expect(hint.className).toContain("text-cc-muted");
+    expect(hint.className).not.toContain("text-cc-warning");
+    expect(screen.queryByText(/Agent active/)).not.toBeInTheDocument();
   });
 
   it("omits the snapshot hint when no update timestamp is known", () => {
@@ -639,7 +790,95 @@ describe("TasksSection (Claude Code sessions)", () => {
       sessionTasksUpdatedAt: new Map(),
     });
     render(<TaskPanel sessionId="s1" />);
-    expect(screen.queryByText(/Snapshot · updated/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Updated|Idle|Agent active/)).not.toBeInTheDocument();
+  });
+
+  it("flags 'list may be behind' (amber) when running + stale + nothing in-flight", () => {
+    // The provably-behind state: the agent is producing frames (running), the
+    // snapshot is stale, and there is NO in-progress task explaining the silence.
+    // Only this state earns the amber "may be behind" framing (Council Review
+    // #5/#6). The visible copy states the mental model ("may be behind") directly,
+    // not just the mechanism.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Agent active · list may be behind/);
+    expect(hint.className).toContain("text-cc-warning");
+    // Neutral / other-state wordings must be absent.
+    expect(screen.queryByText(/Idle · list last updated/)).not.toBeInTheDocument();
+  });
+
+  it("treats 'compacting' as running for the may-be-behind state", () => {
+    // compacting is a live server-side state — the agent has not gone idle, so a
+    // stale list with nothing in-flight is still provably behind.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "compacting"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByText(/Agent active · list may be behind/)).toBeInTheDocument();
+  });
+
+  it("does NOT flag may-be-behind when a long in-progress task explains the silence (#6)", () => {
+    // A single long-running in-progress step (big build, long test) has no
+    // task-state transition to emit, so wall-clock staleness alone is not evidence
+    // the list is behind. This must read as the neutral "Agent active · updated"
+    // — amber here would be a false alarm on healthy long work (Council Review #6).
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Big build" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 8 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Agent active · updated/);
+    expect(hint.className).toContain("text-cc-muted");
+    expect(hint.className).not.toContain("text-cc-warning");
+    expect(screen.queryByText(/may be behind/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT flag may-be-behind when running but the list is fresh", () => {
+    // Running alone must not trigger the warning — a fresh list is being kept
+    // current, which is exactly the healthy case.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Agent active · updated/);
+    expect(hint.className).toContain("text-cc-muted");
+    expect(hint.className).not.toContain("text-cc-warning");
+    expect(screen.queryByText(/may be behind/)).not.toBeInTheDocument();
+  });
+
+  it("marks the may-be-behind dot aria-hidden and announces state via a polite live region (#13)", () => {
+    // The colored dot is decorative and must be hidden from the a11y tree; the
+    // discrete state transition is instead surfaced to screen readers through a
+    // separate polite live region that carries the state phrase WITHOUT the
+    // relative timestamp (so 30s "N ago" ticks do not re-announce).
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    // The dot is aria-hidden (decorative).
+    const dot = container.querySelector('span[aria-hidden].rounded-full');
+    expect(dot).toBeTruthy();
+    // The live region announces the state phrase, without a timestamp.
+    const live = container.querySelector('span[aria-live="polite"]');
+    expect(live).toBeTruthy();
+    expect(live?.textContent).toMatch(/behind the agent's live progress/);
+    expect(live?.textContent).not.toMatch(/ago/);
   });
 });
 
@@ -904,29 +1143,38 @@ describe("GitHubPRDisplay", () => {
 });
 
 describe("TaskPanel — backend detection via sdkSessions", () => {
-  it("uses sdkSession backendType when session lacks backend_type", () => {
-    // If the session object does not have backend_type, the panel should
-    // fall back to the SDK session's backendType for filtering sections
+  // Every section is backend-agnostic since Task 6, so backend detection is
+  // only observable where a section renders backend-SPECIFIC content: the
+  // usage-limits renderer picks Codex rate limits vs Claude context (review
+  // B-6 — the old assertions on the Tasks section could no longer fail).
+  const usage = {
+    codex_rate_limits: {
+      primary: { usedPercent: 62, windowDurationMins: 300, resetsAt: Date.now() + 7_200_000 },
+      secondary: null,
+    },
+    context_used_percent: 40,
+  };
+
+  it("falls back to the sdkSession backendType when the session lacks backend_type", () => {
+    // The live session object has no backend_type yet; the REST snapshot says codex.
     resetStore({
-      sessions: new Map([["s1", {}]]),
+      sessions: new Map([["s1", { ...usage }]]),
       sdkSessions: [{ sessionId: "s1", backendType: "codex" }],
-      taskPanelConfigMode: true,
     });
     render(<TaskPanel sessionId="s1" />);
-    // Tasks section is claude-only, so it should not appear for Codex
-    expect(screen.queryByTestId("config-section-tasks")).not.toBeInTheDocument();
+    // Codex rate limits render only on the Codex branch of the usage renderer.
+    expect(screen.getByText("5h Limit")).toBeInTheDocument();
   });
 
-  it("treats unknown backend as claude (shows tasks section)", () => {
-    // When no backend_type is specified at all, it defaults to claude behavior
+  it("treats an unknown backend as claude (no Codex limits rendered)", () => {
     resetStore({
-      sessions: new Map([["s1", {}]]),
+      sessions: new Map([["s1", { ...usage }]]),
       sdkSessions: [],
-      taskPanelConfigMode: true,
     });
     render(<TaskPanel sessionId="s1" />);
-    // Without a codex backend, tasks section should be visible
-    expect(screen.getByTestId("config-section-tasks")).toBeInTheDocument();
+    // Same session data, no codex signal anywhere → Claude branch: the Codex
+    // limits are ignored even though the session carries them.
+    expect(screen.queryByText("5h Limit")).not.toBeInTheDocument();
   });
 });
 
@@ -1069,6 +1317,51 @@ describe("UsageLimitsSection (Claude Code sessions)", () => {
     render(<TaskPanel sessionId="s1" />);
     expect(await screen.findByText("5h Limit")).toBeInTheDocument();
     // Extra should NOT be shown since 5h is available
+    expect(screen.queryByText("Extra")).not.toBeInTheDocument();
+  });
+
+  it("surfaces the overage-disabled state alongside 5h/7d bars", async () => {
+    // Regression: the panel used to hide extra_usage whenever a 5h/7d bar existed,
+    // which is exactly the condition behind an "out of extra usage" 429. The
+    // disabled reason must now be shown so the panel stops contradicting a
+    // truthful rejection.
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({
+      five_hour: { utilization: 99, resets_at: null },
+      seven_day: { utilization: 62, resets_at: null },
+      extra_usage: {
+        is_enabled: false,
+        monthly_limit: 100,
+        used_credits: 0,
+        utilization: null,
+        disabled_reason: "out_of_credits",
+      },
+    });
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("5h Limit")).toBeInTheDocument();
+    // The disabled reason renders in human-readable form.
+    expect(screen.getByText(/Disabled · Out of credits/)).toBeInTheDocument();
+  });
+
+  it("does not surface extra when disabled with no reason", async () => {
+    // is_enabled false but no disabled_reason → nothing actionable to show.
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: null,
+      extra_usage: {
+        is_enabled: false,
+        monthly_limit: 100,
+        used_credits: 0,
+        utilization: null,
+      },
+    });
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("5h Limit")).toBeInTheDocument();
     expect(screen.queryByText("Extra")).not.toBeInTheDocument();
   });
 
@@ -1393,6 +1686,22 @@ describe("TaskPanel accessibility", () => {
           { id: "t3", status: "pending", subject: "Upcoming task" },
         ]],
       ]),
+    });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("passes axe in the may-be-behind state (decorative dot is aria-hidden, live region present)", async () => {
+    // The may-be-behind badge adds a decorative static dot + a polite live region
+    // — assert neither introduces an accessibility violation (dot is aria-hidden,
+    // text carries the meaning, live region is a bare sr-only span).
+    const { axe } = await import("vitest-axe");
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
     });
     const { container } = render(<TaskPanel sessionId="s1" />);
     const results = await axe(container);

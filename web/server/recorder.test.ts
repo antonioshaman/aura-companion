@@ -783,3 +783,97 @@ describe("RecorderManager — auth-probe exclusion via disableForSession", () =>
     mgr.closeAll();
   });
 });
+
+// ─── Replay-style regression: policy v2 (2026-10 leak) ────────────────────────
+//
+// Recordings with `redactionApplied: true` still contained npm/Gonka/Telegram
+// tokens, KEY=value assignments, 0x 64-hex keys and escape-adjacent sk-/gh
+// tokens. This test replays a fixture of realistic frames — every direction
+// and channel the bridge records — carrying SYNTHETIC secrets through the
+// RecorderManager, then greps the bytes on disk. Nothing secret may survive.
+describe("RecorderManager — v2 redaction replay fixture", () => {
+  const f = (n: number) => Array.from({ length: n }, (_, i) => "aB3dE5gH7jK9mN1pQ"[i % 17]).join("");
+  const SECRETS = {
+    npm: `npm_${f(36)}`,
+    gonka: `gnk-${f(40)}`,
+    telegram: `987654321:AA${f(33)}`,
+    oauth: `sk-ant-oat01-${f(80)}`,
+    github: `ghp_${f(36)}`,
+    envValue: f(32),
+    hexKey: "0123456789abcdef".repeat(4),
+  };
+
+  // [dir, channel, raw] — shapes copied from real claude/codex recordings.
+  const FRAMES: Array<["in" | "out", "cli" | "browser", string]> = [
+    // Browser → server user_message (pasted .npmrc + bot token).
+    ["in", "browser", JSON.stringify({
+      type: "user_message",
+      content: `1. a 2. ${SECRETS.npm}\nbot: ${SECRETS.telegram}`,
+    })],
+    // Server → Claude CLI stdin, same text relayed.
+    ["out", "cli", JSON.stringify({
+      type: "user",
+      message: { role: "user", content: `deploy with GONKA_API_KEY=${SECRETS.gonka}` },
+    })],
+    // Claude CLI stdout: tool input streamed as partial JSON text — the
+    // secret follows a `\n` escape inside a JSON-in-JSON string.
+    ["in", "cli", JSON.stringify({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify({ command: `cat <<E\n${SECRETS.oauth}\n${SECRETS.github}\nE` }).slice(0, -1),
+        },
+      },
+    })],
+    // Claude CLI stdout: tool_result with a systemd unit dump.
+    ["in", "cli", JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", content: `Environment=OPENROUTER_API_KEY=${SECRETS.envValue}\nprivate key: 0x${SECRETS.hexKey}` }] },
+    })],
+    // Codex JSON-RPC notification out → browser.
+    ["out", "browser", JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/commandExecution/outputDelta",
+      params: { delta: `token ${SECRETS.npm}` },
+    })],
+    // Non-JSON multi-line chunk (fallback path).
+    ["in", "cli", `{"type":"a"}\n{"type":"b","text":"${SECRETS.github}"}`],
+  ];
+
+  it("leaves no synthetic secret in the file on disk and stamps redactionVersion", () => {
+    const mgr = new RecorderManager({ globalEnabled: true, recordingsDir: tempDir });
+    for (const [dir, ch, raw] of FRAMES) {
+      mgr.record("sess-v2", dir, raw, ch, "claude", "/cwd");
+    }
+    mgr.recordEvent("sess-v2", "ws_error", "browser", { reason: `bad ${SECRETS.telegram}` });
+    const file = mgr.getRecordingStatus("sess-v2").filePath!;
+    mgr.closeAll();
+
+    const bytes = readFileSync(file, "utf-8");
+    for (const [name, secret] of Object.entries(SECRETS)) {
+      expect(bytes, `${name} leaked`).not.toContain(secret);
+      expect(bytes, `${name} body leaked`).not.toContain(secret.slice(-16));
+    }
+    // Recognisable prefixes remain so a reader knows what was redacted.
+    for (const keep of ["npm_[REDACTED]", "gnk-[REDACTED]", "987654321:[REDACTED]", "sk-ant-oat01-[REDACTED]", "ghp_[REDACTED]", "OPENROUTER_API_KEY=[REDACTED]", "private key: [REDACTED]"]) {
+      expect(bytes).toContain(keep);
+    }
+
+    const lines = bytes.trim().split("\n");
+    expect(lines).toHaveLength(1 + FRAMES.length + 1);
+    for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
+    const header = JSON.parse(lines[0]);
+    expect(header.redactionApplied).toBe(true);
+    expect(header.redactionVersion).toBe(2);
+    // Frames that were JSON stay JSON after redaction.
+    for (const line of lines.slice(1, 6)) expect(() => JSON.parse(JSON.parse(line).raw)).not.toThrow();
+  });
+
+  it("frames with secret-ish key words but no secret stay byte-identical", () => {
+    // usage frames always mention `tokens`; they must not be re-serialised.
+    const raw = '{"type":"result","usage":{"input_tokens":1,  "output_tokens":2}}';
+    expect(redactRaw(raw)).toBe(raw);
+  });
+});

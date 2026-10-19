@@ -1,0 +1,50 @@
+# AuraBench task mined from PR #98 ("fix(session-store): skip *.runtime.json sister files + defensive guard").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: session-restore-crash-on-sidecar-json
+title: "Server boots even when per-session sidecar JSON files sit next to session files"
+start_commit: 76418a29b2c95efafd29d7400fb0c10ec452b30d
+prompt: |
+  After per-session process-identity records started being written next to the
+  session store's JSON files as `<sessionId>.runtime.json`, the server crashes on
+  boot in `WsBridge.restoreFromDisk` (it reads `state.backend_type` of an object
+  that has no `state`), and systemd gives up restarting it.
+
+  Make boot robust:
+  - the session store's bulk load must not return those sidecar files as sessions;
+  - restoring from disk must skip (with a warning) any persisted record that is
+    missing its `id` or `state` instead of crashing, and must not overwrite
+    sessions already live in memory.
+expected_files:
+  - web/server/session-store.ts
+  - web/server/ws-bridge.ts
+expected_tests:
+  - web/server/session-store.test.ts
+  - web/server/ws-bridge.test.ts
+failure_modes:
+  - "runtime sidecar files are deleted or moved instead of being ignored"
+  - "malformed records get a synthesized identity instead of being skipped"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 98
+  merge_commit: ac3fac458ca38477002011e0c71239cf33eade9b
+  class: bugfix
+  hidden_tests:
+    - web/server/session-store.test.ts
+    - web/server/ws-bridge.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:25:28.004Z"

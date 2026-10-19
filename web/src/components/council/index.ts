@@ -1,5 +1,7 @@
 // Barrel re-export — keeps import paths tidy where multiple council
 // components are used together (App, Playground, HomePage wiring).
+export { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
+export type { AutoProceedRestoreNoticeProps } from "./AutoProceedRestoreNotice.js";
 export { BlockerBanner } from "./BlockerBanner.js";
 export type { BlockerBannerProps } from "./BlockerBanner.js";
 export { CouncilToggle, isSupportedPairing, coerceCouncilPairing } from "./CouncilToggle.js";
@@ -18,3 +20,7 @@ export {
   providerChipClass,
 } from "./ProviderBadges.js";
 export type { ProviderBadgesProps } from "./ProviderBadges.js";
+export { CheckpointCoverageList } from "./CheckpointCoverageList.js";
+export type { CheckpointCoverageListProps } from "./CheckpointCoverageList.js";
+export { ObserverProbeMessage } from "./ObserverProbeMessage.js";
+export type { ObserverProbeMessageProps } from "./ObserverProbeMessage.js";

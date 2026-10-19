@@ -1,0 +1,59 @@
+# AuraBench task mined from PR #112 ("fix(codex): surface error notifications and re-seed stale auth.json copies").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: codex-error-notification-shown-as-drift
+title: "Codex failures show the real error instead of a protocol-drift banner"
+start_commit: b92d65da0774ebfc63d144a3d40f236db64c403e
+prompt: |
+  Two Codex problems seen together in production:
+
+  1. When Codex sends a v2 `error` notification (e.g. an expired OAuth refresh
+     token), the UI shows the generic banner "Codex protocol drift: unsupported
+     incoming notification "error". Companion may need an update." instead of
+     the real failure. The notification's params look like
+     `{ error: { message, codexErrorInfo }, willRetry }`. Handle it: surface its message to the
+     browser as an error, append the upstream `codexErrorInfo` code in
+     parentheses when present (e.g. "(unauthorized)"), add "Codex will retry"
+     when the notification's `willRetry` is true, and fall back to "Codex
+     reported an error without a message" when the message is missing. It must no
+     longer be reported as protocol drift.
+
+  2. Each session gets its own `CODEX_HOME`, seeded from `~/.codex`. After the
+     user runs `codex login` again, sessions keep failing with "refresh token was
+     already used" — the fresh login never reaches them. When preparing a
+     session home, the session must pick up a legacy `auth.json` that is newer
+     than the session's copy; never clobber a session copy that is newer, never
+     re-seed other files, and do nothing when the legacy home does not exist.
+expected_files:
+  - web/server/cli-launcher.ts
+  - web/server/codex-adapter.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+  - web/server/codex-adapter.test.ts
+failure_modes:
+  - "other unsupported notifications stop being reported as drift"
+  - "a newer session auth.json is overwritten by an older legacy copy"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 112
+  merge_commit: 1bb028fd9c61b163396333d07f3a57b042bc2741
+  class: bugfix
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+    - web/server/codex-adapter.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:28:01.926Z"

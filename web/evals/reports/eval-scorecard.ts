@@ -70,3 +70,110 @@ export function buildEvalScorecard(summary: PrecisionSummary): Scorecard {
   ];
   return buildScorecard(metrics, summary.labels);
 }
+
+const fmt = (v: number | "unavailable"): string => (typeof v === "number" ? v.toFixed(3) : "unavailable");
+
+/**
+ * B2 before/after: the STOP tier at each gate stage — raw observer output,
+ * path-only grounding (before B2), path + line grounding (after B2), and what
+ * actually raises the blocker banner (after B2, minus weak evidence). Text, or
+ * a markdown table with `markdown: true`. Pure.
+ */
+export function renderGroundingBeforeAfter(summary: PrecisionSummary, markdown = false): string {
+  const rows: [string, PrecisionSummary["raw"]][] = [
+    ["raw", summary.raw],
+    ["grounded (path-only, before B2)", summary.grounded_path_only],
+    ["grounded (path + lines, after B2)", summary.grounded],
+    ["banner (after B2, minus weak evidence)", summary.banner],
+  ];
+  if (markdown) {
+    const lines = [
+      "| stage | STOPs surfaced | false STOP rate | precision | recall |",
+      "|---|---|---|---|---|",
+      ...rows.map(
+        ([name, t]) => `| ${name} | ${t.surfaced} | ${fmt(t.false_stop_rate)} | ${fmt(t.precision)} | ${fmt(t.recall)} |`,
+      ),
+    ];
+    return lines.join("\n");
+  }
+  return [
+    "grounding before/after (STOP tier):",
+    ...rows.map(
+      ([name, t]) =>
+        `  ${name.padEnd(40)} surfaced=${t.surfaced} false_stop_rate=${fmt(t.false_stop_rate)} precision=${fmt(t.precision)} recall=${fmt(t.recall)}`,
+    ),
+  ].join("\n");
+}
+
+/**
+ * The B2 recall guard: the full gate must not surface fewer real blockers than
+ * the path-only gate on the same corpus. Returns a failure message, or `null`
+ * when recall held. `unavailable` on both sides (no known blockers) holds.
+ */
+export function groundingRecallRegression(summary: PrecisionSummary): string | null {
+  const before = summary.grounded_path_only;
+  const after = summary.grounded;
+  if (after.true_positive < before.true_positive) {
+    return (
+      `line grounding silenced real blockers: true_positive ${before.true_positive} → ${after.true_positive} ` +
+      `(recall ${fmt(before.recall)} → ${fmt(after.recall)})`
+    );
+  }
+  return null;
+}
+
+/** Labeled STOPs required before any claim about observer usefulness is made
+ *  (spec: 100–200 human labels). Below it, the corpus is an anecdote. */
+export const MIN_LABELED_STOPS = 100;
+/** The product gate the labels are collected for. */
+export const STOP_PRECISION_GATE = 0.9;
+
+export interface EvidenceVerdict {
+  labeled_stops: number;
+  /** "Observer is useful" — only `supported`/`not_supported` with enough labels. */
+  observer_useful: "unproven" | "supported" | "not_supported";
+  /** "STOP precision > 90%" gate. */
+  stop_precision_gate: "not_evaluated" | "pass" | "fail";
+}
+
+/**
+ * B3: refuse to state a conclusion the labels cannot carry. With fewer than
+ * {@link MIN_LABELED_STOPS} labeled STOPs both the usefulness claim and the
+ * precision gate are reported as not established, whatever the precision
+ * number happens to be. With enough labels the gate is strict `>`.
+ */
+export function evidenceVerdict(labeledStops: number, stopPrecision: number | "unavailable"): EvidenceVerdict {
+  if (labeledStops < MIN_LABELED_STOPS || typeof stopPrecision !== "number") {
+    return { labeled_stops: labeledStops, observer_useful: "unproven", stop_precision_gate: "not_evaluated" };
+  }
+  const pass = stopPrecision > STOP_PRECISION_GATE;
+  return {
+    labeled_stops: labeledStops,
+    observer_useful: pass ? "supported" : "not_supported",
+    stop_precision_gate: pass ? "pass" : "fail",
+  };
+}
+
+export function renderEvidenceVerdict(v: EvidenceVerdict, markdown = false): string {
+  const need = `${v.labeled_stops}/${MIN_LABELED_STOPS} labeled STOPs`;
+  const useful =
+    v.observer_useful === "unproven"
+      ? `UNPROVEN (${need})`
+      : v.observer_useful === "supported"
+        ? `supported (${need})`
+        : `not supported (${need})`;
+  const gate =
+    v.stop_precision_gate === "not_evaluated"
+      ? `NOT EVALUATED (${need})`
+      : v.stop_precision_gate.toUpperCase();
+  const pct = Math.round(STOP_PRECISION_GATE * 100);
+  if (markdown) {
+    return [
+      "| claim | status |",
+      "|---|---|",
+      `| Observer is useful | ${useful} |`,
+      `| gate: STOP precision > ${pct}% | ${gate} |`,
+    ].join("\n");
+  }
+  return [`Observer is useful: ${useful}`, `gate STOP precision > ${pct}%: ${gate}`].join("\n");
+}

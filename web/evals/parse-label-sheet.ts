@@ -78,22 +78,29 @@ function parseCoords(json: string): Coords | null {
 }
 
 /**
- * Read the decisive verdict from a block, looking ONLY at the "Your call" line
- * so claim text can never spoof a tick. Returns null on no/ambiguous/SKIP tick.
+ * Read the decisive verdict from a block, looking ONLY at the call line so
+ * claim text can never spoof a tick. Returns null on no/ambiguous/SKIP tick.
+ *
+ * Two call lines exist: `**Your call:** TRUE/FALSE/SKIP` (code claims) and,
+ * since P3/FIX-B3-1, the decision sheet's `**Что верно:** A/B/SKIP`, where
+ * A = keep the current behaviour (observer wrong → false_positive) and
+ * B = adopt the observer's recommendation (observer right → true_positive).
  */
 function readVerdict(block: string): SheetLabelInput["verdict"] | null {
-  const marker = block.indexOf("**Your call:**");
+  // LAST occurrence: the renderer always puts the real call line after the
+  // claim, so a marker quoted inside the claim can never be the one read.
+  const marker = Math.max(block.lastIndexOf("**Your call:**"), block.lastIndexOf("**Что верно:**"));
   if (marker === -1) return null;
   const line = block.slice(marker).split("\n", 1)[0]!;
   const ticked = new Set<string>();
-  const boxRe = /\[([ xX])\]\s*(TRUE|FALSE|SKIP)/g;
+  const boxRe = /\[([ xX])\]\s*(TRUE|FALSE|SKIP|A|B)(?![A-Za-z])/g;
   let m: RegExpExecArray | null;
   while ((m = boxRe.exec(line)) !== null) {
     if (m[1] !== " ") ticked.add(m[2]!.toUpperCase());
   }
   if (ticked.size !== 1) return null; // none, or contradictory multi-tick
-  if (ticked.has("TRUE")) return "true_positive";
-  if (ticked.has("FALSE")) return "false_positive";
+  if (ticked.has("TRUE") || ticked.has("B")) return "true_positive";
+  if (ticked.has("FALSE") || ticked.has("A")) return "false_positive";
   return null; // SKIP ticked → no record
 }
 

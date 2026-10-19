@@ -1,19 +1,32 @@
 import { Hono } from "hono";
+import { parseIsolationMode } from "./worktree-isolation.js";
+import type { WorktreeMapping } from "./worktree-tracker.js";
+import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
 import { writeAtomicJson } from "./atomic-write.js";
+import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
-import { writeFileSync } from "node:fs";
+import { buildHandoffFilename, pruneHandoffFiles } from "./handoff-files.js";
+import { writeFileSync, appendFileSync, statSync, renameSync } from "node:fs";
+import {
+  computeSweepCandidates,
+  executeSweep,
+  sweepPreviewToken,
+  type SweepCandidate,
+  type SweepComputeDeps,
+  type SweepAuditEntry,
+} from "./sweep-orphans.js";
 import { log } from "./logger.js";
 import { respondError } from "./respond-error.js";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { COMPANION_HOME } from "./paths.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type { SessionOrchestrator } from "./session-orchestrator.js";
 import {
   parseAutoProceedOnIdleAtBoundary,
@@ -28,10 +41,12 @@ import { containerManager } from "./container-manager.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
+import { registerCouncilEconomyRoutes } from "./routes/council-economy-routes.js";
 import { registerSandboxRoutes } from "./routes/sandbox-routes.js";
 import { registerCronRoutes } from "./routes/cron-routes.js";
 import { registerAgentRoutes } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
+import { registerDiagnosticsRoutes } from "./routes/diagnostics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
@@ -46,14 +61,19 @@ import { registerLinearConnectionRoutes } from "./routes/linear-connection-route
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
 import { getSettings } from "./settings-manager.js";
+import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "./second-reviewer-config.js";
 import { getAnthropicModels, type BackendModelInfo } from "./anthropic-models-cache.js";
 import { lookupModel } from "./model-registry.js";
+import { getVerifiedModelStore } from "./verified-models.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
-import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
+import { verifyToken, getToken, regenerateToken, getAllAddresses, isDirectLocalRequest } from "./auth-manager.js";
+import { originalRequest } from "./middleware/body-limit.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
+import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMethod } from "./host-auth-status.js";
+import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
@@ -241,7 +261,10 @@ function shellEscapeArg(value: string): string {
  * whether a model is `status`/`replacement`-annotated so it can render a tag.
  *
  * Additive merge (Task 3): a model absent from the registry passes through
- * untouched, so an old frontend still parses the payload. Hunt REC-4: only
+ * with only an additive `untested: true` flag (or `verifiedBy: "observed"`
+ * when a session on this install already ran a successful turn on it), so
+ * an old frontend still
+ * parses the payload. Hunt REC-4: only
  * `status` and `replacement` cross the wire — `riskFlags`, `tier`, and the
  * on-disk file path stay operator-internal.
  */
@@ -251,9 +274,45 @@ function enrichModelsWithRegistry(
 ): BackendModelInfo[] {
   return models.map((m) => {
     const entry = lookupModel(backend, m.value);
-    if (entry === null) return m;
+    // Not in the registry → nobody verified it runs on this install (the
+    // Claude list is the API-key /v1/models catalogue, which can include
+    // models the subscription can't use). Say so honestly; no lifecycle
+    // `status` is invented.
+    // Not in the registry, but a session on this install completed a
+    // successful turn on it (verified-models.ts) → runtime-verified.
+    if (entry === null) {
+      if (getVerifiedModelStore()?.has(backend, m.value)) return { ...m, verifiedBy: "observed" as const };
+      return { ...m, untested: true };
+    }
     return { ...m, status: entry.status, replacement: entry.replacement };
   });
+}
+
+/** Public shape of a session's worktree (see worktree-tracker.ts). */
+function toSessionWorktree(m: WorktreeMapping | null) {
+  if (!m) return undefined;
+  return {
+    path: m.worktreePath,
+    branch: m.actualBranch || m.branch,
+    repoRoot: m.repoRoot,
+    isolated: m.isolated === true,
+    ...(m.retained ? { retained: m.retained } : {}),
+  };
+}
+
+/**
+ * EC-7: does workspace-relative `rel` name an existing regular file or dir
+ * inside `cwd`? Resolves through realpath and rejects anything escaping the
+ * workspace (the payload parser already rejects absolute / `..` paths).
+ */
+function workspaceFileExists(cwd: string, rel: string): boolean {
+  try {
+    const root = realpathSync(cwd);
+    const real = realpathSync(join(root, rel));
+    return real === root || real.startsWith(root + sep);
+  } catch {
+    return false;
+  }
 }
 
 export function createRoutes(
@@ -267,10 +326,22 @@ export function createRoutes(
   agentExecutor?: import("./agent-executor.js").AgentExecutor,
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
+  diagnostics?: import("./routes/diagnostics-routes.js").DiagnosticsRoutesDeps,
 ) {
   const api = new Hono();
 
   // ─── Auth endpoints (exempt from auth middleware) ──────────────────
+
+  // Secure attribute is opt-in on HTTPS only: this server is routinely reached
+  // over plain http:// on LAN/localhost, where Secure would suppress the cookie
+  // entirely and break auth. Honour a reverse proxy's x-forwarded-proto too.
+  function isHttpsRequest(c: { req: { url: string; header: (n: string) => string | undefined } }): boolean {
+    try {
+      if (new URL(c.req.url).protocol === "https:") return true;
+    } catch { /* malformed url — fall through to header check */ }
+    const proto = c.req.header("x-forwarded-proto");
+    return typeof proto === "string" && proto.split(",")[0]!.trim() === "https";
+  }
 
   api.post("/auth/verify", async (c) => {
     const body = await c.req.json().catch(() => ({} as { token?: string }));
@@ -281,6 +352,7 @@ export function createRoutes(
         path: "/",
         httpOnly: true,
         sameSite: "Strict",
+        secure: isHttpsRequest(c),
         maxAge: 365 * 24 * 60 * 60,
       });
       return c.json({ ok: true });
@@ -319,13 +391,13 @@ export function createRoutes(
   // auto-authenticate without a token. This makes first-launch seamless.
 
   // Check if the request comes from localhost (same machine as the server).
-  // Uses Bun's requestIP which returns the actual TCP source address.
+  // Uses Bun's requestIP which returns the actual TCP source address; a local
+  // reverse proxy (forwarding / Tailscale-* headers) never counts as localhost.
   // Returns false in test environments where c.env is not a Bun server.
   function isLocalhostRequest(c: { env: unknown; req: { raw: Request } }): boolean {
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
-    const ip = bunServer?.requestIP?.(c.req.raw);
-    const addr = ip?.address ?? "";
-    return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+    const ip = bunServer?.requestIP?.(originalRequest(c.req.raw));
+    return isDirectLocalRequest(ip?.address, c.req.raw.headers);
   }
 
   api.get("/auth/auto", (c) => {
@@ -335,6 +407,7 @@ export function createRoutes(
         path: "/",
         httpOnly: true,
         sameSite: "Strict",
+        secure: isHttpsRequest(c),
         maxAge: 365 * 24 * 60 * 60,
       });
       return c.json({ ok: true, token });
@@ -404,25 +477,84 @@ export function createRoutes(
    */
   function normaliseCreateSessionBody(
     body: Record<string, unknown>,
-  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string; status: 400 | 409 } {
     const rawAuto = (body as { autoProceedOnIdle?: unknown }).autoProceedOnIdle;
     const parsed = parseAutoProceedOnIdleAtBoundary(rawAuto);
     if (parsed.kind === "invalid") {
-      return { ok: false, error: formatAutoProceedConfigError(parsed.error) };
+      return { ok: false, error: formatAutoProceedConfigError(parsed.error), status: 400 };
     }
     // Strip the raw field; replace with parsed value or omit entirely.
     const { autoProceedOnIdle: _stripped, ...rest } = body as Record<string, unknown>;
-    if (parsed.kind === "absent") {
-      return { ok: true, body: rest };
+    const autoBody = parsed.kind === "absent" ? rest : { ...rest, autoProceedOnIdle: parsed.value };
+    // aura-meta-diet C3: resolve layer flags (fail-closed, warn) and apply
+    // the host-side gates (observer → no council pair, autoProceed → strip).
+    const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags(), {
+      kbAutoPrime: getSettings().kbAutoPrime,
+    });
+    for (const w of layered.warnings) console.warn(`[layer-flags] ${w}`);
+    if (!layered.ok) {
+      return { ok: false, error: layered.error, status: layered.status };
     }
-    return { ok: true, body: { ...rest, autoProceedOnIdle: parsed.value } };
+    // Worktree isolation: public create routes default to `auto` — a new
+    // session gets its own git worktree when another live session already
+    // uses the same tree. The UI sends `shared` to opt out.
+    const isolation = parseIsolationMode((layered.body as { isolation?: unknown }).isolation);
+    if (!isolation.ok) {
+      return { ok: false, error: isolation.error, status: 400 };
+    }
+    // Council pairs share one workspace by design — isolation does not apply.
+    if ((layered.body as { councilMode?: unknown }).councilMode === "council") {
+      const { isolation: _iso, ...councilBody } = layered.body as Record<string, unknown>;
+      return { ok: true, body: councilBody };
+    }
+    return { ok: true, body: { ...layered.body, isolation: isolation.value ?? "auto" } };
+  }
+
+  /**
+   * Council create's optional `observerModel` (P6/FIX-H-MODEL): a non-empty
+   * string pins the observer half; absent → none. Anything else is a 400 —
+   * a silently dropped pin would spawn the observer on another model.
+   */
+  function parseObserverModel(raw: unknown): { ok: true; value?: string } | { ok: false; error: string } {
+    if (raw === undefined || raw === null) return { ok: true };
+    if (typeof raw === "string" && raw.trim().length > 0) return { ok: true, value: raw.trim() };
+    return { ok: false, error: `Invalid observerModel: ${JSON.stringify(raw)}` };
+  }
+
+  /**
+   * W15: council create's optional `secondReviewer` ("off" | "auto" |
+   * {backend, model}) and `secondReviewScope`. Absent → the pair follows the
+   * global Settings default. Malformed → 400 (a silently dropped choice would
+   * run the pair without the second opinion the user asked for).
+   */
+  function parseCreateSecondReviewer(
+    rawReviewer: unknown,
+    rawScope: unknown,
+  ): { ok: true; value?: SecondReviewerConfig } | { ok: false; error: string } {
+    if (rawReviewer === undefined || rawReviewer === null) {
+      if (rawScope !== undefined && rawScope !== null) return { ok: false, error: "secondReviewScope requires secondReviewer" };
+      return { ok: true };
+    }
+    const reviewer = parseSecondReviewerSetting(rawReviewer);
+    if (!reviewer.ok) return { ok: false, error: reviewer.error };
+    const scope = rawScope === undefined || rawScope === null
+      ? { ok: true as const, value: getSettings().councilSecondReviewer.scope }
+      : parseSecondReviewScope(rawScope);
+    if (!scope.ok) return { ok: false, error: scope.error };
+    return { ok: true, value: { reviewer: reviewer.value, scope: scope.value } };
+  }
+
+  /** W15: persist the create-time choice; a failure is logged, the pair stays up. */
+  function applyCreateSecondReviewer(sessionGroupId: string, config: SecondReviewerConfig | undefined): void {
+    if (!config) return;
+    orchestrator.setGroupSecondReviewer(sessionGroupId, config);
   }
 
   api.post("/sessions/create", async (c) => {
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
     // Council Mode branch — the browser opts in by setting
@@ -434,11 +566,31 @@ export function createRoutes(
       if (pairing !== "claude+claude" && pairing !== "claude+codex") {
         return c.json({ error: `Invalid pairing: ${String(body.councilPairing)}` }, 400 as any);
       }
-      const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
-      const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+      const {
+        councilMode: _cm,
+        councilPairing: _cp,
+        observerModel: rawObserverModel,
+        secondReviewer: rawSecondReviewer,
+        secondReviewScope: rawSecondReviewScope,
+        ...rest
+      } = body;
+      const observerModel = parseObserverModel(rawObserverModel);
+      if (!observerModel.ok) {
+        return c.json({ error: observerModel.error }, 400 as any);
+      }
+      const secondReviewer = parseCreateSecondReviewer(rawSecondReviewer, rawSecondReviewScope);
+      if (!secondReviewer.ok) {
+        return c.json({ error: secondReviewer.error }, 400 as any);
+      }
+      const result = await orchestrator.createCouncilGroup({
+        pairing,
+        base: rest,
+        ...(observerModel.value ? { observerModel: observerModel.value } : {}),
+      });
       if (!result.ok) {
         return c.json({ error: result.error }, result.status as any);
       }
+      applyCreateSecondReviewer(result.sessionGroupId, secondReviewer.value);
       return c.json({
         sessionGroupId: result.sessionGroupId,
         primary: result.primary,
@@ -458,7 +610,7 @@ export function createRoutes(
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
 
@@ -480,8 +632,29 @@ export function createRoutes(
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Spawning Council pair…", status: "in_progress" }),
         });
-        const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
-        const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+        const {
+          councilMode: _cm,
+          councilPairing: _cp,
+          observerModel: rawObserverModel,
+          secondReviewer: rawSecondReviewer,
+          secondReviewScope: rawSecondReviewScope,
+          ...rest
+        } = body;
+        const observerModel = parseObserverModel(rawObserverModel);
+        if (!observerModel.ok) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ error: observerModel.error }) });
+          return;
+        }
+        const secondReviewer = parseCreateSecondReviewer(rawSecondReviewer, rawSecondReviewScope);
+        if (!secondReviewer.ok) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ error: secondReviewer.error }) });
+          return;
+        }
+        const result = await orchestrator.createCouncilGroup({
+          pairing,
+          base: rest,
+          ...(observerModel.value ? { observerModel: observerModel.value } : {}),
+        });
         if (!result.ok) {
           await stream.writeSSE({
             event: "error",
@@ -489,6 +662,7 @@ export function createRoutes(
           });
           return;
         }
+        applyCreateSecondReviewer(result.sessionGroupId, secondReviewer.value);
         await stream.writeSSE({
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Council pair ready", status: "done" }),
@@ -624,7 +798,32 @@ export function createRoutes(
         },
       });
     }
-    const target = join(session.cwd, ".council", "checkpoints", `${payload.phase}.json`);
+    // Every artifact must exist in THIS pair's workspace, or the observer is
+    // woken to read files it cannot see and files an OBSERVER-BLOCKED INFO
+    // (seen 2026-10-19: an orchestrator implementing in a /tmp worktree sent
+    // paths that existed only there). Reject up front and name the missing
+    // paths so the caller can fix the checkpoint instead of waking the
+    // observer for nothing. The paths are the caller's own relative strings.
+    const missingPaths = payload.artifact_paths.filter((rel) => !workspaceFileExists(session.cwd, rel));
+    if (missingPaths.length > 0) {
+      log.warn("routes", "council checkpoint rejected: artifacts missing in the pair's workspace", {
+        event: "council.checkpoint.missing_artifacts",
+        sessionId,
+        sessionGroupId: group.sessionGroupId,
+        missing: missingPaths.length,
+      });
+      return c.json(
+        {
+          error: "validation_failed",
+          reason: "artifact_paths not found in the pair's workspace — commit/merge them there (or run the pair in the worktree) before emitting",
+          missingPaths,
+        },
+        400,
+      );
+    }
+    // Council review 2026-09-08 #1: group-scoped filename so two pairs sharing
+    // a workspace don't overwrite each other's same-phase checkpoint.
+    const target = join(session.cwd, ".council", "checkpoints", buildCheckpointFilename(payload.phase, payload.session_group_id));
     try {
       writeAtomicJson(target, payload);
     } catch (err) {
@@ -644,6 +843,167 @@ export function createRoutes(
       phase: payload.phase,
       sequence: payload.sequence,
     });
+  });
+
+  // ─── Sweep orphans — manual cleanup of server-owned lost resources ─────────
+  //
+  // Two GLOBAL (not per-session) endpoints. The on-demand sibling of the boot
+  // `reapOrphans` pass: reap ONLY resources THIS server spawned and lost — its
+  // own orphaned CLI subprocesses, archived-leak processes, stale exited
+  // sessions, and orphaned per-session/per-group timers. Never another agent's
+  // process; never the caller's own; never a live tracked session (the engine
+  // ASSERTS this, it is not an incidental filter — see sweep-orphans.ts Task 3).
+  //
+  //   preview → PURE compute, returns decision-justifying fields + a token
+  //             binding the exact candidate set (hunt: minimal disclosure — no
+  //             proc dump, no co-tenant argv on the wire).
+  //   execute → must echo a fresh preview token; the server RECOMPUTES the
+  //             candidates + token and REJECTS on mismatch (the confirm token IS
+  //             the authorization for the destructive branch — hunt Principle 7).
+  //             Refuses any client-supplied PID. In-flight-locked + cooldowned so
+  //             a manual sweep can't race the background reaper or itself.
+  const SWEEP_EXECUTE_COOLDOWN_MS = Number(process.env.AURA_SWEEP_COOLDOWN_MS) || 3_000;
+  const SWEEP_AUDIT_MAX_BYTES = Number(process.env.AURA_SWEEP_AUDIT_MAX_BYTES) || 5_000_000;
+  let sweepExecuteInFlight = false;
+  let lastSweepExecuteAt = 0;
+
+  // Resolve the caller's own sessionId (belt-and-braces over the engine's
+  // live-session assertion): a programmatic agent caller may self-identify so
+  // its own half is doubly excluded. A browser (the normal case) sends nothing.
+  function resolveCallerSessionId(c: Context): string | null {
+    const hdr = c.req.header("x-companion-caller-session");
+    if (typeof hdr === "string" && hdr.trim().length > 0) return hdr.trim();
+    return null;
+  }
+
+  // Build the compute deps from live server state. `storeDir` is the
+  // sessions-root = sentinel-root tier the boot reaper uses.
+  function buildSweepComputeDeps(callerSessionId: string | null, storeDir: string): SweepComputeDeps {
+    return {
+      listSessions: () => launcher.listSessions(),
+      callerSessionId,
+      serverPid: process.pid,
+      sessionsRoot: storeDir,
+      listOrphanTimers: () => orchestrator.listOrphanTimers(),
+    };
+  }
+
+  api.get("/sweep/preview", (c) => {
+    const storeDir = launcher.getStoreDirectory();
+    if (!storeDir) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { reason: "session store not attached" },
+      });
+    }
+    const callerSessionId = resolveCallerSessionId(c);
+    let candidates: SweepCandidate[];
+    try {
+      candidates = computeSweepCandidates(buildSweepComputeDeps(callerSessionId, storeDir));
+    } catch (err) {
+      // The engine's Task-3 safety assertion throws if an excluded pid/session
+      // slipped into the set — treat as a server fault, never a partial preview.
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "preview", message: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    return c.json({
+      // Wire-safe projection: decision-justifying fields ONLY. argvSha256 (the
+      // internal TOCTOU anchor) stays server-side — execute recomputes it.
+      candidates: candidates.map((x) => ({
+        id: x.id, reason: x.reason, pid: x.pid, sessionId: x.sessionId,
+        evidence: x.evidence, ageMs: x.ageMs,
+      })),
+      token: sweepPreviewToken(candidates),
+    });
+  });
+
+  api.post("/sweep/execute", async (c) => {
+    const storeDir = launcher.getStoreDirectory();
+    if (!storeDir) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { reason: "session store not attached" },
+      });
+    }
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null;
+    const token = body && typeof body.token === "string" ? body.token : null;
+    if (!token) {
+      // Refuse a bare confirm / client PID list — the token is the only
+      // accepted authorization for the destructive branch.
+      return respondError(c, 400, "bad_request", {
+        module: "sweep", detail: { reason: "missing preview token" },
+      });
+    }
+    const now = Date.now();
+    if (sweepExecuteInFlight) {
+      return respondError(c, 409, "conflict", { module: "sweep", detail: { reason: "sweep already in flight" } });
+    }
+    if (now - lastSweepExecuteAt < SWEEP_EXECUTE_COOLDOWN_MS) {
+      return respondError(c, 429, "rate_limited", { module: "sweep", detail: { reason: "cooldown" } });
+    }
+    const callerSessionId = resolveCallerSessionId(c);
+    // Recompute server-side — never trust a client-supplied candidate/PID.
+    let candidates: SweepCandidate[];
+    try {
+      candidates = computeSweepCandidates(buildSweepComputeDeps(callerSessionId, storeDir));
+    } catch (err) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "execute-compute", message: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    // The confirm token binds what-was-previewed to what-gets-killed. If the
+    // set drifted since preview (a candidate died, went live, or a new one
+    // appeared), the recomputed token differs → reject rather than kill a set
+    // the operator never saw. This is also what makes a retry idempotent: a
+    // second execute of an already-swept set recomputes an empty/changed set,
+    // its token won't match, and nothing is double-killed.
+    if (sweepPreviewToken(candidates) !== token) {
+      return respondError(c, 409, "conflict", {
+        module: "sweep", detail: { reason: "preview token stale — candidate set changed" },
+      });
+    }
+    sweepExecuteInFlight = true;
+    lastSweepExecuteAt = now;
+    const auditPath = join(storeDir, "sweep-audit.jsonl");
+    try {
+      const result = await executeSweep(candidates, {
+        sentinelRoot: storeDir,
+        killTrackedSession: async (sid) => {
+          await orchestrator.killSession(sid);
+          // Task 7: force a DEFINITIVE terminal record (pid nulled + exited)
+          // flushed synchronously to launcher.json BEFORE we respond, so boot
+          // recovery can never re-attach/relaunch a dead/recycled PID.
+          launcher.markSweptTerminal(sid);
+        },
+        clearOrphanTimer: (timerId) => orchestrator.clearOrphanTimer(timerId),
+        audit: (entry: SweepAuditEntry) => {
+          try {
+            // Bound growth (parity with recorder rotation): once the audit file
+            // passes the cap, roll it to `.1` (single generation) before the
+            // append so it can never grow without limit.
+            try {
+              if (statSync(auditPath).size >= SWEEP_AUDIT_MAX_BYTES) {
+                renameSync(auditPath, `${auditPath}.1`);
+              }
+            } catch { /* ENOENT (first write) or rename race — just append */ }
+            appendFileSync(auditPath, JSON.stringify(entry) + "\n", { mode: 0o600 });
+          } catch (err) {
+            // Audit is best-effort — a failed append must never abort a kill
+            // that already happened. Log the EC-9 line to the server log instead.
+            log.warn("sweep", "audit append failed", {
+              event: "sweep.audit.append_failed", auditPath,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+      });
+      return c.json(result);
+    } catch (err) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "execute", message: err instanceof Error ? err.message : String(err) },
+      });
+    } finally {
+      sweepExecuteInFlight = false;
+    }
   });
 
   // ─── Council Mode — REST bootstrap of group findings ──────────────────────
@@ -680,9 +1040,141 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — dispute an observer STOP (meta-diet B2b) ──────────────
+  //
+  // The browser calls this when a human presses "Dispute" on a STOP (not on a
+  // plain "Dismiss for now"). The server persists the claim per group
+  // (`.council/state/<group>-disputes.json`); a later STOP repeating it on the
+  // same evidence file is marked `disputed` and kept out of the banner. The
+  // browser sends the claim text it was shown: the server has no finding-id
+  // index, and the claim is what the match runs on anyway.
+  api.post("/groups/:groupId/disputes", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as
+      | { claim?: unknown; evidence_path?: unknown; finding_id?: unknown }
+      | null;
+    if (
+      !body ||
+      typeof body.claim !== "string" ||
+      typeof body.evidence_path !== "string" ||
+      (body.finding_id !== undefined && typeof body.finding_id !== "string")
+    ) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.disputes",
+        detail: { reason: "claim and evidence_path (strings) required; finding_id optional string" },
+      });
+    }
+    const result = orchestrator.disputeObserverFinding(groupId, {
+      claim: body.claim,
+      evidencePath: body.evidence_path,
+      ...(typeof body.finding_id === "string" ? { findingId: body.finding_id } : {}),
+    });
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.disputes", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", { module: "council.disputes", detail: { reason: "claim or evidence_path empty or too long" } });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.disputes", detail: { groupId } });
+    }
+    return c.json({ ok: true, added: result.added });
+  });
+
+  // ─── Council Mode — second-opinion reviewer per pair (W15) ──────────────────
+  //
+  // GET: the pair's effective setting (`source: "group" | "global"`).
+  // PUT { reviewer, scope? }: the pair's own setting, written by the server to
+  // `.council/state/<group>-second-reviewer.json` (the observer cannot write
+  // there). Takes effect from the next checkpoint.
+  api.get("/groups/:groupId/second-reviewer", (c) => {
+    const groupId = c.req.param("groupId");
+    const result = orchestrator.getGroupSecondReviewer(groupId);
+    if (!result.ok) return respondError(c, 404, "not_found", { module: "council.second_reviewer", detail: { groupId } });
+    return c.json({ reviewer: result.config.reviewer, scope: result.config.scope, source: result.source });
+  });
+
+  api.put("/groups/:groupId/second-reviewer", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { reviewer?: unknown; scope?: unknown } | null;
+    if (!body || typeof body !== "object") {
+      return respondError(c, 400, "bad_request", { module: "council.second_reviewer", detail: { reason: "JSON body { reviewer, scope? } required" } });
+    }
+    const parsed = parseCreateSecondReviewer(body.reviewer, body.scope);
+    if (!parsed.ok || !parsed.value) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.second_reviewer",
+        detail: { reason: parsed.ok ? "reviewer required" : parsed.error },
+      });
+    }
+    const result = orchestrator.setGroupSecondReviewer(groupId, parsed.value);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.second_reviewer", detail: { groupId } });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.second_reviewer", detail: { groupId } });
+    }
+    return c.json({ reviewer: parsed.value.reviewer, scope: parsed.value.scope, source: "group" });
+  });
+
+  // ─── Council Mode — release an observer STOP's auto-proceed hold (FIX-AP-1) ─
+  //
+  // The browser calls this on "Dismiss for now". Auto-proceed holds while the
+  // blocker banner would show a STOP; a dismissal is the human saying "go on".
+  // Not a dispute: the claim is not marked wrong and a re-raise is shown.
+  api.post("/groups/:groupId/stops/resolve", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { finding_id?: unknown } | null;
+    if (!body || typeof body.finding_id !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.stops",
+        detail: { reason: "finding_id (string) required" },
+      });
+    }
+    const result = orchestrator.resolveObserverStop(groupId, body.finding_id);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.stops", detail: { groupId } });
+      }
+      return respondError(c, 400, "bad_request", { module: "council.stops", detail: { reason: "finding_id empty or too long" } });
+    }
+    return c.json(result);
+  });
+
+  // ─── Council Mode — ignore a restore gap (meta-diet P4/FIX-AP-4) ─────────
+  //
+  // A review file the server cannot read or parse keeps the auto-proceed hold
+  // restore incomplete (fail-closed). The ObserverPanel lists it with an
+  // "Ignore this file" action; this persists that decision for the exact
+  // content the human saw (`fingerprint` from the findings bootstrap).
+  api.post("/groups/:groupId/restore-gaps/ignore", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { file?: unknown; fingerprint?: unknown } | null;
+    if (!body || typeof body.file !== "string" || typeof body.fingerprint !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.restore-gaps",
+        detail: { reason: "file and fingerprint (strings) required" },
+      });
+    }
+    const result = orchestrator.ignoreAutoProceedRestoreGap(groupId, body.file, body.fingerprint);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.restore-gaps", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", {
+          module: "council.restore-gaps",
+          detail: { reason: "file is not a review file name or fingerprint is malformed" },
+        });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.restore-gaps", detail: { reason: "not persisted" } });
+    }
+    return c.json(result);
+  });
+
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
-  // Closes `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
+  // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
   // browser's `groupBySessionId` map is populated EXCLUSIVELY by the live
   // `group:created` push, so a tab reloading after pair creation lands
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
@@ -709,8 +1201,20 @@ export function createRoutes(
     const bridgeMap = new Map(bridgeStates.map((s) => [s.session_id, s]));
     const enriched = sessions.map((s) => {
       const bridge = bridgeMap.get(s.sessionId);
+      // Runtime reachability wins over a stale launcher snapshot. A session
+      // whose backend adapter is live but whose launcher record still reads
+      // `starting` (adapter attached before the snapshot caught up, e.g. a
+      // Codex app-server whose proxy re-handshook after a Bun restart) must
+      // report `connected` here — otherwise the composer stays disabled and
+      // the user is forced to hit Reconnect by hand. Only upgrade `starting`;
+      // never resurrect an `exited` record.
+      const state =
+        s.state === "starting" && wsBridge.hasConnectedBackend(s.sessionId)
+          ? "connected"
+          : s.state;
       return {
         ...s,
+        state,
         // Bridge state is the source of truth for runtime cwd updates
         // (notably containerized sessions mapped back to host paths).
         cwd: bridge?.cwd || s.cwd,
@@ -720,9 +1224,18 @@ export function createRoutes(
         gitBehind: bridge?.git_behind || 0,
         totalLinesAdded: bridge?.total_lines_added || 0,
         totalLinesRemoved: bridge?.total_lines_removed || 0,
+        worktree: toSessionWorktree(orchestrator.getSessionWorktree?.(s.sessionId) ?? null),
       };
     });
     return c.json(enriched);
+  });
+
+  // Preview for the New Session form: would `isolation: "auto"` create a
+  // dedicated worktree for this cwd (another live session in the same tree)?
+  api.get("/sessions/isolation-preview", (c) => {
+    const cwd = c.req.query("cwd");
+    if (!cwd) return c.json({ error: "cwd required" }, 400);
+    return c.json(orchestrator.previewIsolation(cwd));
   });
 
   api.get("/sessions/:id", (c) => {
@@ -756,25 +1269,42 @@ export function createRoutes(
     const reasonRaw = await c.req.json().catch(() => ({}));
     const reason = typeof reasonRaw?.reason === "string" ? reasonRaw.reason : undefined;
 
+    // Context-overflow handoff: the advisory recorded on the state carries
+    // the transcript size the reason line / pickup draft quote ("> N MB").
+    const contextBytes = bridgeSession.state.context_advisory?.milestoneBytes;
     const { markdown, meta } = extractHandoff({
       sessionId: id,
       messageHistory: bridgeSession.messageHistory,
       cwd,
       backend: bridgeSession.backendType,
       reason,
+      contextBytes,
     });
 
-    // Filename uses dot-prefix so it's hidden from casual `ls` and most
-    // editors' file pickers; timestamp ensures multiple recoveries in the
-    // same workspace don't collide.
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "T").slice(0, 19);
-    const filename = `.aura-handoff-${ts}.md`;
-    const handoffPath = join(cwd, filename);
-    try {
-      writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644 });
-    } catch (err) {
-      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(err) });
-      return c.json({ error: `Cannot write handoff file: ${String(err)}` }, 500);
+    // Filename comes from the ONE contract in handoff-files.ts (dot-prefix:
+    // hidden from casual `ls`; second-resolution timestamp). The timestamp
+    // alone does NOT prevent a collision — two handoffs in the same second
+    // (double-click, two tabs) would silently overwrite each other — so the
+    // write is exclusive (`wx`) and on EEXIST retries with the next second.
+    let filename = "";
+    let handoffPath = "";
+    let written = false;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3 && !written; attempt++) {
+      filename = buildHandoffFilename(new Date(Date.now() + attempt * 1000));
+      handoffPath = join(cwd, filename);
+      try {
+        writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644, flag: "wx" });
+        written = true;
+      } catch (err) {
+        lastErr = err;
+        if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") break;
+      }
+    }
+    if (!written) {
+      // Detail (absolute path, errno) goes to the log, not to the browser.
+      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(lastErr) });
+      return c.json({ error: "Cannot write the handoff file into the session workspace" }, 500);
     }
 
     // Always spawn a SOLO session in the same cwd. If the source was a
@@ -792,12 +1322,30 @@ export function createRoutes(
       return c.json({ error: `Handoff written but session create failed: ${createResult.error}` }, createResult.status as any);
     }
 
+    // Housekeeping AFTER the spawn succeeded (a failed handoff deletes
+    // nothing) and outside the response path: pruneHandoffFiles never throws
+    // and only ever touches endpoint-format regular files directly in cwd,
+    // keeping the newest 3 and anything younger than 7 days (see
+    // handoff-files.ts for the exact allow-list and policy).
+    try {
+      pruneHandoffFiles({ cwd, sessionId: id, keep: filename });
+    } catch (err) {
+      log.warn("routes", "handoff prune threw unexpectedly", {
+        event: "handoff.prune_failed",
+        sessionId: id,
+        cwd,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     return c.json({
       newSessionId: createResult.session.sessionId,
       handoffPath,
       handoffFilename: filename,
       handoffMeta: meta,
-      draft: buildPickupDraft(filename),
+      // No explicit reason (sidebar menu) + an image-limit error in history →
+      // keep the image-limit wording that flow was built for.
+      draft: buildPickupDraft(filename, reason ?? (meta.hasImageError ? "image_limit" : undefined), { contextBytes }),
     });
   });
 
@@ -1285,6 +1833,18 @@ export function createRoutes(
     return c.json({ ok: true });
   });
 
+  // Usage-limit auto-resume: inspect / cancel the pending one-shot resume
+  // (the in-session banner's "Отменить" button).
+  api.get("/sessions/:id/auto-resume", (c) => {
+    const schedule = orchestrator.getAutoResume(c.req.param("id"));
+    return c.json({ autoResume: schedule ?? null });
+  });
+
+  api.delete("/sessions/:id/auto-resume", (c) => {
+    const cancelled = orchestrator.cancelAutoResume(c.req.param("id"), "user_cancel");
+    return c.json({ ok: true, cancelled });
+  });
+
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({})) as { model?: unknown };
@@ -1421,51 +1981,77 @@ export function createRoutes(
     return ts;
   }
 
+  /**
+   * Enumerate the session's dev-related processes that are LISTENing on a TCP
+   * port, keyed by pid. Single source of truth shared by the GET listing and
+   * the kill guard.
+   *
+   * Council review 2026-09-11 P3-5 / P3-7 (Hunt + Fowler): the kill endpoint
+   * must only ever terminate a pid this scan actually attributes to the
+   * session — never an arbitrary caller-supplied pid. Extracting the scan
+   * here means the "what pids belong to this session" set the GET handler
+   * shows and the set the kill handler enforces can never drift apart.
+   */
+  function scanSessionDevProcesses(
+    session: { containerId?: string | null },
+  ): Map<number, { command: string; ports: Set<number> }> {
+    let raw: string;
+    if (session.containerId) {
+      raw = containerManager.execInContainer(
+        session.containerId,
+        ["sh", "-c", "lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || ss -tlnp 2>/dev/null || true"],
+        5_000,
+      );
+    } else {
+      raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
+        timeout: 5_000,
+        encoding: "utf-8",
+      });
+    }
+
+    // Parse lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+    const lines = raw.trim().split("\n").slice(1); // skip header
+    const pidMap = new Map<number, { command: string; ports: Set<number> }>();
+
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 9) continue;
+      const command = parts[0];
+      const pid = parseInt(parts[1], 10);
+      if (isNaN(pid)) continue;
+      if (EXCLUDE_COMMANDS.has(command)) continue;
+
+      // Keep only dev-server commands (exact name, lower-cased, or prefix).
+      // Applied here so both consumers agree on the dev-process set.
+      const lowerCmd = command.toLowerCase();
+      const isDev = DEV_COMMANDS.has(lowerCmd)
+        || DEV_COMMANDS.has(command)
+        || [...DEV_COMMANDS].some((d) => lowerCmd.startsWith(d));
+      if (!isDev) continue;
+
+      // macOS lsof NAME ends like `TCP *:3000 (LISTEN)`, so the final token is
+      // often `(LISTEN)` rather than the address. Parse from the full line.
+      const portMatch = line.match(/:(\d+)\s+\(LISTEN\)\s*$/) ?? line.match(/:(\d+)\s*$/);
+      if (!portMatch) continue;
+      const port = parseInt(portMatch[1], 10);
+
+      const existing = pidMap.get(pid);
+      if (existing) {
+        existing.ports.add(port);
+      } else {
+        pidMap.set(pid, { command, ports: new Set([port]) });
+      }
+    }
+    return pidMap;
+  }
+
   api.get("/sessions/:id/processes/system", async (c) => {
     const sessionId = c.req.param("id");
     const session = launcher.getSession(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     try {
-      let raw: string;
-      if (session.containerId) {
-        raw = containerManager.execInContainer(
-          session.containerId,
-          ["sh", "-c", "lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || ss -tlnp 2>/dev/null || true"],
-          5_000,
-        );
-      } else {
-        raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
-          timeout: 5_000,
-          encoding: "utf-8",
-        });
-      }
-
-      // Parse lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-      const lines = raw.trim().split("\n").slice(1); // skip header
-      const pidMap = new Map<number, { command: string; ports: Set<number> }>();
-
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 9) continue;
-        const command = parts[0];
-        const pid = parseInt(parts[1], 10);
-        if (isNaN(pid)) continue;
-        if (EXCLUDE_COMMANDS.has(command)) continue;
-
-        // macOS lsof NAME ends like `TCP *:3000 (LISTEN)`, so the final token is
-        // often `(LISTEN)` rather than the address. Parse from the full line.
-        const portMatch = line.match(/:(\d+)\s+\(LISTEN\)\s*$/) ?? line.match(/:(\d+)\s*$/);
-        if (!portMatch) continue;
-        const port = parseInt(portMatch[1], 10);
-
-        const existing = pidMap.get(pid);
-        if (existing) {
-          existing.ports.add(port);
-        } else {
-          pidMap.set(pid, { command, ports: new Set([port]) });
-        }
-      }
+      const pidMap = scanSessionDevProcesses(session);
 
       // Get full command line for each PID
       const processes: {
@@ -1478,14 +2064,7 @@ export function createRoutes(
       }[] = [];
 
       for (const [pid, info] of pidMap) {
-        // Skip if command isn't dev-related (check both exact name and prefix)
-        const lowerCmd = info.command.toLowerCase();
-        const isDev = DEV_COMMANDS.has(lowerCmd)
-          || DEV_COMMANDS.has(info.command)
-          || [...DEV_COMMANDS].some((d) => lowerCmd.startsWith(d));
-
-        if (!isDev) continue;
-
+        // `scanSessionDevProcesses` already filtered to dev commands.
         let fullCommand = info.command;
         let cwd: string | undefined;
         let startedAt: number | undefined;
@@ -1583,6 +2162,27 @@ export function createRoutes(
     }
     if (session.pid === pid) {
       return c.json({ error: "Use the session kill endpoint to terminate Claude" }, 403);
+    }
+
+    // Council review 2026-09-11 P3-5 / P3-7: only permit killing a pid this
+    // session actually surfaced as one of its own dev processes. Without this
+    // the endpoint would SIGTERM ANY caller-supplied pid (arbitrary-process-kill
+    // + orphan-reaper argv-ownership bypass). Re-enumerate and reject anything
+    // outside that set. Fail CLOSED: if the ownership scan itself fails we
+    // cannot prove the pid belongs to the session, so we refuse rather than
+    // kill blind.
+    let ownedPids: Set<number>;
+    try {
+      ownedPids = new Set(scanSessionDevProcesses(session).keys());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return c.json({ error: `Could not verify process ownership: ${msg}` }, 500);
+    }
+    if (!ownedPids.has(pid)) {
+      return c.json(
+        { error: "PID is not one of this session's dev processes" },
+        403,
+      );
     }
 
     try {
@@ -1724,6 +2324,8 @@ export function createRoutes(
       id: string;
       name: string;
       available: boolean;
+      authState?: AuthState;
+      authMethod?: AuthMethod;
       councilObserverReviewAvailable?: boolean;
       councilObserverReviewReason?: string;
     }> = [];
@@ -1735,11 +2337,24 @@ export function createRoutes(
       ? undefined
       : (pairingCapability.observer.reason ?? pairingCapability.primary.reason ?? "Mixed council pairing is unavailable.");
 
-    backends.push({ id: "claude", name: "Claude Code", available: claudeAvailable });
+    // Local (no network) sign-in status per provider, so the New Session UI can
+    // show "authorized ✓ / token expired / not signed in" before a session is
+    // spawned. Only computed for a present binary — auth is moot when the CLI
+    // isn't installed, and it saves the credential-file read.
+    const claudeAuth = claudeAvailable ? getClaudeAuthStatus() : undefined;
+    const codexAuth = codexAvailable ? getCodexAuthStatus() : undefined;
+
+    backends.push({
+      id: "claude",
+      name: "Claude Code",
+      available: claudeAvailable,
+      ...(claudeAuth ? { authState: claudeAuth.authState, ...(claudeAuth.authMethod ? { authMethod: claudeAuth.authMethod } : {}) } : {}),
+    });
     backends.push({
       id: "codex",
       name: "Codex",
       available: codexAvailable,
+      ...(codexAuth ? { authState: codexAuth.authState, ...(codexAuth.authMethod ? { authMethod: codexAuth.authMethod } : {}) } : {}),
       councilObserverReviewAvailable: codexObserverReviewAvailable,
       ...(codexObserverReviewReason ? { councilObserverReviewReason: codexObserverReviewReason } : {}),
     });
@@ -1843,6 +2458,7 @@ export function createRoutes(
 
   registerFsRoutes(api);
   registerEnvRoutes(api, { webDir: WEB_DIR });
+  registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);
 
   registerPromptRoutes(api);
@@ -1869,6 +2485,8 @@ export function createRoutes(
   registerCronRoutes(api, cronScheduler);
   registerAgentRoutes(api, agentExecutor);
   registerMetricsRoutes(api, { gaugeProvider: wsBridge });
+  // Diagnostics page (plan Task 13) — behind the auth middleware above.
+  if (diagnostics) registerDiagnosticsRoutes(api, diagnostics);
 
   // ─── Recording Hub (hidden feature: COMPANION_RECORDING_HUB=1) ──────
   if (isRecordingHubEnabled()) {

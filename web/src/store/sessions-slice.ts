@@ -31,6 +31,13 @@ function getInitialCollapsedProjects(): Set<string> {
 export interface SessionsSlice {
   sessions: Map<string, SessionState>;
   sdkSessions: SdkSessionInfo[];
+  /**
+   * True once a server-authoritative session list (`GET /api/sessions`) has
+   * landed in this page load. `sdkSessions.length > 0` cannot stand in for it:
+   * a local seed (HomePage after create) fills the list early, and a server
+   * with zero sessions leaves it empty while loaded.
+   */
+  sdkSessionsLoaded: boolean;
   currentSessionId: string | null;
   connectionStatus: Map<string, "connecting" | "connected" | "disconnected">;
   cliConnected: Map<string, boolean>;
@@ -68,7 +75,8 @@ export interface SessionsSlice {
   updateSession: (sessionId: string, updates: Partial<SessionState>) => void;
   removeSession: (sessionId: string) => void;
   removeBridgeSession: (sessionId: string) => void;
-  setSdkSessions: (sessions: SdkSessionInfo[]) => void;
+  /** `fromServer: true` when `sessions` is a full `GET /api/sessions` answer. */
+  setSdkSessions: (sessions: SdkSessionInfo[], opts?: { fromServer?: boolean }) => void;
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
   setCliReconnecting: (sessionId: string, reconnecting: boolean) => void;
@@ -95,6 +103,7 @@ export interface SessionsSlice {
 export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> = (set) => ({
   sessions: new Map(),
   sdkSessions: [],
+  sdkSessionsLoaded: false,
   currentSessionId: getInitialSessionId(),
   connectionStatus: new Map(),
   cliConnected: new Map(),
@@ -164,6 +173,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       const groupBySessionId = new Map(s.groupBySessionId);
       const findings = new Map(s.findings);
       const groundingDowngrades = new Map(s.groundingDowngrades);
+      const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
       if (groupId) {
         const existing = s.groups.get(groupId);
         groups.delete(groupId);
@@ -173,6 +183,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         }
         findings.delete(groupId);
         groundingDowngrades.delete(groupId);
+        autoProceedRestoreGaps.delete(groupId);
       }
       return {
         // Sessions slice fields
@@ -215,6 +226,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         groupBySessionId,
         findings,
         groundingDowngrades,
+        autoProceedRestoreGaps,
         // PLAN T12 (Phase G) - drop any cli-status-slice entry
         // when the session leaves the store. Sibling of the
         // permissionPermissions cleanup above.
@@ -235,7 +247,27 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       return { sessions };
     }),
 
-  setSdkSessions: (sessions) => set({ sdkSessions: sessions }),
+  setSdkSessions: (sessions, opts) =>
+    set((s) => {
+      const cliConnected = new Map(s.cliConnected);
+      const cliReconnecting = new Map(s.cliReconnecting);
+      for (const session of sessions) {
+        const isLive = !session.archived && (session.state === "connected" || session.state === "running");
+        if (isLive) {
+          cliConnected.set(session.sessionId, true);
+          cliReconnecting.delete(session.sessionId);
+        } else if (session.archived || session.state === "exited") {
+          cliConnected.set(session.sessionId, false);
+          cliReconnecting.delete(session.sessionId);
+        }
+      }
+      return {
+        sdkSessions: sessions,
+        cliConnected,
+        cliReconnecting,
+        ...(opts?.fromServer ? { sdkSessionsLoaded: true } : {}),
+      };
+    }),
 
   setConnectionStatus: (sessionId, status) =>
     set((s) => {

@@ -1,7 +1,10 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
-vi.mock("./auth-manager.js", () => ({
+vi.mock("./auth-manager.js", async (importOriginal) => ({
+  // Real loopback/proxy-header predicate so the localhost-bypass tests
+  // exercise the production logic, not a stub.
+  isDirectLocalRequest: (await importOriginal<typeof import("./auth-manager.js")>()).isDirectLocalRequest,
   verifyToken: vi.fn(() => true),
   getToken: vi.fn(() => "test-token-for-routes"),
   getLanAddress: vi.fn(() => "192.168.1.100"),
@@ -50,6 +53,14 @@ vi.mock("./path-resolver.js", () => ({
 }));
 vi.mock("./preflight-probe.js", () => ({
   probePairingCapability: mockProbePairingCapability,
+}));
+// Host sign-in detection reads real credential files / env; mock it so the
+// /backends assertions are deterministic. Default: both unauthorized.
+const mockGetClaudeAuthStatus = vi.hoisted(() => vi.fn(() => ({ authState: "unauthorized" }) as any));
+const mockGetCodexAuthStatus = vi.hoisted(() => vi.fn(() => ({ authState: "unauthorized" }) as any));
+vi.mock("./host-auth-status.js", () => ({
+  getClaudeAuthStatus: mockGetClaudeAuthStatus,
+  getCodexAuthStatus: mockGetCodexAuthStatus,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -100,6 +111,12 @@ vi.mock("./model-registry.js", () => ({
   lookupModel: vi.fn(() => null),
 }));
 
+// Observed-working model store: mocked so routes never read the operator's
+// real ~/.companion/verified-models.json. Default = no store wired (null).
+vi.mock("./verified-models.js", () => ({
+  getVerifiedModelStore: vi.fn(() => null),
+}));
+
 vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: vi.fn(() => ({
@@ -127,6 +144,12 @@ vi.mock("./settings-manager.js", () => ({
     updateChannel: "stable",
     dockerAutoUpdate: false,
     telemetryEnabled: false,
+    defaultSessionMode: "solo" as const,
+    kbAutoPrime: false,
+    autoResumeAfterLimit: true,
+    councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: false,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -150,6 +173,13 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: patch.publicUrl ?? "",
     updateChannel: patch.updateChannel ?? "stable",
     dockerAutoUpdate: patch.dockerAutoUpdate ?? false,
+    telemetryEnabled: patch.telemetryEnabled ?? true,
+    defaultSessionMode: patch.defaultSessionMode ?? "solo",
+    kbAutoPrime: patch.kbAutoPrime ?? false,
+    autoResumeAfterLimit: patch.autoResumeAfterLimit ?? true,
+    councilSecondReviewer: patch.councilSecondReviewer ?? { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: patch.kbAnalysis ?? { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? false,
     updatedAt: Date.now(),
   })),
 }));
@@ -291,9 +321,11 @@ import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
 import * as anthropicModelsCache from "./anthropic-models-cache.js";
 import * as modelRegistry from "./model-registry.js";
+import * as verifiedModels from "./verified-models.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
+import { _resetServerLayerFlagsForTest } from "./layer-flags.js";
 
 // ─── Mock factories ──────────────────────────────────────────────────────────
 
@@ -311,6 +343,9 @@ function createMockLauncher() {
     getSession: vi.fn(),
     setArchived: vi.fn(),
     removeSession: vi.fn(),
+    // Sweep orphans (Tasks 6/7)
+    getStoreDirectory: vi.fn(() => null),
+    markSweptTerminal: vi.fn(),
   } as any;
 }
 
@@ -319,6 +354,7 @@ function createMockBridge() {
     closeSession: vi.fn(),
     getSession: vi.fn(() => null),
     getAllSessions: vi.fn(() => []),
+    hasConnectedBackend: vi.fn(() => false),
     getCodexRateLimits: vi.fn(() => null),
     markContainerized: vi.fn(),
     prePopulateCommands: vi.fn(),
@@ -367,6 +403,11 @@ function createMockOrchestrator() {
     getSession: vi.fn(),
     getCouncilGroupBySessionId: vi.fn(() => null),
     getAllGroupsForBootstrap: vi.fn(() => [] as Array<{ sessionGroupId: string }>),
+    getGroupSecondReviewer: vi.fn(),
+    setGroupSecondReviewer: vi.fn(() => ({ ok: true })),
+    // Sweep orphans (Tasks 5/6)
+    listOrphanTimers: vi.fn(() => []),
+    clearOrphanTimer: vi.fn(),
   } as any;
 }
 
@@ -483,7 +524,43 @@ describe("POST /api/sessions/create", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(orchestrator.createSession).toHaveBeenCalledWith(body);
+    // Public create routes add the worktree-isolation default (`auto`).
+    expect(orchestrator.createSession).toHaveBeenCalledWith({ ...body, isolation: "auto" });
+  });
+
+  // aura-diet 2026-10: a plain create is SOLO (never routed to the council
+  // pair path) and the KB auto-prime directive follows the server setting.
+  it("plain create stays solo and carries no kbAutoPrime while the setting is off", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s-solo", state: "starting", cwd: "/test", createdAt: Date.now() },
+    });
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test" }),
+    });
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    const arg = orchestrator.createSession.mock.calls.at(-1)![0];
+    expect(arg).not.toHaveProperty("kbAutoPrime");
+    expect(arg).not.toHaveProperty("councilMode");
+  });
+
+  it("forwards kbAutoPrime: true when the server setting is on", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValueOnce({
+      ...settingsManager.getSettings(),
+      kbAutoPrime: true,
+    });
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s-kb", state: "starting", cwd: "/test", createdAt: Date.now() },
+    });
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test" }),
+    });
+    expect(orchestrator.createSession).toHaveBeenLastCalledWith({ cwd: "/test", kbAutoPrime: true, isolation: "auto" });
   });
 
   it("returns error status from orchestrator on failure", async () => {
@@ -547,9 +624,49 @@ describe("POST /api/sessions/create", () => {
       body: "not-json",
     });
 
-    // Route catches JSON parse errors and defaults to {}
+    // Route catches JSON parse errors and defaults to {} (+ isolation default)
     expect(res.status).toBe(200);
-    expect(orchestrator.createSession).toHaveBeenCalledWith({});
+    expect(orchestrator.createSession).toHaveBeenCalledWith({ isolation: "auto" });
+  });
+
+  // Worktree isolation: the public route defaults to `auto` (isolate only
+  // when another live session uses the same tree) and validates the field.
+  it("defaults isolation to auto and forwards an explicit opt-out", async () => {
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test", isolation: "shared" }),
+    });
+    expect(orchestrator.createSession).toHaveBeenCalledWith(expect.objectContaining({ isolation: "shared" }));
+  });
+
+  it("rejects an unknown isolation value with 400", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test", isolation: "sometimes" }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/sessions/isolation-preview", () => {
+  it("returns the orchestrator preview for cwd", async () => {
+    const preview = {
+      isGitRepo: true, repoRoot: "/repo", liveSessions: [{ sessionId: "s9" }], recommended: "isolate",
+      worktreesBaseDir: "/wt", warnings: [], repoServiceUnits: [],
+    };
+    orchestrator.previewIsolation = vi.fn(() => preview);
+    const res = await app.request("/api/sessions/isolation-preview?cwd=%2Frepo");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(preview);
+    expect(orchestrator.previewIsolation).toHaveBeenCalledWith("/repo");
+  });
+
+  it("requires cwd", async () => {
+    const res = await app.request("/api/sessions/isolation-preview");
+    expect(res.status).toBe(400);
   });
 });
 
@@ -624,6 +741,43 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
     expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
   });
 
+  // P6/FIX-H-MODEL: `observerModel` pins the observer half (the Codex side
+  // of claude+codex can't run the Claude `model`). It travels as a top-level
+  // request field — never inside `base`, which createSession spreads into
+  // BOTH halves.
+  it("forwards observerModel top-level (not in base) to the coordinator", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        model: "claude-opus-5-5",
+        observerModel: "gpt-5.5",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+codex",
+      base: { cwd: "/work/repo", model: "claude-opus-5-5" },
+      observerModel: "gpt-5.5",
+    });
+  });
+
+  // A malformed pin is a 400, not a silent drop: dropping it would spawn the
+  // observer on a different model than the caller asked for.
+  it.each([[""], ["   "], [42], [{ slug: "gpt-5.5" }]])("rejects observerModel=%j with 400", async (observerModel) => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", observerModel, councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Invalid observerModel/);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
   it("propagates coordinator failure error+status to the client", async () => {
     orchestrator.createCouncilGroup.mockResolvedValueOnce({
       ok: false,
@@ -647,7 +801,7 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
 
 // ─── Council Mode — group REST bootstrap (PR #68) ─────────────────────────
 //
-// Closes `BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
+// Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
 // fetches this endpoint to repopulate `groupBySessionId` so the Sidebar
 // glyph + role suffix renders correctly even when the original
 // `group:created` push was lost across reload.
@@ -712,7 +866,260 @@ describe("GET /api/groups", () => {
   });
 });
 
+// B2b (meta-diet): the browser persists a human dismissal of an observer STOP.
+// The route only validates the body shape and maps orchestrator outcomes to
+// HTTP; matching / persistence is covered in observer-disputes.test.ts and the
+// orchestrator's B2b test.
+describe("POST /api/groups/:groupId/disputes", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/disputes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards claim, evidence_path and finding_id and returns the add outcome", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post({ claim: "c", evidence_path: "src/a.ts", finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.disputeObserverFinding).toHaveBeenCalledWith("grp_x", { claim: "c", evidencePath: "src/a.ts", findingId: "fnd_1" });
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.disputeObserverFinding = vi.fn();
+    expect((await post({ claim: 1, evidence_path: "a" })).status).toBe(400);
+    expect((await post({ claim: "c" })).status).toBe(400);
+    expect((await post({ claim: "c", evidence_path: "a", finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.disputeObserverFinding).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404, invalid input to 400 and persistence failure to 500", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(404);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ claim: "", evidence_path: "a" })).status).toBe(400);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "persist_failed" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(500);
+  });
+});
+
+// W15 multi-model review: the pair's second-opinion setting over REST, and the
+// create-time choice. The routes validate strictly (a malformed choice is a
+// 400, never silently "off") and map orchestrator outcomes to HTTP; the
+// persistence itself is covered in second-reviewer-config.test.ts.
+describe("council second-opinion reviewer routes", () => {
+  const put = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/second-reviewer`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("PUT validates and stores the pair's setting", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    const res = await put({ reviewer: { backend: "claude", model: "sonnet" }, scope: "all" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewer: { backend: "claude", model: "sonnet" }, scope: "all", source: "group" });
+    expect(orchestrator.setGroupSecondReviewer).toHaveBeenCalledWith("grp_x", { reviewer: { backend: "claude", model: "sonnet" }, scope: "all" });
+  });
+
+  it("PUT rejects malformed choices with 400 and maps unknown group to 404", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    expect((await put({ reviewer: "maybe" })).status).toBe(400);
+    expect((await put({ reviewer: { backend: "gemini" } })).status).toBe(400);
+    expect((await put({ scope: "all" })).status).toBe(400);
+    expect((await put({ reviewer: "auto", scope: "plans" })).status).toBe(400);
+    expect(orchestrator.setGroupSecondReviewer).not.toHaveBeenCalled();
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await put({ reviewer: "off" })).status).toBe(404);
+  });
+
+  it("GET returns the effective setting and its source", async () => {
+    orchestrator.getGroupSecondReviewer = vi.fn(() => ({ ok: true, config: { reviewer: "auto", scope: "review-implement" }, source: "global" }));
+    const res = await app.request("/api/groups/grp_x/second-reviewer");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewer: "auto", scope: "review-implement", source: "global" });
+    orchestrator.getGroupSecondReviewer = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await app.request("/api/groups/grp_x/second-reviewer")).status).toBe(404);
+  });
+
+  // The create-time choice is stripped from the spawn body and persisted for
+  // the new pair; a malformed one fails the create before anything spawns.
+  it("council create forwards secondReviewer to the pair, never into the spawn body", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", councilMode: "council", councilPairing: "claude+codex", secondReviewer: "auto" }),
+    });
+    expect(res.status).toBe(200);
+    const callArg = orchestrator.createCouncilGroup.mock.calls.at(-1)![0]!;
+    expect(callArg.base).not.toHaveProperty("secondReviewer");
+    expect(orchestrator.setGroupSecondReviewer).toHaveBeenCalledWith("grp_test_council", { reviewer: "auto", scope: "review-implement" });
+
+    orchestrator.createCouncilGroup.mockClear();
+    const bad = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", councilMode: "council", councilPairing: "claude+codex", secondReviewer: { backend: "x" } }),
+    });
+    expect(bad.status).toBe(400);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
+  it("PUT /api/settings validates councilSecondReviewer strictly", async () => {
+    const bad = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ councilSecondReviewer: { reviewer: "sometimes" } }),
+    });
+    expect(bad.status).toBe(400);
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      claudeCodeOAuthToken: "",
+      openaiApiKey: "",
+      ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    }) as never);
+    const ok = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ councilSecondReviewer: { reviewer: "auto", scope: "all" } }),
+    });
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).councilSecondReviewer).toEqual({ reviewer: "auto", scope: "all" });
+  });
+
+  // Diagnostics spec §3.2: KB-analysis thresholds are strict at the boundary —
+  // a 0 threshold (analysis due every hour) or a non-boolean memory flag is a
+  // 400, and a valid object round-trips.
+  it("PUT /api/settings validates kbAnalysis and diagnosticsMemoryReport strictly", async () => {
+    for (const body of [
+      { kbAnalysis: { newEntriesThreshold: 0, sessionsThreshold: 25, maxAgeDays: 14 } },
+      { kbAnalysis: { newEntriesThreshold: 10 } },
+      { diagnosticsMemoryReport: "yes" },
+    ]) {
+      const bad = await app.request("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(bad.status).toBe(400);
+    }
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      claudeCodeOAuthToken: "",
+      openaiApiKey: "",
+      ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    }) as never);
+    const ok = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kbAnalysis: { newEntriesThreshold: 5, sessionsThreshold: 40, maxAgeDays: 7 },
+        diagnosticsMemoryReport: true,
+      }),
+    });
+    expect(ok.status).toBe(200);
+    const json = await ok.json();
+    expect(json.kbAnalysis).toEqual({ newEntriesThreshold: 5, sessionsThreshold: 40, maxAgeDays: 7 });
+    expect(json.diagnosticsMemoryReport).toBe(true);
+  });
+});
+
+// FIX-AP-1: "Dismiss for now" releases a STOP's hold on auto-proceed. The
+// route validates the body and maps controller outcomes to HTTP; the hold
+// semantics are covered in council-auto-proceed-wiring.test.ts.
+describe("POST /api/groups/:groupId/stops/resolve", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/stops/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards the finding id and returns the release outcome", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: true, released: true, persisted: true }));
+    const res = await post({ finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, released: true, persisted: true });
+    expect(orchestrator.resolveObserverStop).toHaveBeenCalledWith("grp_x", "fnd_1");
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.resolveObserverStop = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.resolveObserverStop).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404 and invalid input to 400", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ finding_id: "f" })).status).toBe(404);
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ finding_id: "" })).status).toBe(400);
+  });
+});
+
+// FIX-AP-4: "Ignore this file" for a review file that keeps the auto-proceed
+// hold restore incomplete. The route validates the body and maps controller
+// outcomes to HTTP; persistence + re-arm are covered in
+// council-auto-proceed-wiring.test.ts and session-orchestrator.test.ts.
+describe("POST /api/groups/:groupId/restore-gaps/ignore", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/restore-gaps/ignore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  const ok = { file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+
+  it("forwards file + fingerprint and returns the outcome", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post(ok);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.ignoreAutoProceedRestoreGap).toHaveBeenCalledWith("grp_x", ok.file, ok.fingerprint);
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ file: "x" })).status).toBe(400);
+    expect((await post({ file: 1, fingerprint: "a" })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.ignoreAutoProceedRestoreGap).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group → 404, invalid input → 400, write failure → 500", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post(ok)).status).toBe(404);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post(ok)).status).toBe(400);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "write_failed" }));
+    expect((await post(ok)).status).toBe(500);
+  });
+});
+
 describe("GET /api/sessions", () => {
+  // Sessions running in an Aura-tracked worktree expose its path/branch
+  // (and `retained` when archive kept a dirty worktree) for the sidebar.
+  it("enriches sessions with their tracked worktree", async () => {
+    launcher.listSessions.mockReturnValue([{ sessionId: "s1", state: "running", cwd: "/wt/s1" }]);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    orchestrator.getSessionWorktree = vi.fn(() => ({
+      sessionId: "s1", repoRoot: "/repo", branch: "aura/s1", actualBranch: "aura/s1",
+      worktreePath: "/wt/s1", createdAt: 1, isolated: true, retained: "dirty",
+    }));
+    const res = await app.request("/api/sessions");
+    const json = await res.json();
+    expect(json[0].worktree).toEqual({
+      path: "/wt/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true, retained: "dirty",
+    });
+  });
+
   it("returns the list of sessions enriched with names", async () => {
     const sessions = [
       { sessionId: "s1", state: "running", cwd: "/a" },
@@ -777,6 +1184,42 @@ describe("GET /api/sessions", () => {
       totalLinesAdded: 0,
       totalLinesRemoved: 0,
     });
+  });
+
+  it("upgrades a `starting` snapshot to `connected` when the bridge has a live backend adapter", async () => {
+    // Regression: a Codex app-server whose proxy re-handshook after a Bun
+    // restart leaves the launcher snapshot at `starting` while the adapter is
+    // already live. REST must report `connected` (runtime reachability wins)
+    // so the composer is not stuck disabled behind a stale snapshot.
+    const sessions = [
+      { sessionId: "s1", state: "starting", cwd: "/a" },
+      { sessionId: "s2", state: "starting", cwd: "/b" },
+    ];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    // Only s1 has a live adapter; s2 is genuinely still spawning.
+    bridge.hasConnectedBackend.mockImplementation((id: string) => id === "s1");
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ sessionId: "s1", state: "connected" });
+    expect(json[1]).toMatchObject({ sessionId: "s2", state: "starting" });
+  });
+
+  it("never resurrects a non-starting snapshot even if a stale adapter reports connected", async () => {
+    // Guard: the upgrade is gated on `starting` only — an `exited` record must
+    // stay exited so a lingering adapter reference can't mask a dead session.
+    const sessions = [{ sessionId: "s1", state: "exited", cwd: "/a" }];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    bridge.hasConnectedBackend.mockReturnValue(true);
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ sessionId: "s1", state: "exited" });
   });
 
   it("prefers bridge cwd over launcher cwd when available", async () => {
@@ -970,7 +1413,7 @@ describe("POST /api/sessions/:id/editor/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 13337, hostPort: 49152 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -1356,6 +1799,12 @@ describe("GET /api/sessions/:id/archive-info", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -1654,15 +2103,15 @@ describe("Saved prompts API", () => {
 describe("GET /api/images/:tag/status", () => {
   it("returns the pull state for an image", async () => {
     mockImagePullGetState.mockReturnValueOnce({
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       status: "ready",
       progress: [],
     });
 
-    const res = await app.request("/api/images/the-companion%3Alatest/status");
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/status");
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.image).toBe("the-companion:latest");
+    expect(json.image).toBe("aura-companion-sandbox:latest");
     expect(json.status).toBe("ready");
   });
 });
@@ -1671,25 +2120,25 @@ describe("POST /api/images/:tag/pull", () => {
   it("triggers a pull and returns the current state", async () => {
     vi.spyOn(containerManager, "checkDocker").mockReturnValue(true);
     mockImagePullGetState.mockReturnValueOnce({
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       status: "pulling",
       progress: [],
       startedAt: Date.now(),
     });
 
-    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/pull", {
       method: "POST",
     });
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
-    expect(mockImagePullPull).toHaveBeenCalledWith("the-companion:latest");
+    expect(mockImagePullPull).toHaveBeenCalledWith("aura-companion-sandbox:latest");
   });
 
   it("returns 503 when Docker is not available", async () => {
     vi.spyOn(containerManager, "checkDocker").mockReturnValue(false);
 
-    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/pull", {
       method: "POST",
     });
     expect(res.status).toBe(503);
@@ -1727,6 +2176,12 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 123,
     });
 
@@ -1755,6 +2210,13 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -1784,6 +2246,12 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 123,
     });
 
@@ -1812,6 +2280,13 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -1842,6 +2317,12 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 100,
     });
 
@@ -1880,6 +2361,12 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 456,
     });
 
@@ -1930,6 +2417,13 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -1959,6 +2453,12 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 789,
     });
 
@@ -1977,6 +2477,66 @@ describe("PUT /api/settings", () => {
       linearAutoTransitionStateId: undefined,
       linearAutoTransitionStateName: undefined,
     });
+  });
+
+  // aura-diet 2026-10: session defaults (solo + KB on demand) are settable
+  // via PUT /settings with closed-set validation and echoed back.
+  it("accepts defaultSessionMode + kbAutoPrime and echoes them", async () => {
+    const base = settingsManager.getSettings();
+    vi.mocked(settingsManager.updateSettings).mockReturnValueOnce({
+      ...base,
+      defaultSessionMode: "council",
+      kbAutoPrime: true,
+    });
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultSessionMode: "council", kbAutoPrime: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultSessionMode: "council", kbAutoPrime: true }),
+    );
+    const json = await res.json();
+    expect(json.defaultSessionMode).toBe("council");
+    expect(json.kbAutoPrime).toBe(true);
+  });
+
+  // Usage-limit auto-resume toggle: accepted, echoed, and announced on the
+  // bus so the orchestrator can drop pending resumes when switched off.
+  it("accepts autoResumeAfterLimit, echoes it and emits settings:auto-resume-changed", async () => {
+    const { companionBus } = await import("./event-bus.js");
+    const seen: boolean[] = [];
+    const off = companionBus.on("settings:auto-resume-changed", ({ enabled }) => {
+      seen.push(enabled);
+    });
+    const base = settingsManager.getSettings();
+    vi.mocked(settingsManager.updateSettings).mockReturnValueOnce({ ...base, autoResumeAfterLimit: false });
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autoResumeAfterLimit: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ autoResumeAfterLimit: false }));
+    expect((await res.json()).autoResumeAfterLimit).toBe(false);
+    expect(seen).toEqual([false]);
+    off();
+  });
+
+  it.each([
+    [{ defaultSessionMode: "pair" }, "defaultSessionMode must be 'solo' or 'council'"],
+    [{ kbAutoPrime: "yes" }, "kbAutoPrime must be a boolean"],
+    [{ autoResumeAfterLimit: "yes" }, "autoResumeAfterLimit must be a boolean"],
+  ])("rejects invalid session defaults %j with 400", async (body, error) => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error });
+    expect(settingsManager.updateSettings).not.toHaveBeenCalled();
   });
 
   it("updates only model without overriding key", async () => {
@@ -2005,6 +2565,12 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 999,
     });
 
@@ -2102,6 +2668,12 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 500,
     });
 
@@ -2329,6 +2901,12 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2365,6 +2943,12 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2454,6 +3038,12 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2550,6 +3140,12 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2611,6 +3207,12 @@ describe("GET /api/linear/connection", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2647,6 +3249,12 @@ describe("GET /api/linear/connection", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2705,6 +3313,12 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2745,6 +3359,12 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2784,6 +3404,12 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2825,6 +3451,12 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2900,6 +3532,12 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2954,6 +3592,12 @@ describe("GET /api/linear/projects", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2990,6 +3634,12 @@ describe("GET /api/linear/projects", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3056,6 +3706,12 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3092,6 +3748,12 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3173,6 +3835,12 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3720,11 +4388,13 @@ index 0000000..e69de29
 // ─── Backends ─────────────────────────────────────────────────────────────────
 
 describe("GET /api/backends", () => {
-  it("returns both backends with availability status", async () => {
+  it("returns both backends with availability + per-backend auth status", async () => {
     // resolveBinary returns a path for both binaries
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude")
       .mockReturnValueOnce("/usr/bin/codex");
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "authorized", authMethod: "oauth" });
+    mockGetCodexAuthStatus.mockReturnValueOnce({ authState: "unauthorized" });
     mockProbePairingCapability.mockResolvedValueOnce({
       primary: { binary: "claude", available: true, version: "1.0.0" },
       observer: { binary: "codex", available: true, version: "1.0.0" },
@@ -3736,17 +4406,34 @@ describe("GET /api/backends", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual([
-      { id: "claude", name: "Claude Code", available: true },
+      { id: "claude", name: "Claude Code", available: true, authState: "authorized", authMethod: "oauth" },
       {
         id: "codex",
         name: "Codex",
         available: true,
+        authState: "unauthorized",
         councilObserverReviewAvailable: true,
       },
     ]);
   });
 
-  it("marks backends as unavailable when binary is not found", async () => {
+  it("surfaces an expired Claude OAuth token as authState=expired", async () => {
+    mockResolveBinary
+      .mockReturnValueOnce("/usr/bin/claude")
+      .mockReturnValueOnce(null);
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "expired", authMethod: "oauth" });
+    mockProbePairingCapability.mockResolvedValueOnce({
+      primary: { binary: "claude", available: true, version: "1.0.0" },
+      observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
+      supported: false,
+    });
+
+    const res = await app.request("/api/backends", { method: "GET" });
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ id: "claude", authState: "expired", authMethod: "oauth" });
+  });
+
+  it("marks backends as unavailable when binary is not found (auth not probed)", async () => {
     // resolveBinary returns null for both
     mockResolveBinary
       .mockReturnValueOnce(null)
@@ -3761,6 +4448,7 @@ describe("GET /api/backends", () => {
 
     expect(res.status).toBe(200);
     const json = await res.json();
+    // No authState when the binary is absent — auth is moot and not computed.
     expect(json).toEqual([
       { id: "claude", name: "Claude Code", available: false },
       {
@@ -3771,12 +4459,15 @@ describe("GET /api/backends", () => {
         councilObserverReviewReason: "Codex CLI not detected — install or sign in.",
       },
     ]);
+    expect(mockGetClaudeAuthStatus).not.toHaveBeenCalled();
+    expect(mockGetCodexAuthStatus).not.toHaveBeenCalled();
   });
 
   it("handles mixed availability", async () => {
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude") // claude found
       .mockReturnValueOnce(null); // codex not found
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "authorized", authMethod: "env" });
     mockProbePairingCapability.mockResolvedValueOnce({
       primary: { binary: "claude", available: true, version: "1.0.0" },
       observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
@@ -3788,7 +4479,9 @@ describe("GET /api/backends", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json[0].available).toBe(true);
+    expect(json[0].authState).toBe("authorized");
     expect(json[1].available).toBe(false);
+    expect(json[1].authState).toBeUndefined();
     expect(json[1].councilObserverReviewAvailable).toBe(false);
     expect(json[1].councilObserverReviewReason).toBe("Codex CLI not detected — install or sign in.");
   });
@@ -3811,9 +4504,10 @@ describe("GET /api/backends/:id/models", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     // Should only include visible models, sorted by priority
+    // Registry mock returns null for every slug → each is flagged untested.
     expect(json).toEqual([
-      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model" },
-      { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini", description: "Fast model" },
+      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model", untested: true },
+      { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini", description: "Fast model", untested: true },
     ]);
   });
 
@@ -3864,9 +4558,10 @@ describe("GET /api/backends/:id/models", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
+    // Registry mock returns null → each served model carries `untested: true`.
     expect(body).toEqual([
-      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8" },
-      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6" },
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8", untested: true },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6", untested: true },
     ]);
   });
 
@@ -3944,7 +4639,7 @@ describe("GET /api/backends/:id/models", () => {
     expect(json[0]).not.toHaveProperty("riskFlags");
   });
 
-  it("leaves a model untouched when the registry does not annotate it (backward-compatible passthrough)", async () => {
+  it("marks a model the registry does not annotate as untested (honest status; additive field old clients ignore)", async () => {
     const cacheContent = JSON.stringify({
       models: [
         { slug: "gpt-5.2-codex", display_name: "gpt-5.2-codex", description: "Frontier model", visibility: "list", priority: 0 },
@@ -3952,14 +4647,62 @@ describe("GET /api/backends/:id/models", () => {
     });
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(cacheContent);
-    // Default mock already returns null; assert no status/replacement is added.
+    // Default mock returns null (not in registry). No lifecycle status is
+    // invented, but the model is flagged `untested` so the dropdown can say
+    // so instead of implying it was verified.
     const res = await app.request("/api/backends/codex/models", { method: "GET" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual([
-      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model" },
+      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model", untested: true },
     ]);
+    expect(json[0]).not.toHaveProperty("status");
+  });
+
+  it("a registry-bundled model (opus-5-5) is NOT flagged untested", async () => {
+    // The operator's daily model was labelled "Untested" because the bundled
+    // registry was stale. A registry entry means verified: no `untested`.
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "ok",
+      source: "network",
+      fetched_at: 1_000_000_000_000,
+      models: [{ value: "claude-opus-5-5", label: "Opus 5.5", description: "Claude Opus 5.5" }],
+    });
+    vi.mocked(modelRegistry.lookupModel).mockReturnValueOnce({
+      id: "claude-opus-5-5", backend: "claude", status: "active", replacement: null, tier: "max",
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+    const json = await res.json();
+    expect(json).toEqual([
+      { value: "claude-opus-5-5", label: "Opus 5.5", description: "Claude Opus 5.5", status: "active", replacement: null },
+    ]);
+    expect(json[0]).not.toHaveProperty("untested");
+  });
+
+  it("a model observed working in a session is verifiedBy=observed, not untested", async () => {
+    // Not in the registry, but a session completed a successful turn on it.
+    const cacheContent = JSON.stringify({
+      models: [
+        { slug: "gpt-6-sol", display_name: "gpt-6-sol", description: "Observed", visibility: "list", priority: 0 },
+        { slug: "gpt-5.6-luna", display_name: "gpt-5.6-luna", description: "Never run", visibility: "list", priority: 1 },
+      ],
+    });
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(cacheContent);
+    const has = vi.fn((backend: string, id: string) => backend === "codex" && id === "gpt-6-sol");
+    vi.mocked(verifiedModels.getVerifiedModelStore).mockReturnValue({ has } as any);
+    try {
+      const res = await app.request("/api/backends/codex/models", { method: "GET" });
+      const json = await res.json();
+      expect(json).toEqual([
+        { value: "gpt-6-sol", label: "gpt-6-sol", description: "Observed", verifiedBy: "observed" },
+        { value: "gpt-5.6-luna", label: "gpt-5.6-luna", description: "Never run", untested: true },
+      ]);
+    } finally {
+      vi.mocked(verifiedModels.getVerifiedModelStore).mockReturnValue(null);
+    }
   });
 
   it("overlays registry annotations onto claude models (claude branch)", async () => {
@@ -4259,8 +5002,9 @@ describe("POST /api/sessions/create-stream", () => {
     });
 
     expect(res.status).toBe(200);
+    // The stream route applies the same worktree-isolation default (`auto`).
     expect(orchestrator.createSessionStreaming).toHaveBeenCalledWith(
-      body,
+      { ...body, isolation: "auto" },
       expect.any(Function),
     );
   });
@@ -4325,6 +5069,31 @@ describe("POST /api/sessions/create-stream — Council Mode branch (Beck council
     }));
   });
 
+  // P6/FIX-H-MODEL — the SSE branch strips and forwards observerModel the
+  // same way as the plain create route.
+  it("forwards observerModel top-level and rejects a malformed one", async () => {
+    const ok = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", model: "claude-opus-5-5", observerModel: "gpt-5.5", councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    await parseSSE(ok);
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+codex",
+      base: { cwd: "/work/repo", model: "claude-opus-5-5" },
+      observerModel: "gpt-5.5",
+    });
+    orchestrator.createCouncilGroup.mockClear();
+    const bad = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", observerModel: 7, councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    const events = await parseSSE(bad);
+    expect(JSON.parse(events.find((e) => e.event === "error")!.data).error).toMatch(/Invalid observerModel/);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
   it("emits error event for an invalid pairing BEFORE any progress event fires", async () => {
     const res = await app.request("/api/sessions/create-stream", {
       method: "POST",
@@ -4377,6 +5146,49 @@ describe("POST /api/sessions/create-stream — Council Mode branch (Beck council
 // Auth endpoints
 // ---------------------------------------------------------------------------
 
+// SEC-S1: a local reverse proxy (Tailscale Funnel/Serve, nginx) connects
+// from 127.0.0.1 but relays a remote client. The localhost bypass and
+// /auth/auto token hand-out must only apply to a direct local request.
+describe("localhost bypass ignores proxied requests (SEC-S1)", () => {
+  // Hono passes the third app.request() arg as c.env — emulate Bun's
+  // server.requestIP() reporting a loopback TCP source address.
+  const loopbackEnv = { requestIP: () => ({ address: "127.0.0.1" }) };
+
+  it("GET /auth/auto returns the token to a clean loopback request", async () => {
+    const res = await app.request("/api/auth/auto", {}, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: true, token: "test-token-for-routes" });
+  });
+
+  it("GET /auth/auto refuses loopback + X-Forwarded-For", async () => {
+    const res = await app.request("/api/auth/auto", { headers: { "X-Forwarded-For": "203.0.113.7" } }, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it("GET /auth/auto refuses loopback + Tailscale-User-Login", async () => {
+    const res = await app.request("/api/auth/auto", { headers: { "Tailscale-User-Login": "x@example.com" } }, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it("auth middleware: proxied loopback without token -> 401, clean loopback -> passes", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    // No valid token anywhere: only the localhost bypass could let it through.
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      const proxied = await app.request("/api/sessions", { headers: { "X-Forwarded-For": "203.0.113.7" } }, loopbackEnv);
+      expect(proxied.status).toBe(401);
+      const tailscale = await app.request("/api/sessions", { headers: { "Tailscale-User-Login": "x@example.com" } }, loopbackEnv);
+      expect(tailscale.status).toBe(401);
+      const forwarded = await app.request("/api/sessions", { headers: { Forwarded: "for=203.0.113.7" } }, loopbackEnv);
+      expect(forwarded.status).toBe(401);
+      // Local automation (curl localhost:3456/api/... from the box) keeps working.
+      const direct = await app.request("/api/sessions", {}, loopbackEnv);
+      expect(direct.status).toBe(200);
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+  });
+});
+
 describe("POST /api/auth/verify", () => {
   it("returns ok:true for valid token", async () => {
     // verifyToken is mocked to return true, so any token should succeed
@@ -4403,6 +5215,35 @@ describe("POST /api/auth/verify", () => {
     expect(res.status).toBe(401);
     const data = await res.json();
     expect(data.error).toContain("Invalid token");
+  });
+
+  // Council F10: the auth cookie must NOT carry Secure over plain http, or the
+  // browser drops it and LAN/localhost auth silently breaks.
+  it("omits Secure on the auth cookie over plain http", async () => {
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "test-token-for-routes" }),
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("companion_auth=");
+    expect(setCookie.toLowerCase()).not.toContain("secure");
+  });
+
+  // Council F10: behind an HTTPS-terminating proxy the cookie MUST be Secure.
+  it("marks the auth cookie Secure when x-forwarded-proto is https", async () => {
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-forwarded-proto": "https",
+      },
+      body: JSON.stringify({ token: "test-token-for-routes" }),
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie.toLowerCase()).toContain("secure");
   });
 });
 
@@ -4637,7 +5478,17 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
 
   it("kills process in container when session has containerId", async () => {
     launcher.getSession.mockReturnValue({ pid: 1234, containerId: "cid123" });
-    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+    // P3-5/P3-7: the kill now first re-enumerates the session's dev processes
+    // (ownership scan). First execInContainer call = the lsof scan (must
+    // surface pid 9999); subsequent call = the kill itself.
+    const execSpy = vi.spyOn(containerManager, "execInContainer")
+      .mockReturnValueOnce(
+        [
+          "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+          "node     9999 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+        ].join("\n"),
+      )
+      .mockReturnValue("");
 
     const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
       method: "POST",
@@ -4656,6 +5507,13 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
 
   it("kills process on host when session has no container", async () => {
     launcher.getSession.mockReturnValue({ pid: 1234 });
+    // P3-5/P3-7: ownership scan must surface pid 9999 as a dev process.
+    vi.mocked(execSync).mockReturnValueOnce(
+      [
+        "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+        "node     9999 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+      ].join("\n"),
+    );
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
     const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
@@ -4664,6 +5522,48 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.ok).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(9999, "SIGTERM");
+
+    killSpy.mockRestore();
+  });
+
+  // ── P3-5 / P3-7: arbitrary-process-kill hardening ───────────────────────
+  it("refuses (403) to kill a pid that is not one of the session's dev processes", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    // Scan surfaces a DIFFERENT dev pid (4321), not the requested 9999.
+    vi.mocked(execSync).mockReturnValueOnce(
+      [
+        "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+        "node     4321 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+      ].join("\n"),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error).toContain("not one of this session's dev processes");
+    expect(killSpy).not.toHaveBeenCalled();
+
+    killSpy.mockRestore();
+  });
+
+  it("fails closed (500) and does not kill when the ownership scan throws", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    vi.mocked(execSync).mockImplementationOnce(() => {
+      throw new Error("lsof unavailable");
+    });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.error).toContain("Could not verify process ownership");
+    expect(killSpy).not.toHaveBeenCalled();
 
     killSpy.mockRestore();
   });
@@ -4719,7 +5619,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -4752,7 +5652,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -4790,7 +5690,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -4824,7 +5724,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -4905,7 +5805,7 @@ describe("POST /api/sessions/:id/browser/navigate", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -4961,7 +5861,7 @@ describe("GET /api/sessions/:id/browser/proxy/*", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5158,6 +6058,30 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
     const path = await import("node:path");
     tmpCwd = path.join(os.tmpdir(), `aura-checkpoint-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     fs.mkdirSync(tmpCwd, { recursive: true });
+    // The route now requires every artifact to exist in the pair's workspace.
+    fs.mkdirSync(path.join(tmpCwd, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(tmpCwd, "docs", "plan.md"), "# plan\n");
+  });
+
+  // 2026-10-19: an orchestrator working in a /tmp worktree emitted paths that
+  // existed only there; the observer woke, could not read them and filed an
+  // OBSERVER-BLOCKED INFO. The route must reject such a checkpoint up front,
+  // name the missing paths, and write nothing.
+  it("returns 400 naming the artifact paths that do not exist in the pair's workspace, and writes nothing", async () => {
+    const fsp = await import("node:fs/promises");
+    const path = await import("node:path");
+    launcher.getSession.mockReturnValue({ sessionId: "s_orch", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({ sessionGroupId: "grp_test", role: "orchestrator" });
+    const res = await app.request("/api/sessions/s_orch/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload({ artifact_paths: ["docs/plan.md", "web/server/only-in-worktree.ts"] })),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toBe("validation_failed");
+    expect(json.missingPaths).toEqual(["web/server/only-in-worktree.ts"]);
+    await expect(fsp.access(path.join(tmpCwd, ".council", "checkpoints", "council-plan.grp_test.json"))).rejects.toThrow();
   });
 
   // Schema-valid payload. Tests mutate copies of this base to exercise
@@ -5278,7 +6202,9 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
     // history. Reading through promises sidesteps the mock and catches
     // silent JSON re-serialisation drift between writeAtomicJson and
     // parseCheckpointPayload.
-    const expectedPath = path.join(tmpCwd, ".council", "checkpoints", "council-plan.json");
+    // Council review 2026-09-08 #1: checkpoint filename is group-scoped
+    // (`<phase>.<groupId>.json`) so pairs sharing a workspace don't collide.
+    const expectedPath = path.join(tmpCwd, ".council", "checkpoints", "council-plan.grp_test.json");
     expect(json.written).toBe(expectedPath);
     const fsp = await import("node:fs/promises");
     const writtenRaw = await fsp.readFile(expectedPath, "utf8");
@@ -5397,5 +6323,437 @@ describe("getCachedPairingCapability cache behaviour", () => {
     const second = await getCachedPairingCapability({ probeFn: probe, now });
     expect(callCount).toBe(1); // <-- still only one probe call
     expect(second.supported).toBe(false);
+  });
+});
+
+// ─── Sweep orphans endpoints (Tasks 6/7) ──────────────────────────────────────
+//
+// The engine's classification/kill safety is covered hermetically in
+// sweep-orphans.test.ts. These tests cover the HTTP contract: the preview
+// shape + token, the confirm-token gate on execute (absent/stale → reject),
+// the structural AC3 guarantee (a live or caller session is NEVER a candidate
+// and NEVER killed), and the AC6 empty-set no-op. Candidates are driven purely
+// through `listSessions()` — the `/proc` orphan scan reads through the mocked
+// `readFileSync` (returns "") so it contributes nothing, keeping every case
+// deterministic without touching the real process table.
+describe("GET /api/sweep/preview + POST /api/sweep/execute", () => {
+  const JSON_HEADERS = { "content-type": "application/json" };
+  let storeDir: string;
+
+  beforeEach(async () => {
+    const os = await import("node:os");
+    const fs = await import("node:fs");
+    storeDir = `${os.tmpdir()}/aura-sweep-routes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.mkdirSync(storeDir, { recursive: true });
+    launcher.getStoreDirectory.mockReturnValue(storeDir);
+  });
+
+  it("preview returns decision-justifying candidate fields + a binding token (no argvSha256 on the wire)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/preview");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.token).toBe("string");
+    expect(body.token.length).toBeGreaterThan(0);
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]).toMatchObject({
+      id: "stale-session:sess_stale",
+      reason: "stale-session",
+      sessionId: "sess_stale",
+    });
+    // Minimal-disclosure: the internal TOCTOU anchor never crosses the wire.
+    expect(body.candidates[0]).not.toHaveProperty("argvSha256");
+  });
+
+  it("execute refuses a bare confirm with no preview token (400)", async () => {
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
+  it("execute rejects a stale/forged token that does not match the recomputed set (409)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: "deadbeefdeadbeef" }),
+    });
+    expect(res.status).toBe(409);
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
+  it("execute never kills a live (connected) session — only the stale candidate (AC3)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+      { sessionId: "sess_live", state: "connected", createdAt: 0 } as any,
+    ]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    // The live session is excluded from the previewed set up front.
+    expect(pv.candidates.map((x: { sessionId: string }) => x.sessionId)).toEqual(["sess_stale"]);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result.swept).toBe(1);
+    expect(orchestrator.killSession).toHaveBeenCalledWith("sess_stale");
+    expect(orchestrator.killSession).not.toHaveBeenCalledWith("sess_live");
+    // Task 7: the swept session is force-flushed to a terminal record.
+    expect(launcher.markSweptTerminal).toHaveBeenCalledWith("sess_stale");
+  });
+
+  it("excludes the caller's own session even when it is otherwise stale (AC3)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_caller", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/preview", {
+      headers: { "x-companion-caller-session": "sess_caller" },
+    });
+    const body = await res.json();
+    expect(body.candidates).toHaveLength(0);
+  });
+
+  it("empty preview → execute is a safe no-op (AC6)", async () => {
+    launcher.listSessions.mockReturnValue([]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    expect(pv.candidates).toHaveLength(0);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result).toMatchObject({ requested: 0, swept: 0, skipped: 0 });
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+});
+
+// aura-meta-diet P4/C3 — layer flags at the create-session boundary. The
+// route must (a) forward resolved per-session flags to the orchestrator,
+// (b) refuse a Council Mode pair when the observer layer is off (409, never
+// a silent solo downgrade), (c) strip autoProceedOnIdle when auto-proceed is
+// off, and (d) honour the COMPANION_LAYER_* server default.
+describe("POST /api/sessions/create — layer flags (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true };
+  const post = (path: string, body: unknown) =>
+    app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeEach(() => {
+    _resetServerLayerFlagsForTest();
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s1", state: "starting", cwd: "/test", createdAt: 0 },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    _resetServerLayerFlagsForTest();
+  });
+
+  it("forwards resolved per-session flags to the orchestrator", async () => {
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "off" } });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ layers: { ...ALL_ON, knowledge: false } }),
+    );
+  });
+
+  it("unknown flag value falls back to the default, warns, and does not fail the request", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "maybe" } });
+    expect(res.status).toBe(200);
+    // All-default → body forwarded without a layers key (prod parity).
+    expect(orchestrator.createSession.mock.calls[0]![0]).not.toHaveProperty("layers");
+    expect(warn.mock.calls.flat().join(" ")).toContain("layers.knowledge");
+    warn.mockRestore();
+  });
+
+  it("observer=off refuses Council Mode with 409 on both create routes", async () => {
+    for (const path of ["/api/sessions/create", "/api/sessions/create-stream"]) {
+      const res = await post(path, {
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+claude",
+        layers: { observer: "off" },
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("Observer layer is disabled");
+    }
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+
+  it("COMPANION_LAYER_OBSERVER=off (server default) also refuses Council Mode", async () => {
+    vi.stubEnv("COMPANION_LAYER_OBSERVER", "off");
+    const res = await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("autoProceed=off strips autoProceedOnIdle before the coordinator sees it", async () => {
+    await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+      autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 },
+      layers: { autoProceed: "off" },
+    });
+    const base = orchestrator.createCouncilGroup.mock.calls[0]![0]!.base;
+    expect(base).not.toHaveProperty("autoProceedOnIdle");
+    expect(base.layers).toEqual({ ...ALL_ON, autoProceed: false });
+  });
+
+  it("an invalid autoProceedOnIdle is still a 400 even when the layer is off", async () => {
+    // Validation order: the boundary parse runs first, so a malformed
+    // payload is never masked by the layer strip.
+    const res = await post("/api/sessions/create", {
+      cwd: "/test",
+      autoProceedOnIdle: { idleMs: "soon" },
+      layers: { autoProceed: "off" },
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── POST /sessions/:id/continue-in-new — context-overflow handoff ──────────
+// The browser's "Continue in a new session" banner (>= 5 MB transcript) and
+// the sidebar menu both hit this endpoint. It must work from messageHistory
+// alone (the CLI may be dead), write the brief into cwd, spawn a SOLO session
+// and return a reason-aware pickup draft.
+describe("POST /api/sessions/:id/continue-in-new", () => {
+  let tmp: string;
+  beforeEach(async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-route-"));
+  });
+  afterEach(async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function seed(contextAdvisory?: { milestoneBytes: number }) {
+    launcher.getSession.mockReturnValue({ sessionId: "old", cwd: tmp, backendType: "claude", model: "claude-opus-4-8" });
+    bridge.getSession.mockReturnValue({
+      backendType: "claude",
+      state: { cwd: tmp, context_advisory: contextAdvisory ? { ...contextAdvisory, message: "m", action: "continue_in_new", at: 1 } : null },
+      messageHistory: [{ type: "user_message", content: "migrate the billing module", timestamp: 1 }],
+    });
+  }
+
+  it("context_too_large: writes the brief, spawns a solo session, returns the overflow pickup draft", async () => {
+    seed({ milestoneBytes: 10_000_000 });
+    const res = await app.request("/api/sessions/old/continue-in-new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "context_too_large" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.newSessionId).toBe("session-1");
+    // Overflow copy with the recorded size; never the image-limit wording.
+    expect(json.draft).toContain("контекст переполнился (>10 MB)");
+    expect(json.draft).not.toContain("2000px");
+    // Solo spawn in the same cwd/backend/model.
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: tmp, backendType: "claude", model: "claude-opus-4-8" }),
+    );
+    // The brief really landed in cwd with the "Current task" section on top.
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const written = fs.readFileSync(json.handoffPath, "utf8");
+    expect(written).toContain("## Current task (read this first)");
+    expect(written).toContain("migrate the billing module");
+    expect(written).toContain("context overflowed (>10 MB)");
+  });
+
+  it("no reason (sidebar menu): generic draft, no image-limit claim without an image error", async () => {
+    seed();
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.draft).toMatch(/^Pickup с прошлой сессии\./);
+    expect(json.draft).not.toContain("2000px");
+  });
+
+  it("404s for an unknown session and 409s when bridge state is not loaded", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    expect((await app.request("/api/sessions/nope/continue-in-new", { method: "POST" })).status).toBe(404);
+    launcher.getSession.mockReturnValue({ sessionId: "old", cwd: tmp });
+    bridge.getSession.mockReturnValue(null);
+    expect((await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).status).toBe(409);
+  });
+
+  // ── Handoff-file housekeeping (council plan 2026-10-17, AC3) ──────────────
+  // The route prunes OLD endpoint-format briefs after a successful spawn. The
+  // allow-list is the exact `.aura-handoff-<YYYY-MM-DD>T<HH-MM-SS>.md` shape:
+  // an operator's hand-written `.aura-handoff-2026-10-17.md` (date only) must
+  // survive, and a failed spawn must delete nothing.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  async function plantHandoff(name: string, ageMs: number) {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await import("node:path");
+    const p = path.join(tmp, name);
+    fs.writeFileSync(p, "old brief");
+    const t = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(p, t, t);
+    return p;
+  }
+  function endpointName(ageMs: number) {
+    return `.aura-handoff-${new Date(Date.now() - ageMs).toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  }
+
+  it("after a successful spawn, prunes a stale endpoint brief but never the operator's date-only note", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const stale = endpointName(30 * DAY_MS);
+    await plantHandoff(stale, 30 * DAY_MS);
+    const recent = [endpointName(DAY_MS), endpointName(2 * DAY_MS), endpointName(3 * DAY_MS)];
+    for (const [i, n] of recent.entries()) await plantHandoff(n, (i + 1) * DAY_MS);
+    await plantHandoff(".aura-handoff-2026-01-01.md", 300 * DAY_MS); // operator note
+
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    const left = fs.readdirSync(tmp);
+    expect(left).toContain(json.handoffFilename); // the new brief
+    expect(left).not.toContain(stale); // 4th-newest AND > 7 days → pruned
+    for (const n of recent) expect(left).toContain(n);
+    expect(left).toContain(".aura-handoff-2026-01-01.md");
+  });
+
+  it("a failed spawn deletes nothing (housekeeping runs only after createSession succeeded)", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const stale = endpointName(30 * DAY_MS);
+    await plantHandoff(stale, 30 * DAY_MS);
+    for (let i = 1; i <= 3; i++) await plantHandoff(endpointName(i * DAY_MS), i * DAY_MS);
+    orchestrator.createSession.mockResolvedValueOnce({ ok: false, error: "no cli", status: 500 } as never);
+
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(500);
+    expect(fs.readdirSync(tmp)).toContain(stale);
+  });
+
+  // The 500 body must stay generic: the absolute path and errno go to the log
+  // only (review 2026-10-17, beck #3 / hunt). Three attempts are the ceiling.
+  it("three occupied seconds in a row → 500 with a generic body that leaks no path, nothing spawned", async () => {
+    seed();
+    const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);
+    for (const sec of ["00", "01", "02"]) await plantHandoff(`.aura-handoff-2026-10-17T12-00-${sec}.md`, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+    orchestrator.createSession.mockClear();
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+      expect(JSON.stringify(body)).not.toMatch(/EEXIST|EACCES/);
+      expect(orchestrator.createSession).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an unwritable workspace → 500 after one attempt, generic body, no brief created", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    fs.chmodSync(tmp, 0o500);
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+    } finally {
+      fs.chmodSync(tmp, 0o700);
+    }
+    expect(fs.readdirSync(tmp).filter((n) => n.startsWith(".aura-handoff-"))).toEqual([]);
+  });
+
+  it("two handoffs in the same second do not overwrite each other (exclusive write → next-second name)", async () => {
+    seed();
+    const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+    try {
+      const first = await (await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).json();
+      const second = await (await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).json();
+      expect(first.handoffFilename).toBe(".aura-handoff-2026-10-17T12-00-00.md");
+      expect(second.handoffFilename).toBe(".aura-handoff-2026-10-17T12-00-01.md");
+      const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+      expect(fs.readdirSync(tmp).filter((n) => n.startsWith(".aura-handoff-"))).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+// Diagnostics plan Task 13 (hunt 1): the four Diagnostics routes sit BEHIND
+// the auth middleware — the overview exposes process topology and the POSTs
+// move KB lines, so an unauthenticated request must get 401 and never reach
+// the handler.
+describe("Diagnostics routes — auth", () => {
+  it("answers 401 on all four routes without a valid token and never calls the handlers", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    const diag = {
+      overview: vi.fn(),
+      status: vi.fn(),
+      requestRun: vi.fn(),
+      isRunning: vi.fn(() => false),
+      currentReport: vi.fn(() => null),
+      validate: vi.fn(),
+      apply: vi.fn(),
+      afterDecisions: vi.fn(),
+    };
+    const protectedApp = new Hono();
+    protectedApp.route(
+      "/api",
+      createRoutes(orchestrator, launcher, bridge, terminalManager as any, undefined, undefined, undefined, undefined, undefined, undefined, diag as any),
+    );
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      for (const [method, path] of [
+        ["GET", "/api/diagnostics/overview"],
+        ["GET", "/api/diagnostics/kb-analysis/latest"],
+        ["POST", "/api/diagnostics/kb-analysis/run"],
+        ["POST", "/api/diagnostics/kb-analysis/decisions"],
+      ] as const) {
+        const res = await protectedApp.request(path, { method, headers: { "Content-Type": "application/json" }, body: method === "POST" ? "{}" : undefined });
+        expect(res.status, `${method} ${path}`).toBe(401);
+      }
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+    expect(diag.overview).not.toHaveBeenCalled();
+    expect(diag.requestRun).not.toHaveBeenCalled();
+    expect(diag.apply).not.toHaveBeenCalled();
+
+    // Positive control (review beck #2): with a valid token the same routes
+    // reach their handlers — so the 401s above prove "behind auth", not "missing".
+    diag.overview.mockReturnValue({ generatedAt: 1 });
+    diag.status.mockReturnValue({ inFlight: null });
+    const ov = await protectedApp.request("/api/diagnostics/overview");
+    expect(ov.status).toBe(200);
+    expect(diag.overview).toHaveBeenCalledTimes(1);
+    expect((await protectedApp.request("/api/diagnostics/kb-analysis/latest")).status).toBe(200);
   });
 });

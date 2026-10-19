@@ -1,11 +1,29 @@
-import { useState, useMemo, type ComponentProps } from "react";
+import { useState, useMemo, useId, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
+import { ObserverFindingsBlock, parseObserverFindingsMessage } from "./chat/ObserverFindingsBlock.js";
+import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+export function MessageBubble({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
+  if (message.role === "system" && message.systemVariant === "resume-interrupted") {
+    return <ResumeInterruptedNote diagnostic={message.content} />;
+  }
+
+  if (message.role === "system" && message.systemVariant === "error") {
+    return (
+      <div className="flex items-center gap-3 py-1 min-w-0">
+        <div className="shrink-0 flex-1 h-px bg-cc-error/30" />
+        <span className="text-[11px] text-cc-error font-mono-code px-1 min-w-0 break-words text-center">
+          {message.content}
+        </span>
+        <div className="shrink-0 flex-1 h-px bg-cc-error/30" />
+      </div>
+    );
+  }
+
   if (message.role === "system") {
     return (
       <div className="flex items-center gap-3 py-1 min-w-0">
@@ -22,6 +40,12 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     return (
       <div className="flex justify-end animate-[userSlideIn_0.3s_ease-out]">
         <div className="max-w-[85%] sm:max-w-[80%] px-3.5 sm:px-4 py-2.5 rounded-[16px] rounded-br-[6px] user-bubble-gradient text-cc-fg shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+          {message.origin === "auto_resume" && (
+            // Sent by Aura after a usage limit reset, not typed by the user.
+            <div className="text-[11px] text-cc-muted mb-1" data-testid="auto-resume-caption">
+              Автопродолжение после лимита
+            </div>
+          )}
           {message.images && message.images.length > 0 && (
             <div className="flex gap-2 flex-wrap mb-2">
               {message.images.map((img, i) => (
@@ -45,7 +69,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   // Assistant message
   return (
     <div className="animate-[fadeSlideIn_0.3s_ease-out]">
-      <AssistantMessage message={message} />
+      <AssistantMessage message={message} isObserverSession={isObserverSession} />
     </div>
   );
 }
@@ -58,6 +82,16 @@ interface ToolGroupItem {
 interface ToolUseInfo {
   name: string;
   input: Record<string, unknown>;
+}
+
+interface ParsedToolAuthError {
+  message: string;
+  requestId?: string;
+  statusCode?: string;
+  /** Original tool-result body, kept so the auth-error card never discards the
+   *  developer's real output — it stays available behind a "show raw" toggle
+   *  (council review 2026-06-30 P1 #4). */
+  raw: string;
 }
 
 type GroupedBlock =
@@ -97,7 +131,137 @@ function mapToolUsesById(blocks: ContentBlock[]): Map<string, ToolUseInfo> {
   return map;
 }
 
-function AssistantMessage({ message }: { message: ChatMessage }) {
+// Local filesystem/search tools never cross a provider auth boundary; their
+// bodies are the main false-positive source (a grep over source that mentions
+// "authentication_error", a failing assertion on "Invalid API key"). The
+// auth-error reframing is reserved for tools that actually hit a provider API
+// (council review 2026-06-30 P1 #4 / P2 #8).
+const NON_PROVIDER_TOOLS = new Set([
+  "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "Grep", "Glob", "LS", "TodoWrite",
+]);
+
+// High-signal, full-phrase auth markers a real provider emits in plaintext
+// (claude + OpenAI/codex shapes). Deliberately NOT short fragments like
+// "invalid api key" that legitimately appear in source or test output — those
+// only count inside a structured error envelope.
+const PROVIDER_AUTH_PHRASES = [
+  "failed to authenticate",
+  "incorrect api key provided",
+  "you didn't provide an api key",
+  "oauth token has expired",
+  "invalid x-api-key",
+  "could not resolve authentication method",
+];
+
+const AUTH_ERROR_TYPE_RE =
+  /(authentication|unauthorized|permission|invalid[_-]?(?:x[_-]?)?api[_-]?key|oauth)/i;
+
+/**
+ * Muted, collapsed note for the result frame Claude emits to close a turn that
+ * was cut off — by a restart (`--resume`) or by the user's Stop; the frame
+ * cannot tell which, so the label is cause-neutral
+ * (`utils/resume-interrupted.ts`). Not an error of the
+ * current work, so it reads like the other system dividers; the raw diagnostic
+ * stays one click away for debugging.
+ *
+ * Exported so `chat/CollapsedSystemMarkers.tsx` can reuse it verbatim inside
+ * an expanded collapsed-marker group — a council review on PR #370 flagged
+ * that the group was discarding `item.content` in favour of the generic
+ * `RESUME_INTERRUPTED_LABEL`, losing the per-marker diagnostic
+ * (`result_type`, `stop_reason`, …) that a lone marker still exposes through
+ * this component.
+ */
+export function ResumeInterruptedNote({ diagnostic }: { diagnostic: string }) {
+  return (
+    <details className="group py-1 min-w-0" data-testid="resume-interrupted-note">
+      <summary className="flex items-center gap-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden min-w-0">
+        <span className="shrink-0 flex-1 h-px bg-cc-border" aria-hidden="true" />
+        <span className="text-[11px] text-cc-muted italic font-mono-code px-1 min-w-0 break-words text-center">
+          {RESUME_INTERRUPTED_LABEL}
+          <span className="not-italic ml-1 group-open:hidden" aria-hidden="true">▸</span>
+          <span className="not-italic ml-1 hidden group-open:inline" aria-hidden="true">▾</span>
+        </span>
+        <span className="shrink-0 flex-1 h-px bg-cc-border" aria-hidden="true" />
+      </summary>
+      <p className="mt-1 text-[11px] text-cc-muted font-mono-code text-center break-words">{diagnostic}</p>
+    </details>
+  );
+}
+
+/** Best-effort extraction of an embedded JSON object (handles a "API Error: 401
+ *  {…}" prefix and a trailing-garbage suffix). Two bounded parse attempts, no
+ *  ReDoS. */
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const start = text.indexOf("{");
+  const lastEnd = text.lastIndexOf("}");
+  if (start === -1 || lastEnd <= start) return null;
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const p = JSON.parse(s) as unknown;
+      return p && typeof p === "object" ? (p as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const whole = tryParse(text.slice(start, lastEnd + 1));
+  if (whole) return whole;
+  let depth = 0;
+  for (let i = start; i <= lastEnd; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) return tryParse(text.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
+function parseToolAuthError(content: string, toolName?: string): ParsedToolAuthError | null {
+  if (toolName && NON_PROVIDER_TOOLS.has(toolName)) return null;
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  // Structured oracle first: a provider error envelope { type:"error",
+  // error:{ type, message } } or an explicit 401/403 status. This is what
+  // distinguishes a real auth failure from arbitrary tool output that merely
+  // mentions auth.
+  const obj = extractJsonObject(trimmed);
+  const errEnvelope =
+    obj && typeof obj.error === "object" && obj.error
+      ? (obj.error as Record<string, unknown>)
+      : obj;
+  const errorType = typeof errEnvelope?.type === "string" ? errEnvelope.type : undefined;
+  const envelopeMessage =
+    typeof errEnvelope?.message === "string" ? errEnvelope.message : undefined;
+  const requestId =
+    (typeof obj?.request_id === "string" ? obj.request_id : undefined)
+    ?? trimmed.match(/"request_id"\s*:\s*"([^"\\]+)"/)?.[1];
+
+  const numericStatus =
+    (typeof obj?.api_error_status === "number" ? String(obj.api_error_status) : undefined)
+    ?? (typeof obj?.status === "number" ? String(obj.status) : undefined)
+    ?? trimmed.match(/\b(?:API Error|status(?:Code)?|HTTP)\b[^0-9]{0,12}(\d{3})/i)?.[1];
+
+  const statusIsAuth = numericStatus === "401" || numericStatus === "403";
+  const typeIsAuth = errorType ? AUTH_ERROR_TYPE_RE.test(errorType) : false;
+
+  // Fallback for bodies with no JSON envelope (e.g. an OpenAI plaintext key
+  // error): require a high-signal full phrase, never a bare fragment.
+  const lower = trimmed.toLowerCase();
+  const phraseIsAuth = PROVIDER_AUTH_PHRASES.some((p) => lower.includes(p));
+
+  if (!statusIsAuth && !typeIsAuth && !phraseIsAuth) return null;
+
+  let message = envelopeMessage || "Authentication failed";
+  if (numericStatus) {
+    message = `${message} (API ${numericStatus})`;
+  }
+
+  return { message, requestId, statusCode: numericStatus, raw: trimmed };
+}
+
+function AssistantMessage({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
   const blocks = message.contentBlocks || [];
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
@@ -114,7 +278,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           {isThinkingPhase ? (
             <ThinkingBlock text={message.content} />
           ) : (
-            <MarkdownContent text={message.content} showCursor={!!message.isStreaming} />
+            <AssistantTextContent text={message.content} showCursor={!!message.isStreaming} isStreaming={!!message.isStreaming} isObserverSession={isObserverSession} />
           )}
           {isInterrupted ? <InterruptedBadge /> : null}
         </div>
@@ -128,7 +292,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
       <div className="flex-1 min-w-0 space-y-3">
         {grouped.map((group, i) => {
           if (group.kind === "content") {
-            return <ContentBlockRenderer key={i} block={group.block} toolUseById={toolUseById} />;
+            return <ContentBlockRenderer key={i} block={group.block} toolUseById={toolUseById} isObserverSession={isObserverSession} isStreaming={!!message.isStreaming} />;
           }
           // Single tool_use renders as before
           if (group.items.length === 1) {
@@ -163,6 +327,27 @@ function InterruptedBadge() {
       <span>Interrupted — CLI disconnected before reply completed</span>
     </div>
   );
+}
+
+/**
+ * Assistant text with the observer-reply special case: a council observer's
+ * final message is a bare JSON findings array (observer reply contract) —
+ * render it as severity cards instead of raw JSON. A streaming message is
+ * never card-rendered (partial JSON cannot parse, and the gate keeps the
+ * raw→card flip from happening mid-stream); everything that is not a strict
+ * findings array falls through to markdown unchanged.
+ */
+function AssistantTextContent({ text, showCursor = false, isStreaming = false, isObserverSession = false }: { text: string; showCursor?: boolean; isStreaming?: boolean; isObserverSession?: boolean }) {
+  // Provenance gate (observer review 2026-10-15, checkpoint 149 WARN): JSON
+  // shape alone cannot distinguish an observer reply from an ordinary
+  // assistant message that happens to be a findings-shaped array (e.g. a
+  // plain "[]"). Only messages from the council pair's OBSERVER session may
+  // card-render.
+  const findings = isStreaming || !isObserverSession ? null : parseObserverFindingsMessage(text);
+  if (findings) {
+    return <ObserverFindingsBlock findings={findings} />;
+  }
+  return <MarkdownContent text={text} showCursor={showCursor} />;
 }
 
 function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
@@ -283,12 +468,19 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
 function ContentBlockRenderer({
   block,
   toolUseById,
+  isObserverSession = false,
+  isStreaming = false,
 }: {
   block: ContentBlock;
   toolUseById: Map<string, ToolUseInfo>;
+  isObserverSession?: boolean;
+  /** Observer review 2026-10-15 (checkpoint 150, STOP): the streaming gate
+   *  must cover the content-block path too — without it a streaming message
+   *  whose text arrives as blocks could card-render mid-stream. */
+  isStreaming?: boolean;
 }) {
   if (block.type === "text") {
-    return <MarkdownContent text={block.text} />;
+    return <AssistantTextContent text={block.text} isObserverSession={isObserverSession} isStreaming={isStreaming} />;
   }
 
   if (block.type === "thinking") {
@@ -304,8 +496,16 @@ function ContentBlockRenderer({
     const linkedTool = toolUseById.get(block.tool_use_id);
     const toolName = linkedTool?.name;
     const isError = block.is_error ?? false;
+    const authError = isError ? parseToolAuthError(content, toolName) : null;
+    // Bash output is shown raw BEFORE the auth-error check on purpose: a Bash
+    // step (e.g. `curl https://api…` returning 401) is exactly where the body
+    // is most likely to contain auth phrases the user wants to see verbatim, so
+    // it is never reframed into the auth-error card.
     if (toolName === "Bash") {
       return <BashResultBlock text={content} isError={isError} />;
+    }
+    if (authError) {
+      return <ToolAuthErrorBlock error={authError} />;
     }
     return (
       <div className="rounded-lg bg-cc-code-bg overflow-hidden">
@@ -347,6 +547,47 @@ function BashResultBlock({ text, isError }: { text: string; isError: boolean }) 
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ToolAuthErrorBlock({ error }: { error: ParsedToolAuthError }) {
+  const [showRaw, setShowRaw] = useState(false);
+  const headingId = useId();
+  return (
+    // role="status" + aria-labelledby make the error nature explicit to AT
+    // without relying on the red token alone (council review P2 #9 / a11y F6).
+    <div
+      role="status"
+      aria-labelledby={headingId}
+      className="rounded-lg border border-cc-error/25 bg-cc-error/8 px-3 py-2"
+    >
+      <div id={headingId} className="text-[12px] font-medium text-cc-error">
+        Authentication failed
+      </div>
+      <div className="mt-1 text-[12px] leading-relaxed text-cc-fg">
+        {error.message}
+      </div>
+      {error.requestId ? (
+        // Full cc-muted (no opacity) at 11px to clear WCAG 1.4.3 AA in both
+        // themes (a11y F5 — the prior text-[10px] cc-muted/70 failed contrast).
+        <div className="mt-1 text-[11px] font-mono-code text-cc-muted">
+          Request ID: {error.requestId}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => setShowRaw((v) => !v)}
+        aria-expanded={showRaw}
+        className="mt-1.5 text-[10px] text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
+      >
+        {showRaw ? "Hide raw" : "Show raw"}
+      </button>
+      {showRaw ? (
+        <pre className="mt-1 text-[11px] font-mono-code px-2 py-1.5 rounded bg-cc-code-bg text-cc-code-fg/70 whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto">
+          {error.raw}
+        </pre>
+      ) : null}
     </div>
   );
 }

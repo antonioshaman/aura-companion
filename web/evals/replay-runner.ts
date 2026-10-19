@@ -60,6 +60,7 @@ import {
   scorePrecisionCorpus,
   type PrecisionSummary,
 } from "./scorers/precision-corpus.js";
+import { groundingRecallRegression } from "./reports/eval-scorecard.js";
 
 interface ParsedArgs {
   recording?: string;
@@ -294,6 +295,13 @@ function scorePrecisionForCi(dir: string): PrecisionScoreOutcome {
       kind: "error",
       message: `precision corpus has no labels in ${dir}/labels.jsonl — an unlabeled corpus must not pass CI`,
     };
+  }
+  // B2: line grounding must never cost recall on the committed corpus — a
+  // real blocker it downgrades is a regression even when the baseline is
+  // re-generated to match.
+  const recallRegression = groundingRecallRegression(summary);
+  if (recallRegression) {
+    return { kind: "error", message: `precision corpus: ${recallRegression}` };
   }
   return { kind: "ok", summary };
 }

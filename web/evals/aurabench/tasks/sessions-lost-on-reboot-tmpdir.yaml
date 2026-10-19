@@ -1,0 +1,55 @@
+# AuraBench task mined from PR #37 ("feat(persistence): migrate session storage from $TMPDIR to ~/.companion/sessions").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: sessions-lost-on-reboot-tmpdir
+title: "Sessions survive a host reboot (persisted under ~/.companion/sessions)"
+start_commit: fe8a444043371ec0f009ce04cd0d334f9ee4a331
+prompt: |
+  Session JSON is persisted under `$TMPDIR/vibe-sessions/`, which most Linux
+  distros wipe on reboot, so every session is gone after a host restart. Other
+  Companion state already lives under `~/.companion/` (envs, recordings).
+
+  Move the default session directory to `~/.companion/sessions/` and migrate
+  existing data once on boot. In `web/server/session-store.ts` export
+  `migrateLegacyTmpdirSessions(sourceDir, targetDir, logger)` (logger:
+  `{ info(msg: string), warn(msg: string) }`) returning
+  `{ ran, copied, failed, launcherCopied, skippedReason? }`:
+  - `skippedReason: "no_source"` (and `ran: false`, nothing created) when the
+    legacy directory is missing or holds no session files;
+  - `skippedReason: "target_already_populated"` when the target already contains
+    session JSONs (a target holding only `launcher.json` counts as empty);
+  - otherwise copy the session `*.json` files (counted in `copied`) and the
+    `launcher.json` sidecar (reported via `launcherCopied`, not counted as a
+    session), ignore non-JSON files, tolerate per-file failures (`failed`), and
+    never delete anything from the source (rollback must keep working).
+expected_files:
+  - web/server/index.ts
+  - web/server/session-store.ts
+expected_tests:
+  - web/server/session-store.test.ts
+failure_modes:
+  - "legacy files are moved/deleted"
+  - "a populated target is overwritten by stale tmpdir data"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 37
+  merge_commit: 984aed2d6d24f0d057f92f652b339542a77e39bd
+  class: feature
+  hidden_tests:
+    - web/server/session-store.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:18:06.836Z"

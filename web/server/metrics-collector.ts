@@ -4,9 +4,10 @@
 
 import { companionBus } from "./event-bus.js";
 import type { SessionPhase } from "./session-state-machine.js";
+import { createHistogram, recordHistogramValue, serializeHistogram } from "./metrics-histogram.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import type {
   MetricsSnapshot,
-  HistogramSnapshot,
   CounterMetrics,
   GaugeMetrics,
 } from "./metrics-types.js";
@@ -25,79 +26,8 @@ import { getCleanupEventCountLastHour } from "./cleanup/cleanup-events.js";
 // no longer pollute histogram min/max with negative durations.
 import { ageMs } from "./cleanup/age-ms.js";
 
-// ── Histogram bucket boundaries (ms) ──────────────────────────────────────
-
-const TIMING_BUCKETS_MS = [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000] as const;
-
-// ── Internal histogram data structure ─────────────────────────────────────
-
-interface Histogram {
-  count: number;
-  sum: number;
-  min: number;
-  max: number;
-  /** Frequency bucket counts. buckets[i] = count of values in (TIMING_BUCKETS_MS[i-1], TIMING_BUCKETS_MS[i]]. */
-  buckets: number[];
-}
-
-function createHistogram(): Histogram {
-  return {
-    count: 0,
-    sum: 0,
-    min: Infinity,
-    max: -Infinity,
-    buckets: new Array(TIMING_BUCKETS_MS.length + 1).fill(0), // +1 for +Infinity bucket
-  };
-}
-
-function recordHistogramValue(h: Histogram, value: number): void {
-  h.count++;
-  h.sum += value;
-  if (value < h.min) h.min = value;
-  if (value > h.max) h.max = value;
-
-  // Find the appropriate bucket
-  for (let i = 0; i < TIMING_BUCKETS_MS.length; i++) {
-    if (value <= TIMING_BUCKETS_MS[i]) {
-      h.buckets[i]++;
-      return;
-    }
-  }
-  // Falls into the +Infinity bucket
-  h.buckets[TIMING_BUCKETS_MS.length]++;
-}
-
-function serializeHistogram(h: Histogram): HistogramSnapshot {
-  const buckets: Record<string, number> = {};
-  for (let i = 0; i < TIMING_BUCKETS_MS.length; i++) {
-    buckets[String(TIMING_BUCKETS_MS[i])] = h.buckets[i];
-  }
-  buckets["Infinity"] = h.buckets[TIMING_BUCKETS_MS.length];
-
-  return {
-    count: h.count,
-    sum: h.sum,
-    min: h.count > 0 ? h.min : 0,
-    max: h.count > 0 ? h.max : 0,
-    avg: h.count > 0 ? Math.round(h.sum / h.count) : 0,
-    p50Bucket: computePercentileBucket(h, 0.5),
-    p95Bucket: computePercentileBucket(h, 0.95),
-    p99Bucket: computePercentileBucket(h, 0.99),
-    buckets,
-  };
-}
-
-/** Approximate the bucket boundary for a given percentile. */
-function computePercentileBucket(h: Histogram, p: number): number {
-  if (h.count === 0) return 0;
-  const target = Math.ceil(h.count * p);
-  let cumulative = 0;
-  for (let i = 0; i < TIMING_BUCKETS_MS.length; i++) {
-    cumulative += h.buckets[i];
-    if (cumulative >= target) return TIMING_BUCKETS_MS[i];
-  }
-  return Infinity;
-}
+// Histogram primitives live in ./metrics-histogram.ts so other metric
+// modules (delivery-metrics.ts) can share them without an import cycle.
 
 // ── Gauge data provider interface ─────────────────────────────────────────
 
@@ -294,6 +224,10 @@ export class MetricsCollector {
     return getCleanupEventCountLastHour("terminal_reaped", nowMs);
   }
 
+  getArchivedProcessReclaimedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("archived_process_reclaimed", nowMs);
+  }
+
   // ── Snapshot ──────────────────────────────────────────────────────────
 
   getSnapshot(gaugeProvider?: GaugeDataProvider): MetricsSnapshot {
@@ -311,6 +245,7 @@ export class MetricsCollector {
       counters,
       gauges,
       histograms,
+      delivery: deliveryMetrics.getSnapshot(),
     };
   }
 

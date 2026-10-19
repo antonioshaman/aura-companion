@@ -26,9 +26,11 @@ vi.mock("../store.js", () => {
   return { useStore };
 });
 
+const mockCancelAutoResume = vi.fn(async (..._args: unknown[]) => ({ ok: true, cancelled: true }));
 vi.mock("../api.js", () => ({
   api: {
     relaunchSession: (...args: unknown[]) => mockRelaunchSession(...args),
+    cancelAutoResume: (...args: unknown[]) => mockCancelAutoResume(...args),
   },
 }));
 
@@ -134,6 +136,7 @@ function setupStore(overrides: {
   cliFailureReason?: "relaunch_exhausted" | "container_missing" | "container_stopped" | "binary_missing" | "browser_closed_no_reconnect";
   substitutionNotice?: { requested: string; applied: string; reason: "retired" | "blocked" | "overloaded" };
   crossTierSwitch?: { requested: string; replacement: string; previousModel: string };
+  autoResume?: { resetAt: number; fireAt: number; resetSource: string; paused?: boolean };
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -145,6 +148,7 @@ function setupStore(overrides: {
     cliFailureReason,
     substitutionNotice,
     crossTierSwitch,
+    autoResume,
   } = overrides;
 
   const connMap = new Map<string, string>();
@@ -170,8 +174,11 @@ function setupStore(overrides: {
 
   // Sessions map — ChatView reads `sessions.get(sessionId)?.sessionGroupRole`
   // to decide whether to mount Composer (observer half: NO composer).
-  const sessionsMap = new Map<string, { sessionGroupRole?: "orchestrator" | "observer" }>();
-  sessionsMap.set("s1", sessionGroupRole !== undefined ? { sessionGroupRole } : {});
+  const sessionsMap = new Map<string, { sessionGroupRole?: "orchestrator" | "observer"; auto_resume?: unknown }>();
+  sessionsMap.set("s1", {
+    ...(sessionGroupRole !== undefined ? { sessionGroupRole } : {}),
+    ...(autoResume ? { auto_resume: autoResume } : {}),
+  });
 
   mockStoreState = {
     connectionStatus: connMap,
@@ -183,12 +190,13 @@ function setupStore(overrides: {
     setCliReconnecting: mockSetCliReconnecting,
     sessions: sessionsMap,
     // Council Mode slice — ChatView reads `groupBySessionId`, `findings`,
-    // `dismissedStopIds`, and `dismissStop` to render the BlockerBanner
+    // `dismissedStopIds`, `dismissStop` and `disputeStop` to render the BlockerBanner
     // in the permission slot. Empty maps mean no blocker is shown.
     groupBySessionId: new Map(),
     findings: new Map(),
     dismissedStopIds: new Set(),
     dismissStop: vi.fn(),
+    disputeStop: vi.fn(),
     // PLAN T12 (Phase G) - cli-status-slice state + draft-stash actions
     // that the cli-failed primary action wires.
     cliFailures: cliFailureReason
@@ -236,11 +244,51 @@ afterEach(() => {
 });
 
 describe("ChatView", () => {
+  // Usage-limit auto-resume banner: mounted only while the server publishes
+  // a pending resume on session state; "Отменить" calls the cancel API.
+  it("shows the auto-resume banner when a resume is scheduled and cancels it", () => {
+    // Same-day reset relative to NOW: the banner prints only HH:MM for today and
+    // prefixes the date for another day, so a fixed calendar date in the fixture
+    // made this test fail the day after it was written (2026-10-17 on main).
+    const today = new Date();
+    const resetAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 0).getTime();
+    const fireAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 1).getTime();
+    setupStore({ autoResume: { resetAt, fireAt, resetSource: "rate_limit_event" } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение в 15:01");
+    fireEvent.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(mockCancelAutoResume).toHaveBeenCalledWith("s1");
+  });
+
+  it("passes the server's paused flag to the banner", () => {
+    setupStore({ autoResume: { resetAt: 1, fireAt: 1, resetSource: "fallback", paused: true } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение приостановлено");
+  });
+
+  it("does not show the auto-resume banner without a scheduled resume", () => {
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
+  });
+
   // Renders core children (MessageFeed + Composer)
   it("renders MessageFeed and Composer", () => {
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("message-feed")).toBeTruthy();
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("exposes a stable data-testid='chatview' anchor with the min-h-0 flex contract", () => {
+    // council-pair-layout-stability spec job-story: the ChatView column must not
+    // overflow (scrollHeight === clientHeight). The regression guard selects it
+    // via [data-testid="chatview"] and relies on the `flex flex-col h-full
+    // min-h-0` contract — min-h-0 is what lets the inner MessageFeed shrink
+    // instead of growing the document. Pin both the anchor and the class.
+    const { container } = render(<ChatView sessionId="s1" />);
+    const chatview = container.querySelector('[data-testid="chatview"]');
+    expect(chatview).not.toBeNull();
+    expect(chatview?.className).toContain("min-h-0");
+    expect(chatview?.className).toContain("h-full");
   });
 
   // Accessibility scan — needs real timers for async axe import
@@ -466,6 +514,22 @@ describe("ChatView", () => {
     render(<ChatView sessionId="s1" />);
     fireEvent.click(screen.getByTestId("model-fallback-dismiss"));
     expect(mockClearModelSubstitutionNotice).toHaveBeenCalledWith("s1");
+  });
+
+  it("renders the persistent banner for a SERVER-recorded fallback on the session state (Task A.2)", () => {
+    // Spawn substitution / Codex rejection / chain fallback are recorded on
+    // session.model_fallback (replayed on reload) — ChatView must surface them
+    // in the same banner slot, not as an ephemeral toast.
+    setupStore();
+    (mockStoreState.sessions as Map<string, Record<string, unknown>>).set("s1", {
+      model: "claude-opus-4-8",
+      model_fallback: { from: "claude-opus-4-7", to: "claude-opus-4-8", reason: "unresponsive", at: 5 },
+    });
+    render(<ChatView sessionId="s1" />);
+    const banner = screen.getByTestId("model-fallback-banner");
+    expect(banner.getAttribute("data-from")).toBe("Opus 4.7");
+    expect(banner.getAttribute("data-to")).toBe("Opus 4.8");
+    expect(banner.getAttribute("data-reason")).toBe("unresponsive");
   });
 
   it("does NOT render the notice banner when no substitution notice exists", () => {

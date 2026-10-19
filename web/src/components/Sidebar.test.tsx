@@ -22,6 +22,9 @@ const mockApi = {
   unarchiveSession: vi.fn().mockResolvedValue({}),
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
+  // TelemetryNudge (rendered in the sidebar footer) reads/writes telemetryEnabled on mount.
+  getSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
+  updateSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
 };
 
 vi.mock("../api.js", () => ({
@@ -32,6 +35,8 @@ vi.mock("../api.js", () => ({
     unarchiveSession: (...args: unknown[]) => mockApi.unarchiveSession(...args),
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
+    getSettings: (...args: unknown[]) => mockApi.getSettings(...args),
+    updateSettings: (...args: unknown[]) => mockApi.updateSettings(...args),
   },
   fetchGlobalStats: () => Promise.resolve(null),
 }));
@@ -64,10 +69,21 @@ interface MockStoreState {
   markRecentlyRenamed: ReturnType<typeof vi.fn>;
   clearRecentlyRenamed: ReturnType<typeof vi.fn>;
   setSdkSessions: ReturnType<typeof vi.fn>;
+  setConnectionStatus: ReturnType<typeof vi.fn>;
+  setCliConnected: ReturnType<typeof vi.fn>;
+  setCliReconnecting: ReturnType<typeof vi.fn>;
   // Council Mode slice — Sidebar reads these to render per-session
   // pairing badge + unread STOP counter; empty maps mean no badges.
   groupBySessionId: Map<string, string>;
-  groups: Map<string, { pairing: string }>;
+  groups: Map<string, {
+    pairing: string;
+    primarySessionId?: string;
+    observerSessionId?: string;
+    status?: string;
+    convergenceState?: "in-progress" | "converged" | "revoked";
+    cycleNumber?: number;
+    convergenceThreshold?: number;
+  }>;
   findings: Map<string, unknown[]>;
   dismissedStopIds: Set<string>;
   // PLAN T12 (Phase G) - per-session terminal-failure axis.
@@ -139,6 +155,9 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     markRecentlyRenamed: vi.fn(),
     clearRecentlyRenamed: vi.fn(),
     setSdkSessions: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setCliConnected: vi.fn(),
+    setCliReconnecting: vi.fn(),
     groupBySessionId: new Map(),
     groups: new Map(),
     findings: new Map(),
@@ -916,7 +935,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
     expect(mockConnectAllSessions).toHaveBeenCalledWith(serverSessions);
     expect(mockState.setSessionName).toHaveBeenCalledWith("s1", "Server Name");
@@ -966,6 +985,68 @@ describe("Sidebar", () => {
     expect(mockState.markRecentlyRenamed).not.toHaveBeenCalled();
   });
 
+  it("poll hydrates cli/connection status for a connected non-archived session", async () => {
+    // The poll optimistically seeds connection state so a session that IS
+    // connected doesn't flash as disconnected before the WS handshake lands.
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setCliConnected).toHaveBeenCalledWith("s1", true);
+    });
+    expect(mockState.setCliReconnecting).toHaveBeenCalledWith("s1", false);
+    expect(mockState.setConnectionStatus).toHaveBeenCalledWith("s1", "connected");
+  });
+
+  it("poll does NOT hydrate connection status for archived sessions", async () => {
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: true })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+    expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
+  });
+
+  it("poll does NOT hydrate connection status when server state is not connected", async () => {
+    const serverSessions = [makeSdkSession("s1", { state: "starting", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+  });
+
+  it("poll does NOT re-assert connected over a live WS (masking guard)", async () => {
+    // Once the browser WS is live (connectionStatus === "connected"), it owns CLI
+    // liveness. A stale REST snapshot must not re-assert connected and mask a
+    // WS-observed disconnect — Composer gates sending on cliConnected.
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({
+      connectionStatus: new Map([["s1", "connected"]]),
+    });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+    expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
+  });
+
   it("poll gracefully handles API errors", async () => {
     // Verifies that when api.listSessions rejects, the Sidebar does not crash
     // and still renders correctly.
@@ -1012,8 +1093,9 @@ describe("Sidebar", () => {
       expect(mockState.removeSession).toHaveBeenCalledWith("stale-id");
     });
 
-    // setSdkSessions should have been called with the empty list from the server
-    expect(mockState.setSdkSessions).toHaveBeenCalledWith([]);
+    // setSdkSessions should have been called with the empty list from the server,
+    // flagged as the server-authoritative list (drives `sdkSessionsLoaded`).
+    expect(mockState.setSdkSessions).toHaveBeenCalledWith([], { fromServer: true });
   });
 
   it("poll does not remove sessions that still exist on the server", async () => {
@@ -1036,7 +1118,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
 
     // The active session is still on the server — removeSession must NOT be called
@@ -1079,7 +1161,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith([]);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith([], { fromServer: true });
     });
 
     // The newly-connected session must NOT be evicted — it's live even though it
@@ -2018,7 +2100,11 @@ describe("auraIsActiveSession", () => {
 // ─── Council Mode — per-session badge & unread counter ─────────────────────
 
 describe("Sidebar — Council Mode badges", () => {
-  function seedCouncilSession(sessionId: string, pairing: string, stops: { id: string; wasDowngraded?: boolean }[] = []) {
+  function seedCouncilSession(
+    sessionId: string,
+    pairing: string,
+    stops: { id: string; severity?: string; wasDowngraded?: boolean; weakEvidence?: string; disputed?: string; holdsAutoProceed?: true }[] = [],
+  ) {
     const groupId = `grp_for_${sessionId}`;
     const sdkSession = makeSdkSession(sessionId);
     mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
@@ -2029,10 +2115,13 @@ describe("Sidebar — Council Mode badges", () => {
     mockState.groups = new Map([[groupId, { pairing }]]);
     mockState.findings = new Map([[groupId, stops.map((s) => ({
       id: s.id,
-      severity: "STOP",
+      severity: s.severity ?? "STOP",
       claim: "test",
       evidence_path: "src/x.ts",
       wasDowngraded: s.wasDowngraded,
+      weakEvidence: s.weakEvidence,
+      disputed: s.disputed,
+      holdsAutoProceed: s.holdsAutoProceed,
     }))]]);
     mockState.dismissedStopIds = new Set();
   }
@@ -2059,6 +2148,30 @@ describe("Sidebar — Council Mode badges", () => {
     expect(screen.queryByTestId("council-unread-count")).toBeNull();
   });
 
+  // B2/B2b: weak-evidence and disputed STOPs never raise the banner, so the
+  // Sidebar's unread blocker counter must not count them either (it used to
+  // count every non-downgraded STOP).
+  it("counts neither weak-evidence nor disputed STOPs as unread", () => {
+    seedCouncilSession("s_mixed", "claude+codex", [
+      { id: "f1" },
+      { id: "f2", weakEvidence: "no_cited_lines" },
+      { id: "f3", disputed: "shared_anchor" },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
+  });
+
+  // FIX-AP-3: a finding holding auto-proceed is on the banner, so the rail
+  // counts it too, even when it now reads as a downgraded NOTE.
+  it("counts a finding holding auto-proceed as unread", () => {
+    seedCouncilSession("s_held", "claude+codex", [
+      { id: "f1", severity: "NOTE", wasDowngraded: true, holdsAutoProceed: true },
+      { id: "f2", severity: "NOTE", wasDowngraded: true },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
+  });
+
   it("does not render any council badge when the session is not in a group", () => {
     const sdkSession = makeSdkSession("s_solo");
     mockState.sessions = new Map([["s_solo", makeSession("s_solo")]]);
@@ -2068,6 +2181,109 @@ describe("Sidebar — Council Mode badges", () => {
     render(<Sidebar />);
     expect(screen.queryByTestId("council-session-badge")).toBeNull();
     expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+});
+
+// ─── Council Mode — convergence badge derivation (Story 4.1.5) ─────────────
+
+describe("Sidebar — Council convergence badge", () => {
+  // councilInfoFor derives the badge data from GroupRecord and threads it to
+  // SessionItem. These tests exercise the derivation end-to-end (store shape →
+  // rendered badge) so a change to either half can't silently drop the badge.
+  function seedConvergenceSession(
+    sessionId: string,
+    group: {
+      pairing: string;
+      status?: string;
+      convergenceState?: "in-progress" | "converged" | "revoked";
+      cycleNumber?: number;
+      convergenceThreshold?: number;
+      lastReviewNotCounted?: "no_changed_files" | "no_files_read";
+    },
+  ) {
+    const groupId = `grp_for_${sessionId}`;
+    const sdkSession = makeSdkSession(sessionId);
+    mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([[sessionId, true]]);
+    mockState.sessionStatus = new Map([[sessionId, "idle"]]);
+    mockState.groupBySessionId = new Map([[sessionId, groupId]]);
+    // primarySessionId === sessionId so the row is the orchestrator half.
+    mockState.groups = new Map([[groupId, { primarySessionId: sessionId, ...group }]]);
+    mockState.findings = new Map([[groupId, []]]);
+    mockState.dismissedStopIds = new Set();
+  }
+
+  it("renders the mid-cycle badge when the group has convergence progress", () => {
+    seedConvergenceSession("s_cycle", {
+      pairing: "claude+codex",
+      status: "active",
+      convergenceState: "in-progress",
+      cycleNumber: 2,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+  });
+
+  it("renders the converged badge when the group has converged", () => {
+    seedConvergenceSession("s_converged", {
+      pairing: "claude+codex",
+      status: "active",
+      convergenceState: "converged",
+      cycleNumber: 3,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "converged");
+  });
+
+  // P3/CONV-HONEST: an uncounted latest review is threaded from GroupRecord
+  // (lastReviewNotCounted) through councilInfoFor to the row badge.
+  it("threads lastReviewNotCounted to a 'not counted' badge", () => {
+    seedConvergenceSession("s_not_counted", {
+      pairing: "claude+claude",
+      status: "active",
+      convergenceState: "in-progress",
+      cycleNumber: 0,
+      convergenceThreshold: 3,
+      lastReviewNotCounted: "no_files_read",
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "not-counted");
+  });
+
+  it("renders the frozen degraded badge when the group status is degraded", () => {
+    seedConvergenceSession("s_degraded", {
+      pairing: "claude+codex",
+      status: "degraded",
+      convergenceState: "in-progress",
+      cycleNumber: 2,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "degraded");
+  });
+
+  it("renders no convergence badge for a freshly-paired group with no progress", () => {
+    seedConvergenceSession("s_fresh", { pairing: "claude+codex", status: "active" });
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-convergence-badge")).toBeNull();
+  });
+
+  it("renders no convergence badge for a solo (non-council) session", () => {
+    const sdkSession = makeSdkSession("s_solo_conv");
+    mockState.sessions = new Map([["s_solo_conv", makeSession("s_solo_conv")]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([["s_solo_conv", true]]);
+    mockState.sessionStatus = new Map([["s_solo_conv", "idle"]]);
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-convergence-badge")).toBeNull();
   });
 });
 

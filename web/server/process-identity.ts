@@ -42,6 +42,7 @@
 import { readFileSync } from "node:fs";
 import { platform as osPlatform } from "node:os";
 import { log } from "./logger.js";
+import { argvSha256 } from "./cli-runtime-sidecar.js";
 
 /** Probe result. Discriminated union — callers MUST narrow on `kind`. */
 export type ProcessIdentityResult =
@@ -148,9 +149,24 @@ function splitCmdline(raw: string): string[] {
  *
  * Returns `true` on exact-token match, `false` otherwise.
  */
-function argvMatchesSessionId(tokens: string[], expectedSessionId: string): boolean {
+function argvMatchesSessionId(
+  tokens: string[],
+  expectedSessionId: string,
+  expectedArgvSha256?: string | null,
+): boolean {
   const flagIdx = tokens.indexOf("--sdk-url");
-  if (flagIdx < 0 || flagIdx >= tokens.length - 1) return false;
+  if (flagIdx < 0 || flagIdx >= tokens.length - 1) {
+    // stdio transport: a current CLI carries no `--sdk-url` token at all, so
+    // the sessionId is simply not present in argv. The spawn-time sidecar
+    // hash is the equivalent anchor — it pins the exact argv this session was
+    // spawned with, and pid + starttime supply the uniqueness that the
+    // sessionId token supplied for the WebSocket shape. Without this a stdio
+    // session reads as `mismatch` and the reaper kills a healthy CLI.
+    if (expectedArgvSha256) {
+      return argvSha256(tokens) === expectedArgvSha256;
+    }
+    return false;
+  }
   const urlToken = tokens[flagIdx + 1];
 
   // Parse as URL; bail on malformed. The cli-launcher emits
@@ -240,10 +256,11 @@ export function verifyProcessIdentity(
   pid: number,
   expectedSessionId: string,
   expectedStartMs: number | null,
+  expectedArgvSha256?: string | null,
 ): ProcessIdentityResult {
   return verifyProcessIdentityByArgv(
     pid,
-    (tokens) => argvMatchesSessionId(tokens, expectedSessionId),
+    (tokens) => argvMatchesSessionId(tokens, expectedSessionId, expectedArgvSha256),
     expectedStartMs,
   );
 }

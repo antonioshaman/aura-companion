@@ -1,5 +1,255 @@
 # Changelog
 
+## [2.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.5.0...aura-companion-v2.6.0) (2026-10-19)
+
+
+### Features
+
+* **council:** complexity triage gate — solo / economy / full before any roster ([#389](https://github.com/antonioshaman/aura-companion/issues/389)) ([fe85084](https://github.com/antonioshaman/aura-companion/commit/fe850840ac3c246ff33ee0d293276d430f3c962e))
+* **council:** OBSERVER-SOUL.md — observer identity split out of the system prompt ([#391](https://github.com/antonioshaman/aura-companion/issues/391)) ([96f9ab4](https://github.com/antonioshaman/aura-companion/commit/96f9ab45748c96d98f2c62dbc1d5676dde659c3d))
+* **diagnostics:** Diagnostics page and background KB / memory analyzer ([#396](https://github.com/antonioshaman/aura-companion/issues/396)) ([81db267](https://github.com/antonioshaman/aura-companion/commit/81db26760eab465d25cc78ff691257dce12348e8))
+* **landing:** answer "why not just Claude Code/Codex" and add English page ([#376](https://github.com/antonioshaman/aura-companion/issues/376)) ([ea515df](https://github.com/antonioshaman/aura-companion/commit/ea515dfe9fb75d47c14a8f599cf298b74de61b64))
+* **sessions:** offer one-click handoff to a new session when context overflows ([#381](https://github.com/antonioshaman/aura-companion/issues/381)) ([4c72e0a](https://github.com/antonioshaman/aura-companion/commit/4c72e0a5493c19386c45376294d006ed477d764f))
+
+
+### Bug Fixes
+
+* **council:** reject checkpoints with missing artifacts; show when checks and reviews happened ([#397](https://github.com/antonioshaman/aura-companion/issues/397)) ([34ff012](https://github.com/antonioshaman/aura-companion/commit/34ff0128ca38f7b7c7fa7fffd1db6a06062c727e))
+* **home:** cap the new-session model list so Opus 5.5 isn't pushed off-screen ([#386](https://github.com/antonioshaman/aura-companion/issues/386)) ([605f49d](https://github.com/antonioshaman/aura-companion/commit/605f49d493127e124f659e5ef6fd5d9bbd5ac37a))
+* **home:** size the new-session model list to the room above the trigger ([#387](https://github.com/antonioshaman/aura-companion/issues/387)) ([4a23591](https://github.com/antonioshaman/aura-companion/commit/4a23591718ce3aa32ae911a019e9170cbc8e3c11))
+* **landing:** stop scroll flicker by dropping the blend mode on the fixed scanline overlay ([#399](https://github.com/antonioshaman/aura-companion/issues/399)) ([e809c86](https://github.com/antonioshaman/aura-companion/commit/e809c86fde521a8c1d4396716e2544c3c646c5c6))
+* **models:** stop labelling verified models "Untested" ([#379](https://github.com/antonioshaman/aura-companion/issues/379)) ([9730490](https://github.com/antonioshaman/aura-companion/commit/9730490cf19277b030fe69eb9c98c75b3ba9a79f))
+* **server:** defer the drift kill until every parallel tool call is answered ([#392](https://github.com/antonioshaman/aura-companion/issues/392)) ([8344fe4](https://github.com/antonioshaman/aura-companion/commit/8344fe4c07dd22dd878e29d34a8d5d9ab0e6fc92))
+* **server:** key checkpoint-watcher debounce by (file, mtimeNs) so a superseded checkpoint is never silently lost ([#382](https://github.com/antonioshaman/aura-companion/issues/382)) ([6a0ed1b](https://github.com/antonioshaman/aura-companion/commit/6a0ed1b77a318b77120b184ae488c0f9a0205d59))
+* **server:** let the drift kill wait for the main thread's running tool call ([#388](https://github.com/antonioshaman/aura-companion/issues/388)) ([78ec29b](https://github.com/antonioshaman/aura-companion/commit/78ec29b707ce88a75563a52c1e7e4628df27bc57))
+* **sessions:** offer the context-overflow handoff to Codex sessions and to sessions whose CLI is dead ([#384](https://github.com/antonioshaman/aura-companion/issues/384)) ([9a58919](https://github.com/antonioshaman/aura-companion/commit/9a58919addb7bfcf653dc1d9fcaa17f190e7f751))
+* **sessions:** prune stale handoff briefs after a successful continue-in-new, never the operator's notes ([#383](https://github.com/antonioshaman/aura-companion/issues/383)) ([19b70c8](https://github.com/antonioshaman/aura-companion/commit/19b70c8b2504f7aefe9ea139364346ad74ae18db))
+* **stats:** fit the companion-stats Worker in the KV free-tier budget ([#393](https://github.com/antonioshaman/aura-companion/issues/393)) ([52a9f7e](https://github.com/antonioshaman/aura-companion/commit/52a9f7e9ece68eadd2b14b0fbb6ecdaa6228d551))
+
+## [2.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.4.0...aura-companion-v2.5.0) (2026-10-16)
+
+
+### Features
+
+* **council:** built-in second-opinion review on another model ([#372](https://github.com/antonioshaman/aura-companion/issues/372)) ([3474220](https://github.com/antonioshaman/aura-companion/commit/347422088409396136eade6a634bef4f7e3c9c9e))
+* **council:** observer rigor — RU claims, no re-review of answered checkpoints, unverified rubber stamps, probe isolation, unreviewed checkpoints ([#368](https://github.com/antonioshaman/aura-companion/issues/368)) ([8a56a8d](https://github.com/antonioshaman/aura-companion/commit/8a56a8d36a88e28e30730f04d89157228e029d28))
+* **session:** auto-resume sessions after a usage limit resets ([#369](https://github.com/antonioshaman/aura-companion/issues/369)) ([8de9cf5](https://github.com/antonioshaman/aura-companion/commit/8de9cf587e993ad45ba99129938fd32253f17a55))
+* **telemetry:** real Codex turn usage, enriched cache telemetry, cache-rewrite hints ([#365](https://github.com/antonioshaman/aura-companion/issues/365)) ([cf703dc](https://github.com/antonioshaman/aura-companion/commit/cf703dcc4b62447bd78a5f67828ea2dd93336300))
+
+
+### Bug Fixes
+
+* **chat:** collapse repeated restart/drift-recovery markers in the feed ([#370](https://github.com/antonioshaman/aura-companion/issues/370)) ([7ceb6e3](https://github.com/antonioshaman/aura-companion/commit/7ceb6e372f079bfaa81dda71dcc8a2a4da86afc2))
+* **council:** drift-liveness kill guards, silent-stdio discriminator, archived-restore bounce (prod sync) ([#354](https://github.com/antonioshaman/aura-companion/issues/354)) ([fefa8c0](https://github.com/antonioshaman/aura-companion/commit/fefa8c0f6f56da7ba37cc15eea9deecf8858c491))
+* **council:** enforce read-only sandbox for codex observer; tolerate codex 'warning' notification ([#355](https://github.com/antonioshaman/aura-companion/issues/355)) ([46fae23](https://github.com/antonioshaman/aura-companion/commit/46fae234679b009fbc7c8d503791110f356afb24))
+* **council:** host-built observer reviews carry the wake echo so STOP/WARN are not blanket-downgraded to NOTE ([#361](https://github.com/antonioshaman/aura-companion/issues/361)) ([2b4f586](https://github.com/antonioshaman/aura-companion/commit/2b4f586a69e7bb107be3ba6b8f085a92e0f1cacc))
+* **council:** observer findings render as cards after a liveness probe ([#374](https://github.com/antonioshaman/aura-companion/issues/374)) ([1ef1848](https://github.com/antonioshaman/aura-companion/commit/1ef18489b82b255fe8d2e8b388f1e0118f4b56c4))
+* **council:** recover a codex observer whose wake goes silent ([#371](https://github.com/antonioshaman/aura-companion/issues/371)) ([4adb655](https://github.com/antonioshaman/aura-companion/commit/4adb655ed94f914cc32076e2e1461c3639364f8a))
+* **council:** stale review never answers a fresh wake; render observer findings as cards; codex web_search flag ([#358](https://github.com/antonioshaman/aura-companion/issues/358)) ([c933db9](https://github.com/antonioshaman/aura-companion/commit/c933db91c7639e6f1677a6ff3156dbda8fa5b0c1))
+* **council:** start a fresh codex thread on observer prompt drift; tooling failure is not a finding ([#357](https://github.com/antonioshaman/aura-companion/issues/357)) ([790e90f](https://github.com/antonioshaman/aura-companion/commit/790e90f6fe0a467cc33ca0e6e748082efcb7d4c0))
+* **drift:** an open subagent tool call keeps a quiet tree alive (15 min ceiling) ([#356](https://github.com/antonioshaman/aura-companion/issues/356)) ([2d5110a](https://github.com/antonioshaman/aura-companion/commit/2d5110a77a51b65bb8c0184705ad796eba89ddf5))
+* macOS CI, orphan reaper SIGKILL escalation, council log noise, interrupted-turn label, repo hygiene ([#363](https://github.com/antonioshaman/aura-companion/issues/363)) ([fe937ff](https://github.com/antonioshaman/aura-companion/commit/fe937ff48bbee4c0f6bd9c68cdbf86aca2f6e9de))
+* **models:** honest model dropdown and persistent fallback notice ([#367](https://github.com/antonioshaman/aura-companion/issues/367)) ([f080dc8](https://github.com/antonioshaman/aura-companion/commit/f080dc871011da4074d0ba4b14dc7091a816b76b))
+* **models:** show fresh Claude models when the model list fails to load ([#375](https://github.com/antonioshaman/aura-companion/issues/375)) ([9fa0971](https://github.com/antonioshaman/aura-companion/commit/9fa0971a1d846f083ae6e2c06070035bfbf1c8bc))
+* **session:** a model switch actually persists across relaunch ([#360](https://github.com/antonioshaman/aura-companion/issues/360)) ([a9c8972](https://github.com/antonioshaman/aura-companion/commit/a9c897263c8e8f1eb4bb33e8b4459dcc358d41ee))
+* **session:** drift recovery delivers the stalled reply; init probe never interrupts real work ([#366](https://github.com/antonioshaman/aura-companion/issues/366)) ([78d7c22](https://github.com/antonioshaman/aura-companion/commit/78d7c2228d4e7c2e7aad1f35f37650aa18547e62))
+* **session:** resume sessions that were alive before a server restart without waiting for a browser ([#362](https://github.com/antonioshaman/aura-companion/issues/362)) ([78e5f80](https://github.com/antonioshaman/aura-companion/commit/78e5f80f14770b38439271bbaa846669626044e9))
+* **ui:** render aborted_tools resume bookkeeping as the restart marker, not a red error ([#359](https://github.com/antonioshaman/aura-companion/issues/359)) ([abdcdee](https://github.com/antonioshaman/aura-companion/commit/abdcdee8b9e89647bb5d0167b0a3391574cfc19f))
+* **ws:** auto-restore the dialog after a server restart via a heartbeat watchdog ([#352](https://github.com/antonioshaman/aura-companion/issues/352)) ([f18fe31](https://github.com/antonioshaman/aura-companion/commit/f18fe31b39afe99ff1810db34e894878e8051d85))
+
+
+### Performance Improvements
+
+* **server:** gate secret-redaction rules so session saves stop blocking the event loop ([#364](https://github.com/antonioshaman/aura-companion/issues/364)) ([30ea99f](https://github.com/antonioshaman/aura-companion/commit/30ea99fb204b83c630d9a284f408a3b40e8f418a))
+
+## [2.4.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.3.0...aura-companion-v2.4.0) (2026-10-14)
+
+
+### Features
+
+* **home:** show coding-CLI sign-in status in the New Session screen ([#350](https://github.com/antonioshaman/aura-companion/issues/350)) ([f219ce6](https://github.com/antonioshaman/aura-companion/commit/f219ce68dbd4bdff2e86ff6ccc5055d03becb9fe))
+
+
+### Bug Fixes
+
+* **landing:** actualize auraco.space — council chronology, 22 named experts, voice/avatar removal ([#343](https://github.com/antonioshaman/aura-companion/issues/343)) ([a9d72e1](https://github.com/antonioshaman/aura-companion/commit/a9d72e12ce4625f32efc47a97bcfd043e460c9bd))
+* **landing:** self-updating release version + card/SBP donations via CloudTips ([#345](https://github.com/antonioshaman/aura-companion/issues/345)) ([cb2e939](https://github.com/antonioshaman/aura-companion/commit/cb2e939e4129724f7825fd8b34dc487e668f8a6d))
+* **server:** keep active model across relaunch + drop false-positive systemd worktree banner ([#349](https://github.com/antonioshaman/aura-companion/issues/349)) ([e2020d0](https://github.com/antonioshaman/aura-companion/commit/e2020d0b6d1485b0eec77ab36973ae0bda45d8e5))
+* **telemetry:** WS-3 prompt-cache audit — mid-session inject guard, per-turn cache log, interrupted-frame meter fix ([#346](https://github.com/antonioshaman/aura-companion/issues/346)) ([b4d28ab](https://github.com/antonioshaman/aura-companion/commit/b4d28ab482f00adc1d4a5fe6dd4d8a866b3ded85))
+* **ws-bridge:** session model reflects the model actually used, not the spawn --model ([#348](https://github.com/antonioshaman/aura-companion/issues/348)) ([71eaf70](https://github.com/antonioshaman/aura-companion/commit/71eaf708c6b3547435b63a4a7385502379da3edc))
+* **ws-bridge:** WS-3 inject guard actually fires; tolerate codex skills/changed ([#347](https://github.com/antonioshaman/aura-companion/issues/347)) ([abf8310](https://github.com/antonioshaman/aura-companion/commit/abf8310abaf7c1989c6f72cb4f3ef2daa74249a5))
+
+## [2.3.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.2.0...aura-companion-v2.3.0) (2026-10-12)
+
+
+### Features
+
+* **guards:** Claude Code hook pack that gates the costliest agent actions ([#336](https://github.com/antonioshaman/aura-companion/issues/336)) ([698c769](https://github.com/antonioshaman/aura-companion/commit/698c7696c0ee2ef322e88577c227d78b143b962e))
+* **metrics:** measure reply delivery and regression-test the init-probe reconnect path ([#340](https://github.com/antonioshaman/aura-companion/issues/340)) ([3efe901](https://github.com/antonioshaman/aura-companion/commit/3efe9018b258e37f119838fe3ef4a7e5eaa68827))
+* **packs:** aura-check — lessons from 19 projects as executable checks ([#341](https://github.com/antonioshaman/aura-companion/issues/341)) ([783820a](https://github.com/antonioshaman/aura-companion/commit/783820a2a4f4d627ad1093599ae8703c6106f1c1))
+* **sessions:** isolate parallel sessions in dedicated git worktrees by default ([#342](https://github.com/antonioshaman/aura-companion/issues/342)) ([23408af](https://github.com/antonioshaman/aura-companion/commit/23408afbe88e481b79bf0ae341279057d2e2a120))
+* **sessions:** solo sessions and on-demand knowledge base by default ([#337](https://github.com/antonioshaman/aura-companion/issues/337)) ([7458cb6](https://github.com/antonioshaman/aura-companion/commit/7458cb6349dc542c8dcdc1db9f4ea202e5250f30))
+
+
+### Bug Fixes
+
+* **recorder:** redact npm/Gonka/Telegram/KEY=value secrets in recordings, sessions, logs and handoffs ([#338](https://github.com/antonioshaman/aura-companion/issues/338)) ([daff24a](https://github.com/antonioshaman/aura-companion/commit/daff24aa8a54d91f8a7255a5d001b655b5fdabf5))
+
+## [2.2.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.1.0...aura-companion-v2.2.0) (2026-10-12)
+
+
+### Features
+
+* aura meta-diet, part 2 — observer reliability, orchestrator split, AuraBench results ([#334](https://github.com/antonioshaman/aura-companion/issues/334)) ([bce5926](https://github.com/antonioshaman/aura-companion/commit/bce5926d486c0ea59b6ec4965deff38d954573a9))
+
+
+### Bug Fixes
+
+* **council:** host adopts group-less observer review files and stamps the model ([#331](https://github.com/antonioshaman/aura-companion/issues/331)) ([0a30349](https://github.com/antonioshaman/aura-companion/commit/0a30349c990107343b0d127c1374172ce95e166d))
+* **session:** stalled answers caught in seconds; reconnect no longer swallows the next message ([#335](https://github.com/antonioshaman/aura-companion/issues/335)) ([d60c663](https://github.com/antonioshaman/aura-companion/commit/d60c6634e474dec3edb7415f41460f5bd59879a6))
+
+## [2.1.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.1...aura-companion-v2.1.0) (2026-10-07)
+
+
+### Features
+
+* **diagnostics:** event-loop lag detector and CLI wait channels for stdout stalls ([#322](https://github.com/antonioshaman/aura-companion/issues/322)) ([7cd16c8](https://github.com/antonioshaman/aura-companion/commit/7cd16c8a07cfc1459a71c4b936264d1d9c3a715b))
+
+
+### Bug Fixes
+
+* drain pendingMessages on turn_completed; override drift suppression when user messages pending ([#327](https://github.com/antonioshaman/aura-companion/issues/327)) ([97f6a32](https://github.com/antonioshaman/aura-companion/commit/97f6a323b361e9576929b4516915bee884277a7d))
+
+## [2.0.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.0...aura-companion-v2.0.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **session:** drift detector kills only on undelivered model output (P7/FIX-DRIFT-FALSE-KILLS) ([#317](https://github.com/antonioshaman/aura-companion/issues/317)) ([cf2ce66](https://github.com/antonioshaman/aura-companion/commit/cf2ce66f95d13e448434b51ffeb059e84d9aae2a))
+
+## [2.0.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.17.0...aura-companion-v2.0.0) (2026-10-02)
+
+
+### Features
+
+* aura meta-diet — one learning system, lean context, observer reliability, AuraBench harness ([#278](https://github.com/antonioshaman/aura-companion/issues/278)) ([0869448](https://github.com/antonioshaman/aura-companion/commit/0869448c3fb2619362a03199530597e8037e6014))
+* **council:** data-derived tier policy + review-depth thresholds (PRO economy Story 3) ([#208](https://github.com/antonioshaman/aura-companion/issues/208)) ([118a847](https://github.com/antonioshaman/aura-companion/commit/118a847150183fcbf80eb7aa5f40a9bea1d8aa3b))
+* **council:** fail-closed per-seat model tier decision (PRO economy Story 2) ([#207](https://github.com/antonioshaman/aura-companion/issues/207)) ([b36f1f7](https://github.com/antonioshaman/aura-companion/commit/b36f1f732ee31b18c43861366037835d9299dd82))
+* **council:** persistent run-stats store + complexity signal (PRO economy Story 1) ([#206](https://github.com/antonioshaman/aura-companion/issues/206)) ([f34865e](https://github.com/antonioshaman/aura-companion/commit/f34865e587838e89a8ba0b018d03ae9c23d92304))
+* **council:** persistent skip-if-unchanged result cache (PRO economy spec Story 2) ([#210](https://github.com/antonioshaman/aura-companion/issues/210)) ([422b0ce](https://github.com/antonioshaman/aura-companion/commit/422b0ce94a913c5d71750d58ab68fc837137953c))
+* **council:** quality-floor guardrail + CI fixture gate (PRO economy Story 4) ([#209](https://github.com/antonioshaman/aura-companion/issues/209)) ([4df1e6c](https://github.com/antonioshaman/aura-companion/commit/4df1e6c8cf78a9e9946f829ee06c29834d1e806c))
+* **council:** universal adaptive advisor selection, retire 2-stack router (RC-2) ([#202](https://github.com/antonioshaman/aura-companion/issues/202)) ([77657b4](https://github.com/antonioshaman/aura-companion/commit/77657b4f7410309c9b0266303176d8e15cc78982))
+* **council:** workspace-agnostic HTTP routes for run-stats + result-cache ([#211](https://github.com/antonioshaman/aura-companion/issues/211)) ([74a539d](https://github.com/antonioshaman/aura-companion/commit/74a539d5626281a2ce19f1685f1ecd4235495998))
+* **landing:** add search and social preview meta tags (P7/LANDING-META) ([#311](https://github.com/antonioshaman/aura-companion/issues/311)) ([2f2c6a3](https://github.com/antonioshaman/aura-companion/commit/2f2c6a36c589c02dca38a530d7e13485f7930d17))
+
+
+### Bug Fixes
+
+* **aurabench:** extract the diet overlay with portable tar flags (P6/FIX-MAC-TAR) ([#280](https://github.com/antonioshaman/aura-companion/issues/280)) ([#308](https://github.com/antonioshaman/aura-companion/issues/308)) ([ff54fe3](https://github.com/antonioshaman/aura-companion/commit/ff54fe3a751229c8893fa39d878c9287009aa042))
+* **council:** gate emit-closure/back-compat in CI + re-hydrate ObserverPanel on focus (observer follow-ups) ([#203](https://github.com/antonioshaman/aura-companion/issues/203)) ([8e3c206](https://github.com/antonioshaman/aura-companion/commit/8e3c2068d685a0391ac2c558b51f1414499360ae))
+* **security:** cap request bodies at 64 MiB, chunked included (P7/SEC-S9) ([#294](https://github.com/antonioshaman/aura-companion/issues/294)) ([8ee66b3](https://github.com/antonioshaman/aura-companion/commit/8ee66b3bc5979c076eae83ee38212751a3332ed1))
+* **security:** cron jobs default to the safe permission mode (P7/SEC-S5-CRON-DEFAULT) ([#307](https://github.com/antonioshaman/aura-companion/issues/307)) ([955e958](https://github.com/antonioshaman/aura-companion/commit/955e9584ec103b1a016b4a6ab87bc8abe39c40a1))
+* **security:** gate /ws/cli upgrade to direct loopback on the ws transport (P7/SEC-S3) ([#290](https://github.com/antonioshaman/aura-companion/issues/290)) ([1240f24](https://github.com/antonioshaman/aura-companion/commit/1240f24db7e1032c6c31c73593d5b8a34e250a14))
+* **security:** keep sha256 diagnostics in logs, IP for chunked bodies, 0o600 on existing secret files (P7/FIX-P7-REVIEW) ([#305](https://github.com/antonioshaman/aura-companion/issues/305)) ([293ef29](https://github.com/antonioshaman/aura-companion/commit/293ef2907689af240d397584dba71389eb6c5b05))
+* **security:** localhost bypass ignores reverse-proxied requests (P7/SEC-S1) ([#286](https://github.com/antonioshaman/aura-companion/issues/286)) ([22723b2](https://github.com/antonioshaman/aura-companion/commit/22723b2fd3bbc5025a62fe3960cceae51aa54123))
+* **security:** mask secrets in server log lines (P7/LOG-MASK) ([#298](https://github.com/antonioshaman/aura-companion/issues/298)) ([8672620](https://github.com/antonioshaman/aura-companion/commit/8672620e9162f4a70837faef0c42fa501f17fedb))
+* **security:** restrict /api CORS to COMPANION_ALLOWED_ORIGIN (P7/SEC-S2) ([#288](https://github.com/antonioshaman/aura-companion/issues/288)) ([e1bb242](https://github.com/antonioshaman/aura-companion/commit/e1bb242fdaf36ef82e3041a6bf729a798cc1c296))
+* **security:** stop printing the auth token in the startup log (P7/SEC-S6) ([#292](https://github.com/antonioshaman/aura-companion/issues/292)) ([b9d73c6](https://github.com/antonioshaman/aura-companion/commit/b9d73c69ac96d5237f52934035b6d03b1d58731e))
+* **security:** write secret stores with mode 0o600 (P7/SEC-S7) ([#296](https://github.com/antonioshaman/aura-companion/issues/296)) ([05e67ad](https://github.com/antonioshaman/aura-companion/commit/05e67ad7bf92b3323ae49c4671151166485c5c06))
+* **server:** drift detector uses adapter's last-frame-received ts, not transcript mtime ([#201](https://github.com/antonioshaman/aura-companion/issues/201)) ([4f47e7a](https://github.com/antonioshaman/aura-companion/commit/4f47e7aa738e35d500ed38e159b4307d09e951e0))
+* **server:** give --resume spawns a longer init-frame canary deadline ([#197](https://github.com/antonioshaman/aura-companion/issues/197)) ([c572e28](https://github.com/antonioshaman/aura-companion/commit/c572e28f34c44be9dcb7a5e064bc599a66ce2eb0))
+* **server:** kickoff via user-frame + interrupt to force CLI system.init emit ([#200](https://github.com/antonioshaman/aura-companion/issues/200)) ([7b7192a](https://github.com/antonioshaman/aura-companion/commit/7b7192a090080462bc9d634e0cafefb449fa2f3f))
+* **server:** resolveJsonlPath must mirror CLI's `_`→`-` slug conversion, not only `/`→`-` ([#204](https://github.com/antonioshaman/aura-companion/issues/204)) ([902965c](https://github.com/antonioshaman/aura-companion/commit/902965c37510deb2d0d2033c2b6d983a3b777929))
+* **ui:** derive Claude context meter from per-turn occupancy so it drops after /compact ([#196](https://github.com/antonioshaman/aura-companion/issues/196)) ([cbd9b60](https://github.com/antonioshaman/aura-companion/commit/cbd9b60d9aae42cedbe47d28eccdb58151085437))
+
+
+### Miscellaneous Chores
+
+* release 2.0.0 ([#313](https://github.com/antonioshaman/aura-companion/issues/313)) ([a83ebd3](https://github.com/antonioshaman/aura-companion/commit/a83ebd3ace651757921dae6869a866d7afed6ec9))
+
+## [1.17.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.16.0...aura-companion-v1.17.0) (2026-09-12)
+
+
+### Features
+
+* **server:** compaction-advisory banner on session-jsonl milestones ([#190](https://github.com/antonioshaman/aura-companion/issues/190)) ([218a7ab](https://github.com/antonioshaman/aura-companion/commit/218a7ab9467fed6234b5fa10801145796b9579f6))
+* **server:** orphan-reaper recognises stdio-transport Claude subprocesses ([#187](https://github.com/antonioshaman/aura-companion/issues/187)) ([9af8794](https://github.com/antonioshaman/aura-companion/commit/9af8794f7a83ae1ba9edc98aa146dbb0400ee8f0))
+* **server:** recurring-silence model rotation (model-agnostic durable fix) ([#182](https://github.com/antonioshaman/aura-companion/issues/182)) ([4908b01](https://github.com/antonioshaman/aura-companion/commit/4908b01ea7ae27b1b73cd673ada0f32fd8babea3))
+* **server:** silent-stdio drift detector — periodic transcript vs jsonl freshness check ([#189](https://github.com/antonioshaman/aura-companion/issues/189)) ([6467311](https://github.com/antonioshaman/aura-companion/commit/646731165b5d916ba8787804d50fe1ab25ee175c))
+* **sweep:** manual "Sweep orphans" cleanup affordance ([#186](https://github.com/antonioshaman/aura-companion/issues/186)) ([eea5a0c](https://github.com/antonioshaman/aura-companion/commit/eea5a0c91f13f561079c5172f566ce3e121efce5))
+* **ui:** show context-usage meter for Claude sessions (parity with Codex) ([#193](https://github.com/antonioshaman/aura-companion/issues/193)) ([33ac3f2](https://github.com/antonioshaman/aura-companion/commit/33ac3f22f3eae3a22c4dd30b2b673c9391b00480))
+
+
+### Bug Fixes
+
+* **deploy:** resolve bun by absolute path in aura-restart.sh ([#192](https://github.com/antonioshaman/aura-companion/issues/192)) ([ba99a12](https://github.com/antonioshaman/aura-companion/commit/ba99a12cdef393ced782bf08b601dbffed24788d))
+* **server:** relaunch surviving-but-deaf sessions (live PID, dead adapter) after Bun restart ([#184](https://github.com/antonioshaman/aura-companion/issues/184)) ([856dbbb](https://github.com/antonioshaman/aura-companion/commit/856dbbbb9ed9a5ddb559ffc204accd4465814682))
+* **server:** report live backend as connected instead of stale starting ([#185](https://github.com/antonioshaman/aura-companion/issues/185)) ([fb00f7d](https://github.com/antonioshaman/aura-companion/commit/fb00f7d4d9282e5a9bf395bb841219a32a52c424))
+* **server:** validate resume target before discarding cliSessionId (P2-1) ([#194](https://github.com/antonioshaman/aura-companion/issues/194)) ([99152b9](https://github.com/antonioshaman/aura-companion/commit/99152b9ff29af7e14b081d27f23e5a0c46dd46e9))
+* **stability:** merge stability-audit-followups (9 commits from Codex council session) ([#191](https://github.com/antonioshaman/aura-companion/issues/191)) ([0aca94e](https://github.com/antonioshaman/aura-companion/commit/0aca94e012e307706a23b57be28dcd9765893aea))
+
+## [1.16.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.15.0...aura-companion-v1.16.0) (2026-09-10)
+
+
+### Features
+
+* **council:** convergence badge on active sessions + got-045 dedup fix ([#167](https://github.com/antonioshaman/aura-companion/issues/167)) ([26d406e](https://github.com/antonioshaman/aura-companion/commit/26d406e0417dbc0ed691e08927c33014c413afb4))
+* **server:** drive Claude CLI over stdio stream-json instead of --sdk-url ([#169](https://github.com/antonioshaman/aura-companion/issues/169)) ([c675c7f](https://github.com/antonioshaman/aura-companion/commit/c675c7f0e47f867ad842965288e6b34e23f3d663))
+* **server:** force-init-probe on --resume respawn to unstick post-grace recovery ([#181](https://github.com/antonioshaman/aura-companion/issues/181)) ([1883464](https://github.com/antonioshaman/aura-companion/commit/18834645c41c80305c5bbf490be76dc36c858287))
+* **server:** init-frame health canary — surface CLI regressions on first spawn ([#179](https://github.com/antonioshaman/aura-companion/issues/179)) ([6771472](https://github.com/antonioshaman/aura-companion/commit/677147218c54aec15f12c65bb3293222b19f7f92))
+* **server:** pre-spawn substitution for known-broken Claude models ([#176](https://github.com/antonioshaman/aura-companion/issues/176)) ([d5c4905](https://github.com/antonioshaman/aura-companion/commit/d5c4905ef52b46dd6cd295b46e9e1d6872d0753d))
+* **server:** replay last unanswered user_message on adapter respawn ([#177](https://github.com/antonioshaman/aura-companion/issues/177)) ([05b1976](https://github.com/antonioshaman/aura-companion/commit/05b19762a6b98b6267a1349c94e2a7339216f921))
+* **server:** silent-stdio watchdog + Claude model fallback chain ([#175](https://github.com/antonioshaman/aura-companion/issues/175)) ([c55cdc5](https://github.com/antonioshaman/aura-companion/commit/c55cdc518f7780cddf0ee254693c6881f030f1e5))
+* **server:** tune silent-stdio watchdog default 60s→300s + AURA_SILENT_STDIO_TIMEOUT_MS env override ([#180](https://github.com/antonioshaman/aura-companion/issues/180)) ([99249a1](https://github.com/antonioshaman/aura-companion/commit/99249a17c2b3a9b9387135d40aaac1cdb9943644))
+
+
+### Bug Fixes
+
+* **codex:** make onInitError additive so the launcher's recovery survives bridge attach ([#173](https://github.com/antonioshaman/aura-companion/issues/173)) ([5208108](https://github.com/antonioshaman/aura-companion/commit/52081082fd747cc2ecdf9257fbdcb6b659cd0193))
+* **codex:** prefer model tier over version when falling back ([#166](https://github.com/antonioshaman/aura-companion/issues/166)) ([c2210d8](https://github.com/antonioshaman/aura-companion/commit/c2210d8ab0151b78d3a0b4e668ec45a51d21a420))
+* **codex:** retry init thread/start on "Not initialized" race + re-arm spawn checkpoint after observer relaunch ([#172](https://github.com/antonioshaman/aura-companion/issues/172)) ([ae5a288](https://github.com/antonioshaman/aura-companion/commit/ae5a2884bd45027a60c6e8f3e8f6ebd73b7d05bb))
+* **council:** close 16 review findings on the codex-init + review-ownership fixes ([#174](https://github.com/antonioshaman/aura-companion/issues/174)) ([1a68032](https://github.com/antonioshaman/aura-companion/commit/1a68032869a79539c18ea3ae3eecb17cc6a7a454))
+* **council:** normalize observer finding shape and gate the skill drift canary ([#163](https://github.com/antonioshaman/aura-companion/issues/163)) ([01c72df](https://github.com/antonioshaman/aura-companion/commit/01c72df3769427e28a572afa991c632e1826b6a6))
+* **council:** rescan reviews dir before degrading on wake timeout ([#165](https://github.com/antonioshaman/aura-companion/issues/165)) ([26f3b4a](https://github.com/antonioshaman/aura-companion/commit/26f3b4a2853cce868040d1a430c8d585004f1789))
+* **pwa:** auto-apply waiting service worker so stale browsers refresh ([#170](https://github.com/antonioshaman/aura-companion/issues/170)) ([d6f31c5](https://github.com/antonioshaman/aura-companion/commit/d6f31c5f7f3a3a261e4774b46ac71aa3221935b5))
+* **server:** capture real shell PATH — brace-delimit ${PATH} + user-local-first fallback ([#168](https://github.com/antonioshaman/aura-companion/issues/168)) ([b0dc858](https://github.com/antonioshaman/aura-companion/commit/b0dc85895eab3eb03a7c96716060fa345baa27f0))
+* **server:** require two consecutive fast resume-deaths before discarding cliSessionId ([#171](https://github.com/antonioshaman/aura-companion/issues/171)) ([46455ec](https://github.com/antonioshaman/aura-companion/commit/46455ec3c95bb19023bef8b1dd57a93d6b43bd28))
+
+## [1.15.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.14.0...aura-companion-v1.15.0) (2026-08-31)
+
+
+### Features
+
+* **codex:** absorb newer app-server notifications without protocol drift ([#151](https://github.com/antonioshaman/aura-companion/issues/151)) ([3c72c99](https://github.com/antonioshaman/aura-companion/commit/3c72c99255a2b97f00a861e541071558ca8e8c51))
+* **settings:** add model-list refresh + cache/config diagnostics ([#149](https://github.com/antonioshaman/aura-companion/issues/149)) ([aff7fcf](https://github.com/antonioshaman/aura-companion/commit/aff7fcfccb8bea6c030b7647c228c626c809b9ee))
+* **task-panel:** flag 'agent active but not reporting' when task list is stale ([#158](https://github.com/antonioshaman/aura-companion/issues/158)) ([f20db3a](https://github.com/antonioshaman/aura-companion/commit/f20db3acebab181fcb0cc9dac486aadbb5053d65))
+* **telemetry:** count distinct humans online, not installs ([#159](https://github.com/antonioshaman/aura-companion/issues/159)) ([fd2f61d](https://github.com/antonioshaman/aura-companion/commit/fd2f61d389d40077e9d7d558d69e127527a6813d))
+
+
+### Bug Fixes
+
+* **app:** PWA update prompt + council review & codex/auth/sidebar fixes ([#162](https://github.com/antonioshaman/aura-companion/issues/162)) ([6cacd74](https://github.com/antonioshaman/aura-companion/commit/6cacd74b9bc900f361a8688a7bfc67dbe6501f43))
+* **council:** re-arm dead fs.watch watchers + implement EC-13 failsafe tick ([#157](https://github.com/antonioshaman/aura-companion/issues/157)) ([f0c4fd7](https://github.com/antonioshaman/aura-companion/commit/f0c4fd7868bf1f4610800b3b680e9f3d439da433))
+* **server:** guard `new URL(req.url)` against malformed request-lines ([#161](https://github.com/antonioshaman/aura-companion/issues/161)) ([adab701](https://github.com/antonioshaman/aura-companion/commit/adab701aa5a4b9b3593be42f6d32b8a50f94ab60))
+* **telemetry:** count online people not agent sockets; label install units in badge ([#160](https://github.com/antonioshaman/aura-companion/issues/160)) ([c8e7c8d](https://github.com/antonioshaman/aura-companion/commit/c8e7c8d8a5e154a24c55b1802f20bed645c79516))
+
+## [1.14.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.13.0...aura-companion-v1.14.0) (2026-07-01)
+
+
+### Features
+
+* **telemetry:** add footer nudge to opt into the global usage counter ([#147](https://github.com/antonioshaman/aura-companion/issues/147)) ([77879e5](https://github.com/antonioshaman/aura-companion/commit/77879e5d29246037de7ccc0a7e33b536e8db025b))
+
+## [1.13.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.12.0...aura-companion-v1.13.0) (2026-07-01)
+
+
+### Features
+
+* **cleanup:** reclaim leaked CLI processes from archived sessions ([#145](https://github.com/antonioshaman/aura-companion/issues/145)) ([292fc89](https://github.com/antonioshaman/aura-companion/commit/292fc896b3b525d90182efee5eca45cefd34fcfb))
+* **settings:** apply provider credentials to running sessions + render auth errors ([#142](https://github.com/antonioshaman/aura-companion/issues/142)) ([b63698c](https://github.com/antonioshaman/aura-companion/commit/b63698cbfa8887581e048d0e87eff5ed0ddf3f76))
+* **telemetry:** add live "online now" presence counter ([#141](https://github.com/antonioshaman/aura-companion/issues/141)) ([386007d](https://github.com/antonioshaman/aura-companion/commit/386007d6f37da85ec65c9fc732139512c393d338))
+* **telemetry:** default the anonymous usage counter on with an in-app opt-out ([#146](https://github.com/antonioshaman/aura-companion/issues/146)) ([634b198](https://github.com/antonioshaman/aura-companion/commit/634b198fb5fa06a75d2f6dc1cb4f10f1926c3008))
+
 ## [1.12.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.11.0...aura-companion-v1.12.0) (2026-06-16)
 
 

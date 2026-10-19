@@ -51,7 +51,6 @@ export async function generateSessionTitle(
             content: userPrompt,
           },
         ],
-        temperature: 0.2,
       }),
       signal: controller.signal,
     });

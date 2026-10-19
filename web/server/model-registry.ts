@@ -31,6 +31,7 @@
  *   served list will not appear — the registry annotates, it does not list.
  */
 
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
 import { readFileSync, statSync, realpathSync } from "node:fs";
 import { join, resolve as resolvePath, sep } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
@@ -198,6 +199,21 @@ export const BUNDLED_MODEL_REGISTRY: readonly ModelRegistryEntry[] = Object.free
   { id: "claude-opus-4-8", backend: "claude", status: "active", replacement: null, tier: "max" },
   { id: "claude-sonnet-4-6", backend: "claude", status: "active", replacement: null, tier: "balanced" },
   { id: "claude-haiku-4-5-20251001", backend: "claude", status: "active", replacement: null, tier: "fast" },
+  // Verified 2026-10-16 on the prod CLI 2.1.283 (live sessions / stdout
+  // probe). `tier` here does NOT feed the auto-fallback chain — that is the
+  // hand-ordered `CLAUDE_MODEL_FALLBACK_CHAIN` constant — it only gates
+  // operator-configured `replacement` hops (no-cross-tier). Opus family
+  // shares `max`; Fable is its own `frontier` tier so a replacement into or
+  // out of Fable is never a silent swap across price classes.
+  { id: "claude-opus-5-5", backend: "claude", status: "active", replacement: null, tier: "max" },
+  { id: "claude-opus-5", backend: "claude", status: "active", replacement: null, tier: "max" },
+  { id: "claude-opus-4-7", backend: "claude", status: "active", replacement: null, tier: "max" },
+  { id: "claude-fable-5-1", backend: "claude", status: "active", replacement: null, tier: "frontier" },
+  { id: "claude-fable-5", backend: "claude", status: "active", replacement: null, tier: "frontier" },
+  // Codex: the council observer's model (models_cache visibility "list",
+  // hundreds of recorded turns). Other listed gpt-5.6/6.x slugs have no
+  // recorded session on this box — they get verified by observation instead.
+  { id: "gpt-6.1-sol", backend: "codex", status: "active", replacement: null, tier: "max" },
   { id: "gpt-5.3-codex", backend: "codex", status: "active", replacement: null, tier: "max" },
   { id: "gpt-5.2-codex", backend: "codex", status: "active", replacement: null, tier: "balanced" },
   { id: "gpt-5.1-codex-max", backend: "codex", status: "active", replacement: null, tier: "max" },
@@ -501,7 +517,24 @@ export function getModelRegistry(): LoadedModelRegistry {
  * enrichment.
  */
 export function lookupModel(backend: BackendType, id: string): ModelRegistryEntry | null {
-  return getModelRegistry().entries.get(registryKey(backend, id)) ?? null;
+  const entry = getModelRegistry().entries.get(registryKey(backend, id)) ?? null;
+  // Single source of truth for "the spawn path rewrites this model": a Claude
+  // id in the broken-model table reads as `blocked` with the spawn substitute
+  // as its replacement — so the dropdown never offers it as selectable and
+  // the availability resolver agrees with `cli-launcher.ts`.
+  if (backend === "claude") {
+    const sub = resolveModelSubstitution(id);
+    if (sub) {
+      return {
+        id,
+        backend,
+        status: "blocked",
+        replacement: sub.to,
+        ...(entry?.tier !== undefined ? { tier: entry.tier } : {}),
+      };
+    }
+  }
+  return entry;
 }
 
 /** Test-only: drop the cached registry so the next access re-polls disk. */

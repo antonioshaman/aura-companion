@@ -6,6 +6,7 @@ import {
   FindingsLog,
   formatRelativeTime,
   severityClass,
+  formatClockTime,
 } from "./FindingsLog.js";
 import type { ObserverFinding } from "../../types.js";
 
@@ -89,16 +90,17 @@ describe("FindingsLog", () => {
     expect(screen.getByTestId("finding-row-b")).toHaveAttribute("data-severity", "NOTE");
   });
 
-  // Newest-first ordering: the source `findings` array is append-ordered
-  // (council slice pushes each review batch onto the end), so the most
-  // recent finding is last. The rail renders a reversed copy so fresh
-  // findings appear at the top. This pins the DOM order independent of the
-  // (possibly stale) per-finding receivedAt timestamps.
-  it("renders findings newest-first (reverses the append-ordered source array)", () => {
+  // Newest-first ordering. FINDINGS-DEDUP (human decision 2026-09-28)
+  // replaced "reverse the append order" with "newest first by receivedAt":
+  // after a bootstrap the append order was readdir order, so the reversed
+  // rail mixed 18d / 1m / 103d / 1d. receivedAt is now the server-stamped
+  // review time on both the live and the bootstrap path, so it is the
+  // reliable key. Appended out of time order on purpose.
+  it("renders findings newest-first by receivedAt, not by append order", () => {
     const findings = [
-      finding({ id: "oldest", claim: "first appended" }),
-      finding({ id: "middle", claim: "second appended" }),
-      finding({ id: "newest", claim: "last appended" }),
+      finding({ id: "oldest", claim: "first appended", receivedAt: 100 }),
+      finding({ id: "newest", claim: "second appended", receivedAt: 300 }),
+      finding({ id: "middle", claim: "last appended", receivedAt: 200 }),
     ];
     const { container } = render(<FindingsLog findings={findings} nowMs={2_000} />);
     const rows = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']"));
@@ -107,6 +109,67 @@ describe("FindingsLog", () => {
       "finding-row-middle",
       "finding-row-oldest",
     ]);
+  });
+
+  // FINDINGS-DEDUP: the screenshot showed fresh STOPs (1m, 39m) lost in the
+  // middle of an old backlog. An unresolved STOP (same predicate as the
+  // banner) is always on top, even when older than every other finding; a
+  // dismissed STOP and a downgraded one are not blockers and sort by time.
+  // Findings of one review (same receivedAt) keep the observer's order.
+  it("puts unresolved STOPs on top, then newest first, one review in the observer's order", () => {
+    const findings = [
+      finding({ id: "old-stop", severity: "STOP", receivedAt: 10 }),
+      finding({ id: "review-1", severity: "WARN", receivedAt: 500 }),
+      finding({ id: "review-2", severity: "NOTE", receivedAt: 500 }),
+      finding({ id: "dismissed-stop", severity: "STOP", receivedAt: 400 }),
+      finding({ id: "downgraded-stop", severity: "STOP", wasDowngraded: true, receivedAt: 50 }),
+      finding({ id: "fresh-stop", severity: "STOP", receivedAt: 900 }),
+    ];
+    const { container } = render(
+      <FindingsLog findings={findings} nowMs={2_000} dismissedStopIds={new Set(["dismissed-stop"])} />,
+    );
+    const rows = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']"));
+    expect(rows.map((r) => r.getAttribute("data-testid"))).toEqual([
+      "finding-row-fresh-stop",
+      "finding-row-old-stop",
+      "finding-row-review-1",
+      "finding-row-review-2",
+      "finding-row-dismissed-stop",
+      "finding-row-downgraded-stop",
+    ]);
+  });
+
+  // FINDINGS-DEDUP: a reload or reconnect re-delivers the same findings in a
+  // different arrival order (bootstrap first, live events after, or the
+  // reverse). The rendered order must not change; a repeated id renders once.
+  it("renders the same order for any arrival order and shows a repeated id once", () => {
+    const a = finding({ id: "a", receivedAt: 100 });
+    const b = finding({ id: "b", severity: "STOP", receivedAt: 50 });
+    const c = finding({ id: "c", receivedAt: 300 });
+    const order = (list: ObserverFinding[]) => {
+      const { container, unmount } = render(<FindingsLog findings={list} nowMs={2_000} />);
+      const ids = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']")).map((r) => r.getAttribute("data-testid"));
+      unmount();
+      return ids;
+    };
+    const expected = ["finding-row-b", "finding-row-c", "finding-row-a"];
+    expect(order([a, b, c])).toEqual(expected);
+    expect(order([c, a, b])).toEqual(expected);
+    expect(order([b, c, a, c, a])).toEqual(expected);
+  });
+
+  it("passes accessibility scan with a sorted mixed log", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog
+        findings={[
+          finding({ id: "n", receivedAt: 100 }),
+          finding({ id: "s", severity: "STOP", claim: "blocker", receivedAt: 50 }),
+        ]}
+        onDismissStop={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   // Task 12 (a11y cadence response): the row container keeps `role="log"`
@@ -145,6 +208,137 @@ describe("FindingsLog", () => {
     render(<FindingsLog findings={[f]} />);
     expect(screen.getByText(/downgraded/i)).toBeInTheDocument();
     expect(screen.getByTestId("finding-row-d")).toHaveAttribute("data-downgraded", "true");
+  });
+
+  // B2: the new line-grounding downgrade reasons render their own
+  // human-readable chip text (exhaustive map, no fall-through).
+  it.each([
+    ["evidence_lines_out_of_range", /cited lines not in file/],
+    ["evidence_lines_unchanged", /cited lines unchanged this phase/],
+  ] as const)("renders the %s downgrade reason", (reason, text) => {
+    render(<FindingsLog findings={[finding({ id: "d", severity: "STOP", wasDowngraded: true, downgradeReason: reason })]} />);
+    expect(screen.getByLabelText(text)).toBeInTheDocument();
+  });
+
+  // B2: a weakly-grounded STOP stays a STOP in the log (label + dismissable)
+  // but carries a visible, labelled "weak evidence" chip naming why.
+  it("renders a weak-evidence STOP as STOP with a labelled weak-evidence chip", () => {
+    const f = finding({ id: "w", severity: "STOP", weakEvidence: "no_cited_lines" });
+    render(<FindingsLog findings={[f]} onDismissStop={() => {}} />);
+    const row = screen.getByTestId("finding-row-w");
+    expect(row).toHaveAttribute("data-severity", "STOP");
+    expect(row).toHaveAttribute("data-weak-evidence", "true");
+    expect(screen.getByLabelText(/Weak evidence, not raised as a blocker — no cited lines/)).toBeInTheDocument();
+  });
+
+  // B2b: a STOP the server matched to an earlier dismissal stays in the log
+  // as a STOP (still dismissable) with a labelled "disputed earlier" chip
+  // naming how it matched.
+  it.each([
+    ["same_claim", "same claim"],
+    ["shared_anchor", "same quoted code"],
+  ] as const)("renders a disputed (%s) STOP with a labelled chip", (via, text) => {
+    const onDismissStop = vi.fn();
+    render(<FindingsLog findings={[finding({ id: "r", severity: "STOP", disputed: via })]} onDismissStop={onDismissStop} />);
+    const row = screen.getByTestId("finding-row-r");
+    expect(row).toHaveAttribute("data-severity", "STOP");
+    expect(row).toHaveAttribute("data-disputed", "true");
+    expect(screen.getByLabelText(`Disputed earlier, not raised as a blocker — ${text}`)).toBeInTheDocument();
+  });
+
+  it("renders no disputed chip on an ordinary STOP", () => {
+    render(<FindingsLog findings={[finding({ id: "o", severity: "STOP" })]} />);
+    expect(screen.getByTestId("finding-row-o")).toHaveAttribute("data-disputed", "false");
+    expect(screen.queryByText("disputed earlier")).toBeNull();
+  });
+
+  // FIX-AP-3: a held finding (unfrozen STOP now shown as NOTE) is marked in
+  // the log and keeps a Dismiss control, the release a human needs.
+  it("marks a finding holding auto-proceed and lets it be dismissed", () => {
+    const onDismissStop = vi.fn();
+    render(
+      <FindingsLog
+        findings={[finding({ id: "held", severity: "NOTE", claim: "held", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true })]}
+        onDismissStop={onDismissStop}
+      />,
+    );
+    expect(screen.getByTestId("finding-row-held")).toHaveAttribute("data-holds-auto-proceed", "true");
+    expect(screen.getByLabelText("Holds auto-proceed until you dismiss or dispute it")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Dismiss STOP: held"));
+    expect(onDismissStop).toHaveBeenCalledWith("held");
+  });
+
+  it("drops the hold chip and Dismiss once the held finding is dismissed", () => {
+    render(
+      <FindingsLog
+        findings={[finding({ id: "held", severity: "NOTE", claim: "held", holdsAutoProceed: true })]}
+        onDismissStop={() => {}}
+        dismissedStopIds={new Set(["held"])}
+      />,
+    );
+    expect(screen.queryByText("holds auto-proceed")).toBeNull();
+    expect(screen.queryByLabelText("Dismiss STOP: held")).toBeNull();
+  });
+
+  // BANNER-RESOLVED: a STOP dismissed on the server (flag from the REST
+  // bootstrap) or locally stays in the log, dimmed, with a "dismissed" chip
+  // and no Dismiss control; an undismissed STOP shows neither.
+  it("marks server-dismissed and locally dismissed STOPs as dismissed", () => {
+    render(
+      <FindingsLog
+        findings={[
+          finding({ id: "srv", severity: "STOP", claim: "server dismissed", dismissed: true }),
+          finding({ id: "loc", severity: "STOP", claim: "locally dismissed" }),
+          finding({ id: "open", severity: "STOP", claim: "open" }),
+        ]}
+        onDismissStop={() => {}}
+        dismissedStopIds={new Set(["loc"])}
+      />,
+    );
+    const chipIn = (id: string) => screen.getByTestId(`finding-row-${id}`).querySelector("[data-testid='finding-dismissed-chip']");
+    expect(chipIn("srv")).not.toBeNull();
+    expect(chipIn("loc")).not.toBeNull();
+    expect(chipIn("open")).toBeNull();
+    expect(screen.queryByLabelText("Dismiss STOP: server dismissed")).toBeNull();
+    expect(screen.getByLabelText("Dismiss STOP: open")).toBeInTheDocument();
+  });
+
+  it("passes accessibility scan with a dismissed row", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "d", severity: "STOP", claim: "dismissed", dismissed: true })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("passes accessibility scan with a row holding auto-proceed", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "h", severity: "NOTE", claim: "held", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("passes accessibility scan with a disputed row", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "r", severity: "STOP", claim: "again", disputed: "shared_anchor" })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("passes accessibility scan with weak-evidence and line-downgraded rows", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog
+        findings={[
+          finding({ id: "w", severity: "STOP", claim: "weak", weakEvidence: "claim_symbols_not_on_cited_lines" }),
+          finding({ id: "d", severity: "STOP", claim: "range", wasDowngraded: true, downgradeReason: "evidence_lines_out_of_range" }),
+        ]}
+        onDismissStop={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("calls onSelect with the finding when the claim button is clicked", () => {
@@ -213,5 +407,72 @@ describe("FindingsLog", () => {
     const { container } = render(<FindingsLog findings={[]} />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// W15 multi-model review: findings from the observer AND the second-opinion
+// reviewer share one log. Each row then names the model that raised it, and a
+// near-identical claim from the other reviewer folds into the earlier row as
+// "also flagged by <model>" instead of a second row.
+describe("FindingsLog — second opinion", () => {
+  const observer = finding({ id: "obs", severity: "STOP", claim: "cancel races turn-done", observerModel: "gpt-6.1-sol", observerProvider: "codex" });
+  const second = finding({
+    id: "sec",
+    severity: "WARN",
+    claim: "crash-loop storm on relaunch",
+    observerModel: "claude-sonnet-5",
+    observerProvider: "claude",
+    secondOpinion: true,
+  });
+  const dup = finding({
+    id: "dup",
+    severity: "STOP",
+    claim: "cancel races the turn-done handler",
+    observerModel: "claude-sonnet-5",
+    observerProvider: "claude",
+    secondOpinion: true,
+    duplicateOf: "obs",
+  });
+
+  it("shows a model badge on every row once a second-opinion finding exists", () => {
+    render(<FindingsLog findings={[observer, second]} />);
+    expect(screen.getByTestId("finding-reviewer-obs")).toHaveTextContent("gpt-6.1-sol");
+    expect(screen.getByTestId("finding-reviewer-sec")).toHaveTextContent("2nd · claude-sonnet-5");
+    expect(screen.getByTestId("finding-row-sec")).toHaveAttribute("data-second-opinion", "true");
+  });
+
+  it("shows no reviewer badge for an observer-only log (unchanged UI)", () => {
+    render(<FindingsLog findings={[observer]} />);
+    expect(screen.queryByTestId("finding-reviewer-obs")).not.toBeInTheDocument();
+  });
+
+  it("folds a near-duplicate into the earlier finding with an 'also flagged' chip", () => {
+    render(<FindingsLog findings={[observer, dup, second]} />);
+    expect(screen.queryByTestId("finding-row-dup")).not.toBeInTheDocument();
+    const chip = screen.getByTestId("finding-also-flagged-chip");
+    expect(chip).toHaveAccessibleName("Also flagged by claude-sonnet-5");
+    expect(screen.getByTestId("finding-row-obs")).toContainElement(chip);
+  });
+
+  it("keeps a duplicate as its own row when its target is not in the log", () => {
+    render(<FindingsLog findings={[dup]} />);
+    expect(screen.getByTestId("finding-row-dup")).toBeInTheDocument();
+  });
+
+  it("passes accessibility scan with badges and a folded duplicate", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<FindingsLog findings={[observer, dup, second]} onDismissStop={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// Owner request 2026-10-19: each finding shows WHEN it arrived (absolute
+// clock time, with the date when it is not today) next to the relative age,
+// as a <time> element with a machine-readable datetime.
+describe("formatClockTime", () => {
+  it("shows HH:MM for today and the date for older items", () => {
+    const now = new Date(2026, 9, 19, 15, 30).getTime();
+    expect(formatClockTime(new Date(2026, 9, 19, 9, 5).getTime(), now)).toBe("09:05");
+    expect(formatClockTime(new Date(2026, 9, 18, 23, 59).getTime(), now)).toBe("18 Oct 23:59");
   });
 });

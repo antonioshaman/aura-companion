@@ -25,11 +25,12 @@
 import { join } from "node:path";
 import { writeAtomicJson } from "./atomic-write.js";
 import { log } from "./logger.js";
-import type { GroundingResult } from "./observer-grounding.js";
+import type { EvidenceLineFactsProvider, GroundingResult } from "./observer-grounding.js";
 import type { ObserverReviewPayload } from "./council-types.js";
 import {
   EVAL_ARTIFACT_VERSION,
   EVAL_SIDECAR_MAX_BYTES,
+  type EvalLineFacts,
   type EvalRawFinding,
   type EvalSidecarArtifact,
 } from "../evals/schema/eval-artifact.js";
@@ -58,6 +59,42 @@ export interface EmitEvalSidecarArgs {
   grounding: GroundingResult;
   /** Hash of the observer system prompt at spawn — cohorting field. */
   observerPromptSha256: string;
+  /** The line-facts provider the gate consulted (B2). Omitted → no
+   *  `line_facts_by_path` is frozen and the rerun skips line checks. */
+  lineFacts?: EvidenceLineFactsProvider;
+}
+
+/**
+ * Freeze exactly what the line checks read: line count, changed ranges, and
+ * the text of every cited line — never the whole file.
+ */
+function freezeLineFacts(
+  findings: ObserverReviewPayload["findings"],
+  lineFacts: EvidenceLineFactsProvider,
+): Record<string, EvalLineFacts | null> {
+  const out: Record<string, EvalLineFacts | null> = {};
+  for (const p of sortedUnique(findings.map((f) => f.evidence_path))) {
+    const facts = lineFacts(p);
+    if (!facts) {
+      out[p] = null;
+      continue;
+    }
+    const cited: Record<string, string> = {};
+    for (const f of findings) {
+      if (f.evidence_path !== p || !f.evidence_lines) continue;
+      const [start, end] = f.evidence_lines;
+      for (let n = Math.max(1, start); n <= Math.min(end, facts.lineCount); n++) {
+        const text = facts.lineText(n);
+        if (text !== undefined) cited[String(n)] = text;
+      }
+    }
+    out[p] = {
+      line_count: facts.lineCount,
+      changed_ranges: facts.changedRanges ? facts.changedRanges.map(([a, b]) => [a, b] as [number, number]) : null,
+      cited_lines: cited,
+    };
+  }
+  return out;
 }
 
 /** Sort + de-dup a path list so two semantically-identical sidecars serialize
@@ -73,7 +110,7 @@ function sortedUnique(paths: string[]): string[] {
  */
 export function maybeEmitEvalSidecar(args: EmitEvalSidecarArgs): void {
   if (!isEvalSidecarEnabled()) return;
-  const { workspaceRoot, sessionGroupId, payload, manifest, grounding, observerPromptSha256 } = args;
+  const { workspaceRoot, sessionGroupId, payload, manifest, grounding, observerPromptSha256, lineFacts } = args;
   try {
     // The checkpoint id becomes a filename — reject anything that isn't a
     // strict single-segment slug rather than risk a path-traversal write.
@@ -126,7 +163,10 @@ export function maybeEmitEvalSidecar(args: EmitEvalSidecarArgs): void {
         original_severity: d.original.severity,
         reason: d.reason,
       })),
-      grounding_inputs: { existence_by_path },
+      grounding_inputs: {
+        existence_by_path,
+        ...(lineFacts ? { line_facts_by_path: freezeLineFacts(payload.findings, lineFacts) } : {}),
+      },
     };
 
     const target = join(workspaceRoot, ".council", "eval", `${payload.checkpoint_id}.json`);

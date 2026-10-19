@@ -2,11 +2,19 @@
  * Convergence tracker — bidirectional pipeline Story 4.1.
  *
  * Folds the `group:review` event stream into a per-group clean-cycle
- * counter. Three transitions:
+ * counter. Four transitions:
  *
  *   - `cycle-progress`   counter incremented (still below threshold)
  *   - `converged`        counter reached threshold (default 3)
  *   - `revoked`          a STOP arrived after convergence; counter ← 0
+ *   - `not-counted`      a STOP-free review that reviewed nothing (P3/
+ *                        CONV-HONEST): the checkpoint had no changed files,
+ *                        or the host saw the observer read none of them;
+ *                        or grounding downgraded a STOP in it (ASK #13).
+ *                        Counter unchanged — neither advanced nor reset.
+ *
+ * "Converged" means "N reviews in a row without a blocker", nothing more —
+ * the UI says so and never claims the work is ready to ship.
  *
  * Pure-function core (`nextStateAfterReview`) makes the state-machine
  * transitions trivially table-driven from tests. The live wiring
@@ -34,6 +42,36 @@ export interface ConvergenceGroupState {
   convergenceState: ConvergenceState;
   threshold: number;
 }
+
+/** Why a STOP-free review was not folded as a clean cycle. */
+export type ConvergenceNotCountedReason =
+  | "no_changed_files"
+  | "no_files_read"
+  | "downgraded_stop"
+  | "unverified_clean"
+  /** W15: the observer's review is clean but the second opinion it waits on
+   *  has not arrived yet — folded (or not) when it does. */
+  | "awaiting_second_review"
+  /** W15: the second opinion raised a STOP on this checkpoint (that STOP
+   *  already reset the counter) or its STOP was downgraded. */
+  | "second_review_blocked"
+  /** W15: the second opinion was owed but failed / timed out / was
+   *  usage-limited / superseded — a one-reviewer checkpoint is not clean. */
+  | "second_review_missing";
+
+/** W15: what the second-opinion reviewer said about one checkpoint. */
+type SecondVerdict = "clean" | "stop" | "downgraded" | "missing";
+
+interface SecondReviewSlot {
+  /** A second review was dispatched for this checkpoint. */
+  expected: boolean;
+  verdict?: SecondVerdict;
+  /** The observer's clean, countable review waiting for the second verdict. */
+  heldObserverClean?: { observerProvider: string };
+}
+
+/** Per group, checkpoints tracked for second-review gating (bounded). */
+const MAX_SECOND_REVIEW_SLOTS = 64;
 
 export interface ConvergenceTransitionResult {
   next: ConvergenceGroupState;
@@ -136,6 +174,37 @@ export function reviewHasStop(findings: readonly BrowserObserverFinding[]): bool
 }
 
 /**
+ * P3/CONV-HONEST: a review only counts toward convergence when the observer
+ * demonstrably reviewed something — the checkpoint changed ≥1 file AND the
+ * host saw the observer read ≥1 of them (`observer-read-ledger.ts`). Returns
+ * the reason a review is NOT countable, or `null` when it is. STOP reviews
+ * are always folded (a blocker resets the counter whether or not the
+ * observer read anything), so this only gates clean reviews.
+ *
+ * P3/CONV-DOWNGRADE (human decision, ASK #13 option 2): a review whose STOP
+ * was downgraded to NOTE (`wasDowngraded`) is not a clean cycle either — the
+ * observer did raise a blocker, grounding merely could not confirm it. It is
+ * reported as `downgraded_stop` and leaves the counter untouched (no advance,
+ * no reset). A wake-version-mismatch downgrade also sets `wasDowngraded`; the
+ * review's severities are untrusted then, so not counting it is the
+ * conservative reading.
+ */
+export function reviewNotCountedReason(
+  artifactsChanged: number,
+  artifactsRead: number,
+  findings: readonly BrowserObserverFinding[] = [],
+  verification?: "unverified",
+): ConvergenceNotCountedReason | null {
+  if (!(artifactsChanged > 0)) return "no_changed_files";
+  if (!(artifactsRead > 0)) return "no_files_read";
+  if (findings.some((f) => f.wasDowngraded === true)) return "downgraded_stop";
+  // Observer rigor: an empty review whose turn read only the prose artifact
+  // (rubber stamp, grp_879b81b6 checkpoint 148) is not a clean cycle.
+  if (verification === "unverified" && findings.length === 0) return "unverified_clean";
+  return null;
+}
+
+/**
  * Live wiring: bind a per-group state map to the companion bus.
  * Caller provides a getter for the current `frozen` flag (e.g.,
  * `() => coordinator.getGroupStatus(sid) === "degraded"`) so the
@@ -156,6 +225,24 @@ export class ConvergenceTracker {
   private readonly isFrozen: (sid: string) => boolean;
   private readonly getThreshold: (sid: string) => number;
   private unsubscribe: (() => void) | null = null;
+  /**
+   * got-045 guard: per-group set of already-folded review keys
+   * (`${checkpointId}::${observerProvider}`). A checkpoint's review is
+   * counted at most once per provider so restart catch-up — which replays
+   * `council.wake.restart_catchup` against the same stale checkpoint and
+   * rewrites an (empty) review — can NOT fabricate additional clean cycles
+   * and fake a "converged" pair that reviewed nothing real.
+   */
+  private readonly seenReviews = new Map<string, Set<string>>();
+  /**
+   * W15 multi-model review: per group, per checkpoint second-opinion state.
+   * Rule: a checkpoint counts as a clean cycle only if BOTH the observer and
+   * the second opinion (when one was dispatched) came back clean. A STOP
+   * from either side resets the counter. In memory: after a restart, owed
+   * second verdicts are forgotten and the observer's review folds alone.
+   */
+  private readonly secondSlots = new Map<string, Map<string, SecondReviewSlot>>();
+  private unsubscribeSecond: (() => void) | null = null;
 
   constructor(opts: ConvergenceTrackerOptions) {
     this.states = opts.states ?? new Map();
@@ -167,7 +254,23 @@ export class ConvergenceTracker {
   attach(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = companionBus.on("group:review", (payload) => {
-      this.handleReview(payload.sessionGroupId, payload.findings);
+      if (payload.reviewerRole === "second") {
+        this.handleSecondReview(payload.sessionGroupId, payload.checkpointId, payload.findings);
+        return;
+      }
+      this.handleReview(
+        payload.sessionGroupId,
+        payload.checkpointId,
+        payload.observerProvider,
+        payload.findings,
+        payload.artifactsChanged,
+        payload.artifactsRead,
+        payload.verification,
+      );
+    });
+    this.unsubscribeSecond = companionBus.on("group:second-review", (ev) => {
+      if (ev.status === "dispatched" || ev.status === "queued") this.noteSecondReviewDispatched(ev.sessionGroupId, ev.checkpointId);
+      else this.noteSecondReviewMissing(ev.sessionGroupId, ev.checkpointId);
     });
   }
 
@@ -176,11 +279,125 @@ export class ConvergenceTracker {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+    if (this.unsubscribeSecond) {
+      this.unsubscribeSecond();
+      this.unsubscribeSecond = null;
+    }
   }
 
   /** Drop the per-group state — call on `group:exited`. */
   forgetGroup(sessionGroupId: string): void {
     this.states.delete(sessionGroupId);
+    this.seenReviews.delete(sessionGroupId);
+    this.secondSlots.delete(sessionGroupId);
+  }
+
+  private secondSlot(sessionGroupId: string, checkpointId: string, create: boolean): SecondReviewSlot | undefined {
+    let slots = this.secondSlots.get(sessionGroupId);
+    if (!slots) {
+      if (!create) return undefined;
+      slots = new Map();
+      this.secondSlots.set(sessionGroupId, slots);
+    }
+    let slot = slots.get(checkpointId);
+    if (!slot && create) {
+      slot = { expected: false };
+      slots.set(checkpointId, slot);
+      if (slots.size > MAX_SECOND_REVIEW_SLOTS) {
+        const oldest = slots.keys().next().value;
+        if (oldest !== undefined) slots.delete(oldest);
+      }
+    }
+    return slot;
+  }
+
+  /** W15: a second opinion was dispatched — the checkpoint's clean fold now waits for it. */
+  noteSecondReviewDispatched(sessionGroupId: string, checkpointId: string): void {
+    const slot = this.secondSlot(sessionGroupId, checkpointId, true)!;
+    slot.expected = true;
+  }
+
+  /** W15: the owed second opinion will not come. A held observer-clean is not counted. */
+  noteSecondReviewMissing(sessionGroupId: string, checkpointId: string): void {
+    const slot = this.secondSlot(sessionGroupId, checkpointId, true)!;
+    slot.expected = true;
+    if (slot.verdict === undefined) slot.verdict = "missing";
+    if (slot.heldObserverClean) {
+      slot.heldObserverClean = undefined;
+      this.emitNotCounted(sessionGroupId, "second_review_missing");
+    }
+  }
+
+  /**
+   * W15: the second opinion's review arrived. Its STOP resets the counter
+   * like the observer's would (folded once per checkpoint). A clean verdict
+   * never advances the counter on its own: it releases the observer's held
+   * clean review, if any.
+   */
+  private handleSecondReview(sessionGroupId: string, checkpointId: string, findings: readonly BrowserObserverFinding[]): void {
+    const slot = this.secondSlot(sessionGroupId, checkpointId, true)!;
+    slot.expected = true;
+    // A duplicate folds into the other reviewer's finding; its STOP is that one.
+    const live = findings.filter((f) => f.duplicateOf === undefined);
+    const hasStop = reviewHasStop(live);
+    const verdict: SecondVerdict = hasStop
+      ? "stop"
+      : findings.some((f) => f.wasDowngraded === true) ? "downgraded" : "clean";
+    slot.verdict = verdict;
+    const held = slot.heldObserverClean;
+    slot.heldObserverClean = undefined;
+    if (verdict === "stop") {
+      this.fold(sessionGroupId, `${checkpointId}::second`, true);
+      return;
+    }
+    if (!held) return;
+    if (verdict === "clean") {
+      this.fold(sessionGroupId, `${checkpointId}::${held.observerProvider}`, false);
+    } else {
+      this.emitNotCounted(sessionGroupId, "downgraded_stop");
+    }
+  }
+
+  private emitNotCounted(sessionGroupId: string, reason: ConvergenceNotCountedReason): void {
+    if (this.isFrozen(sessionGroupId)) return;
+    const prev = this.states.get(sessionGroupId)
+      ?? initialConvergenceState(this.getThreshold(sessionGroupId));
+    this.states.set(sessionGroupId, prev);
+    companionBus.emit("group:convergence", {
+      sessionGroupId,
+      transition: "not-counted",
+      cycleNumber: prev.cleanCycleCount,
+      convergenceThreshold: prev.threshold,
+      convergenceState: prev.convergenceState,
+      notCountedReason: reason,
+    });
+  }
+
+  /** Fold one verdict, deduplicated by `key` (got-045). */
+  private fold(sessionGroupId: string, key: string, hasStop: boolean): void {
+    const frozen = this.isFrozen(sessionGroupId);
+    if (!frozen) {
+      let seen = this.seenReviews.get(sessionGroupId);
+      if (!seen) {
+        seen = new Set();
+        this.seenReviews.set(sessionGroupId, seen);
+      }
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    const prev = this.states.get(sessionGroupId)
+      ?? initialConvergenceState(this.getThreshold(sessionGroupId));
+    const { next, emit } = nextStateAfterReview(prev, hasStop, frozen);
+    this.states.set(sessionGroupId, next);
+    if (emit !== "noop") {
+      companionBus.emit("group:convergence", {
+        sessionGroupId,
+        transition: emit,
+        cycleNumber: next.cleanCycleCount,
+        convergenceThreshold: next.threshold,
+        convergenceState: next.convergenceState,
+      });
+    }
   }
 
   /** Read-only state inspection — for tests + the broadcast layer. */
@@ -190,12 +407,69 @@ export class ConvergenceTracker {
 
   private handleReview(
     sessionGroupId: string,
+    checkpointId: string,
+    observerProvider: string,
     findings: readonly BrowserObserverFinding[],
+    artifactsChanged: number,
+    artifactsRead: number,
+    verification?: "unverified",
   ): void {
+    const frozen = this.isFrozen(sessionGroupId);
+    const hasStop = reviewHasStop(findings);
+    // P3/CONV-HONEST: a clean review that reviewed nothing (or, per
+    // CONV-DOWNGRADE, carried a downgraded STOP) never folds. It
+    // does NOT consume the got-045 dedup slot either — the counter is
+    // untouched, so a later review of the same checkpoint that did read the
+    // changes may still count (once).
+    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead, findings, verification);
+    if (!frozen && notCounted) {
+      this.emitNotCounted(sessionGroupId, notCounted);
+      return;
+    }
+    // W15: a countable clean observer review only folds once the second
+    // opinion (if one was dispatched for this checkpoint) is clean too.
+    if (!frozen && !hasStop && checkpointId) {
+      const slot = this.secondSlot(sessionGroupId, checkpointId, false);
+      if (slot?.expected) {
+        switch (slot.verdict) {
+          case undefined:
+            slot.heldObserverClean = { observerProvider };
+            this.emitNotCounted(sessionGroupId, "awaiting_second_review");
+            return;
+          case "stop":
+            this.emitNotCounted(sessionGroupId, "second_review_blocked");
+            return;
+          case "downgraded":
+            this.emitNotCounted(sessionGroupId, "downgraded_stop");
+            return;
+          case "missing":
+            this.emitNotCounted(sessionGroupId, "second_review_missing");
+            return;
+          case "clean":
+            break;
+        }
+      }
+    }
+    // got-045: dedup a checkpoint's review per provider. A distinct
+    // (checkpointId, provider) pair folds exactly once; a replay of the same
+    // pair — the restart catch-up signature — is dropped before it can touch
+    // the counter. Only dedup when we have a real checkpoint id; a missing id
+    // is treated as un-keyable and folded as before (never collapsed together).
+    // Frozen (degraded) reviews are skipped here: they fold to a no-op anyway,
+    // and must NOT consume the dedup slot — after recovery the same checkpoint
+    // must still be countable.
+    if (!frozen && checkpointId) {
+      const key = `${checkpointId}::${observerProvider}`;
+      let seen = this.seenReviews.get(sessionGroupId);
+      if (!seen) {
+        seen = new Set();
+        this.seenReviews.set(sessionGroupId, seen);
+      }
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
     const prev = this.states.get(sessionGroupId)
       ?? initialConvergenceState(this.getThreshold(sessionGroupId));
-    const hasStop = reviewHasStop(findings);
-    const frozen = this.isFrozen(sessionGroupId);
     const { next, emit } = nextStateAfterReview(prev, hasStop, frozen);
     this.states.set(sessionGroupId, next);
     if (emit !== "noop") {
@@ -204,6 +478,7 @@ export class ConvergenceTracker {
         transition: emit,
         cycleNumber: next.cleanCycleCount,
         convergenceThreshold: next.threshold,
+        convergenceState: next.convergenceState,
       });
     }
   }

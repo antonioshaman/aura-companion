@@ -31,10 +31,15 @@
 //   (sentinel-markers.ts from Phase B — EC-8 sentinel-before-sweep) →
 //   `process.kill(pid, "SIGTERM")` via pure syscall (NEVER `Bun.spawn(["pkill"])`
 //   / `exec` / `shell:true` — Hunt R2) → wait for exit (bounded) →
-//   delete the sentinel. SIGTERM only — DO NOT escalate to SIGKILL
-//   inline (Backend-TS R11 / Subprocess R3 resolution: stragglers
-//   handled by the next-boot reaper. Inline escalation would risk
-//   blocking init past the systemd readiness budget).
+//   delete the sentinel. If the process is STILL alive after the SIGTERM
+//   grace, re-verify its identity (TOCTOU) and escalate to SIGKILL with a
+//   short second grace. The original "SIGTERM only, stragglers handled by
+//   the next boot" floor never converged in prod: a codex `app-server`
+//   orphan ignored SIGTERM for weeks while every boot logged
+//   "orphan reaped via SIGTERM". The escalation costs at most
+//   REAP_POST_KILL_GRACE_MS per straggler, well inside the 5s budget.
+//   A reap is only logged/counted once exit is OBSERVED; a survivor of
+//   both signals is logged as `orphan_reaper.survived` and not counted.
 //
 // EC-7 (filesystem-access predicates inline path resolution or route
 // through a resolving wrapper): every `/proc` read AND every sentinel
@@ -77,9 +82,34 @@ import { ageMs, nowMs } from "./cleanup/age-ms.js";
 /** Hard cap on reaper total work — preserves systemd readiness window. */
 export const REAPER_BUDGET_MS = 5_000;
 
-/** Per-process wait-for-exit budget after SIGTERM (SIGTERM-only at init
- *  per Backend-TS R11 / Subprocess R3; stragglers handled by next boot). */
-const REAP_POST_TERM_GRACE_MS = 1_500;
+/**
+ * Boot gate for the reaper (aura-meta-diet P6/D2). The reaper scans ALL of
+ * `/proc` for PPID=1 CLI processes, so a second Companion instance on the same
+ * host and user (the AuraBench bench instance on :3499) would see the prod
+ * instance's orphans as "no known session" and SIGTERM them. The bench
+ * instance therefore boots with `COMPANION_ORPHAN_REAPER=off`.
+ *
+ * Fail-closed like the layer flags: absent/empty → on (prod behaviour);
+ * only `off/0/false` disables; any other value keeps the reaper ON and warns.
+ */
+export function resolveOrphanReaperGate(raw: string | undefined): { enabled: boolean; warning?: string } {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "on" || v === "1" || v === "true") return { enabled: true };
+  if (v === "off" || v === "0" || v === "false") return { enabled: false };
+  return {
+    enabled: true,
+    warning: `COMPANION_ORPHAN_REAPER=${JSON.stringify(raw)} is not one of on/off/1/0/true/false; keeping the reaper on`,
+  };
+}
+
+/** Per-process wait-for-exit grace after SIGTERM before escalating to SIGKILL. */
+export const REAP_POST_TERM_GRACE_MS = 1_500;
+
+/** Per-process wait-for-exit grace after the SIGKILL escalation. */
+export const REAP_POST_KILL_GRACE_MS = 500;
+
+/** Signals the reaper may send — a closed literal set (Hunt R2). */
+export type ReapSignal = "SIGTERM" | "SIGKILL";
 
 /** Per-process poll interval while waiting for SIGTERM-driven exit. */
 const REAP_POLL_INTERVAL_MS = 100;
@@ -124,8 +154,8 @@ export interface OrphanReaperDeps {
   readonly readCmdline?: (pid: number) => string;
   /** Test seam — kill check via process.kill(pid, 0). */
   readonly killCheck?: (pid: number) => boolean;
-  /** Test seam — process.kill(pid, "SIGTERM"). */
-  readonly kill?: (pid: number, signal: "SIGTERM") => void;
+  /** Test seam — process.kill(pid, "SIGTERM" | "SIGKILL"). */
+  readonly kill?: (pid: number, signal: ReapSignal) => void;
   /** Test seam — platform detection (defaults to os.platform()). */
   readonly platform?: () => NodeJS.Platform;
   /** Test seam — budget cap override. Defaults to REAPER_BUDGET_MS. */
@@ -159,6 +189,10 @@ export interface ReapSummary {
   readonly killFailed: number;
   /** EC-45 — reaps aborted because the pid's identity drifted between classify and the kill instant (TOCTOU guard). */
   readonly killAbortedDrift: number;
+  /** Of `reaped`: orphans that ignored SIGTERM and only exited after the SIGKILL escalation. */
+  readonly escalatedToSigkill: number;
+  /** Orphans still alive after SIGTERM + SIGKILL graces — NOT counted as reaped. */
+  readonly survived: number;
   readonly budgetExceeded: boolean;
   readonly durationMs: number;
 }
@@ -222,6 +256,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedInconclusive: 0,
       killFailed: 0,
       killAbortedDrift: 0,
+      escalatedToSigkill: 0,
+      survived: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, deps.now?.()),
     };
@@ -272,6 +308,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedInconclusive: 0,
       killFailed: 0,
       killAbortedDrift: 0,
+      escalatedToSigkill: 0,
+      survived: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, clock()),
     };
@@ -284,6 +322,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   let skippedInconclusive = 0;
   let killFailed = 0;
   let killAbortedDrift = 0;
+  let escalatedToSigkill = 0;
+  let survived = 0;
   let budgetExceeded = false;
   const rawArgvLogEnabled = process.env.COMPANION_LOG_PATHS_RAW === "1";
 
@@ -338,9 +378,13 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       // two-factor (Phase A interim). Either way the verdict drives
       // the branch.
       let expectedStartMs: number | null = null;
+      let expectedArgvSha256: string | null = null;
       try {
         const sidecar = readRuntimeSidecar(deps.sessionsRoot, known.sessionId);
-        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+        if (sidecar.kind === "present") {
+          expectedStartMs = sidecar.payload.processStartMs;
+          expectedArgvSha256 = sidecar.payload.argvSha256;
+        }
       } catch (e) {
         // Corrupt sidecar — log + treat as absent (degrade to 2-factor).
         log.warn("orphan-reaper", "sidecar read failed — degrading to two-factor verify", {
@@ -350,7 +394,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
         });
       }
 
-      const verdict = verifyProcessIdentity(pid, known.sessionId, expectedStartMs);
+      const verdict = verifyProcessIdentity(pid, known.sessionId, expectedStartMs, expectedArgvSha256);
       if (verdict.kind === "match") {
         // PURE Map mutation. NEVER respawn. NEVER inject synthetic init.
         known.pid = pid;
@@ -441,19 +485,33 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     // SAME Companion shape (argvSha256 match). Abort on any drift — the
     // sentinel is already written, so delete it here (we are not reaping)
     // and let the next boot's reconcile re-classify with a fresh verdict.
-    let stillSameOrphan = false;
-    try {
-      const reStat = readStat(pid);
-      const reArgv = splitCmdline(readCmdline(pid));
-      const reClass = classifyArgv(reArgv);
-      stillSameOrphan =
-        parsePpidFromStat(reStat) === 1 &&
-        reClass.isCompanionShape &&
-        reClass.argvSha256 === classification.argvSha256;
-    } catch {
-      stillSameOrphan = false; // pid vanished mid-window — nothing to kill
-    }
-    if (!stillSameOrphan) {
+    const isStillSameOrphan = (): boolean => {
+      try {
+        const reStat = readStat(pid);
+        const reClass = classifyArgv(splitCmdline(readCmdline(pid)));
+        return (
+          parsePpidFromStat(reStat) === 1 &&
+          reClass.isCompanionShape &&
+          reClass.argvSha256 === classification.argvSha256
+        );
+      } catch {
+        return false; // pid vanished mid-window — nothing to kill
+      }
+    };
+    // Poll for exit via kill(pid, 0). Iteration-bounded (not only
+    // clock-bounded) so a frozen clock can never spin forever.
+    const waitForExit = async (graceMs: number): Promise<boolean> => {
+      const deadline = clock() + graceMs;
+      const maxPolls = Math.max(1, Math.ceil(graceMs / REAP_POLL_INTERVAL_MS));
+      for (let i = 0; i <= maxPolls; i++) {
+        if (!killCheck(pid)) return true;
+        if (i === maxPolls || clock() >= deadline) break;
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(REAP_POLL_INTERVAL_MS);
+      }
+      return !killCheck(pid);
+    };
+    if (!isStillSameOrphan()) {
       killAbortedDrift++;
       log.warn("orphan-reaper", "identity drift before SIGTERM — aborting kill", {
         event: "orphan_reaper.kill_aborted_drift",
@@ -489,25 +547,80 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       }
     }
 
-    // Wait for exit, bounded. Poll via kill(pid, 0) so a slow exit
-    // doesn't tie up the budget for too long.
+    // Wait for exit, bounded. If SIGTERM is ignored, escalate to SIGKILL
+    // (after re-verifying identity so a PID reused during the grace is never
+    // SIGKILLed). Only an OBSERVED exit counts as a reap.
+    let exitSignal: ReapSignal | null = killAlreadyGone ? "SIGTERM" : null;
     if (killOk) {
-      const exitDeadline = clock() + REAP_POST_TERM_GRACE_MS;
-      while (clock() < exitDeadline) {
-        if (!killCheck(pid)) break;
-        // eslint-disable-next-line no-await-in-loop
-        await sleep(REAP_POLL_INTERVAL_MS);
+      if (await waitForExit(REAP_POST_TERM_GRACE_MS)) {
+        exitSignal = "SIGTERM";
+      } else if (!isStillSameOrphan()) {
+        // Either it exited between the last poll and the re-read, or the pid
+        // now belongs to something else. Distinguish via liveness.
+        if (!killCheck(pid)) {
+          exitSignal = "SIGTERM";
+        } else {
+          killAbortedDrift++;
+          log.warn("orphan-reaper", "identity drift before SIGKILL — aborting escalation", {
+            event: "orphan_reaper.kill_aborted_drift",
+            pid,
+            argvSha256: classification.argvSha256,
+            sessionIdPresent: classification.sessionId !== null,
+            stage: "sigkill",
+          });
+        }
+      } else {
+        log.warn("orphan-reaper", "orphan ignored SIGTERM — escalating to SIGKILL", {
+          event: "orphan_reaper.escalate_sigkill",
+          pid,
+          argvSha256: classification.argvSha256,
+          graceMs: REAP_POST_TERM_GRACE_MS,
+        });
+        let sigkillSent = false;
+        try {
+          kill(pid, "SIGKILL");
+          sigkillSent = true;
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === "ESRCH") {
+            exitSignal = "SIGTERM"; // exited right at the boundary
+          } else {
+            log.warn("orphan-reaper", "SIGKILL failed", {
+              event: "orphan_reaper.kill_failed",
+              pid,
+              argvSha256: classification.argvSha256,
+              error_code: code ?? "unknown",
+              signal: "SIGKILL",
+            });
+          }
+        }
+        if (sigkillSent && (await waitForExit(REAP_POST_KILL_GRACE_MS))) {
+          exitSignal = "SIGKILL";
+          escalatedToSigkill++;
+        }
+        if (exitSignal === null) {
+          survived++;
+          log.warn("orphan-reaper", "orphan survived SIGTERM and SIGKILL — not reaped", {
+            event: "orphan_reaper.survived",
+            pid,
+            argvSha256: classification.argvSha256,
+            argvShape: classification.argvShape,
+            sessionIdPresent: classification.sessionId !== null,
+            reason,
+          });
+        }
       }
     }
 
-    // Only count + log a reap when the process is actually on its way out
-    // (SIGTERM delivered, or already gone). A non-ESRCH failure leaves the
-    // orphan alive; the next boot re-classifies and re-reaps the same pid.
-    if (killOk || killAlreadyGone) {
+    // Only count + log a reap when the process is OBSERVED gone. A
+    // non-ESRCH failure / survivor leaves the orphan alive; the next boot
+    // re-classifies and retries the same pid.
+    if (exitSignal !== null) {
       reaped++;
-      log.info("orphan-reaper", "orphan reaped via SIGTERM", {
+      log.info("orphan-reaper", `orphan reaped via ${exitSignal}`, {
         event: "orphan_reaped",
         pid,
+        signal: exitSignal,
         argvSha256: classification.argvSha256,
         argvShape: classification.argvShape,
         cwdDepth: classification.cwdDepth,
@@ -531,6 +644,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     skippedInconclusive,
     killFailed,
     killAbortedDrift,
+    escalatedToSigkill,
+    survived,
     budgetExceeded,
     durationMs,
   });
@@ -544,6 +659,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     skippedInconclusive,
     killFailed,
     killAbortedDrift,
+    escalatedToSigkill,
+    survived,
     budgetExceeded,
     durationMs,
   };
@@ -581,11 +698,11 @@ function defaultKillCheck(pid: number): boolean {
   }
 }
 
-function defaultKill(pid: number, signal: "SIGTERM"): void {
+function defaultKill(pid: number, signal: ReapSignal): void {
   // PURE syscall — NEVER `Bun.spawn(["pkill"])` / `exec` / `shell:true`
-  // (Hunt R2). The signal name is a fixed string literal; argv shape
-  // is `(number, "SIGTERM")` so command injection is structurally
-  // impossible.
+  // (Hunt R2). The signal name is a closed literal union; argv shape
+  // is `(number, "SIGTERM" | "SIGKILL")` so command injection is
+  // structurally impossible.
   process.kill(pid, signal);
 }
 
@@ -632,6 +749,21 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
   }
 
+  // Stdio-transport marker (added 2026-09-11): a Companion-spawned
+  // Claude subprocess under the default stdio transport (CLI >= 2.1.123)
+  // carries argv `--print --output-format stream-json --input-format
+  // stream-json`. A user's bare interactive `claude` doesn't. Detecting
+  // this shape lets us reap orphaned stdio subprocesses that survive
+  // bun restarts under `KillMode=process` — the failure mode observed
+  // 2026-09-11 where a subprocess from a previous bun instance kept
+  // consuming Anthropic API tokens (verified: 8 established sockets to
+  // Anthropic on an unmanaged orphan). See
+  // `feedback_agent_browser_chrome_profile_leak.md` sibling incident
+  // report for full context.
+  let hasPrint = false;
+  let seenOutputStreamJson = false;
+  let seenInputStreamJson = false;
+
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     // Categorical shape for redacted logging — never the raw bytes.
@@ -641,7 +773,15 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
     if (tok.startsWith("--")) {
       shape.push(tok);
+      // Track the stdio-transport quorum tokens.
+      if (tok === "--print") hasPrint = true;
       continue;
+    }
+    if (tok === "stream-json") {
+      // Which flag was this a value for?
+      const prev = i > 0 ? argv[i - 1] : "";
+      if (prev === "--output-format") seenOutputStreamJson = true;
+      if (prev === "--input-format") seenInputStreamJson = true;
     }
     if (tok.startsWith("ws://") || tok.startsWith("wss://") || tok.startsWith("http://") || tok.startsWith("https://")) {
       shape.push("<URL>");
@@ -668,6 +808,15 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       continue;
     }
     shape.push("<TOKEN>");
+  }
+
+  // Post-loop quorum: stdio-transport shape requires ALL three tokens.
+  // Any one of them alone could appear in an unrelated CLI mode; the
+  // combination is the Companion-spawn fingerprint. Only marks the
+  // process as server-managed IF the basename was already `claude`
+  // (Codex uses its own `app-server` marker above).
+  if (argv0Basename === "claude" && hasPrint && seenOutputStreamJson && seenInputStreamJson) {
+    isServerManagedShape = true;
   }
 
   return {

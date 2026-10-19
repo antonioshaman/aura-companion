@@ -136,6 +136,12 @@ describe("attachCodexAdapterHandlers", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
   });
@@ -193,6 +199,19 @@ describe("attachCodexAdapterHandlers", () => {
     expect(session.state.cwd).toBe("/home/user/project");
     expect(session.state.backend_type).toBe("codex");
     expect(deps.refreshGitInfo).toHaveBeenCalledWith(session, { notifyPoller: true });
+    expect(deps.persistSession).toHaveBeenCalledWith(session);
+  });
+
+  it("session_init on a different model than model_fallback.to clears the stale fallback record (review STOP)", () => {
+    // Codex switches by relaunch; the new process's session_init carries the
+    // model now in effect. If it is not the fallback target, the banner's
+    // record is stale and must be dropped (persisted + broadcast with the state).
+    session.state.model_fallback = { from: "gpt-6.1-sol", to: "gpt-5.3-codex", reason: "rejected", at: 1 };
+    attachCodexAdapterHandlers("test-session", session, adapter as unknown as CodexAdapter, deps);
+    adapter._trigger("onBrowserMessage", { type: "session_init", session: { ...session.state, model: "gpt-5.3-codex" } });
+    expect(session.state.model_fallback?.to).toBe("gpt-5.3-codex");
+    adapter._trigger("onBrowserMessage", { type: "session_init", session: { ...session.state, model: "gpt-6.1-sol" } });
+    expect(session.state.model_fallback).toBeNull();
     expect(deps.persistSession).toHaveBeenCalledWith(session);
   });
 
@@ -1123,6 +1142,12 @@ describe("attachCodexAdapterHandlers", () => {
         updateChannel: "stable",
         dockerAutoUpdate: false,
         telemetryEnabled: false,
+        defaultSessionMode: "solo" as const,
+        kbAutoPrime: false,
+        autoResumeAfterLimit: true,
+        councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
         updatedAt: 0,
       });
     }
@@ -1300,6 +1325,12 @@ describe("attachCodexAdapterHandlers", () => {
         updateChannel: "stable",
         dockerAutoUpdate: false,
         telemetryEnabled: false,
+        defaultSessionMode: "solo" as const,
+        kbAutoPrime: false,
+        autoResumeAfterLimit: true,
+        councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
         updatedAt: 0,
       });
 
@@ -1347,6 +1378,12 @@ describe("attachCodexAdapterHandlers", () => {
         updateChannel: "stable",
         dockerAutoUpdate: false,
         telemetryEnabled: false,
+        defaultSessionMode: "solo" as const,
+        kbAutoPrime: false,
+        autoResumeAfterLimit: true,
+        councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
         updatedAt: 0,
       });
 
@@ -1459,6 +1496,12 @@ describe("attachCodexAdapterHandlers", () => {
         updateChannel: "stable",
         dockerAutoUpdate: false,
         telemetryEnabled: false,
+        defaultSessionMode: "solo" as const,
+        kbAutoPrime: false,
+        autoResumeAfterLimit: true,
+        councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
         updatedAt: 0,
       });
 
@@ -1590,6 +1633,12 @@ describe("attachCodexAdapterHandlers", () => {
         updateChannel: "stable",
         dockerAutoUpdate: false,
         telemetryEnabled: false,
+        defaultSessionMode: "solo" as const,
+        kbAutoPrime: false,
+        autoResumeAfterLimit: true,
+        councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
         updatedAt: 0,
       });
 

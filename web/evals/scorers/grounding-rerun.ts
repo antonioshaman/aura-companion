@@ -32,7 +32,9 @@
 
 import {
   validateObserverFindings,
+  type EvidenceLineFactsProvider,
   type GroundingDowngrade,
+  type WeakEvidenceReason,
 } from "../../server/observer-grounding.js";
 import { COUNCIL_SCHEMA_VERSION, type ObserverReviewPayload } from "../../server/council-types.js";
 import type {
@@ -47,7 +49,10 @@ import type {
  * the downgrade set for the same inputs. A bump signals "re-baseline the
  * recorded sidecars" rather than "a determinism bug". Stamped on every result.
  */
-export const GROUNDING_RERUN_ORACLE_VERSION = 1 as const;
+export const GROUNDING_RERUN_ORACLE_VERSION = 2 as const;
+// v2 (meta-diet B2): line checks (out-of-range / unchanged → downgrade; weak
+// evidence mark). Only sidecars carrying `line_facts_by_path` are affected — a
+// v1-era sidecar without it reruns exactly as before.
 
 /** A downgrade reduced to its comparable identity — no nested finding object,
  *  so two downgrade sets compare structurally and serialize identically. */
@@ -67,6 +72,33 @@ export interface GroundingRerunResult {
   recorded: NormalizedDowngrade[];
   /** Human-readable per-index discrepancies; empty when deterministic. */
   diffs: string[];
+  /** STOPs the recomputed gate kept but marked weak evidence, sorted by index. */
+  weak_evidence: { index: number; reason: WeakEvidenceReason }[];
+}
+
+export interface RerunGroundingOptions {
+  /**
+   * `false` reruns the path-only gate even when the sidecar froze line facts —
+   * the "before B2" baseline the precision scorer reports next to "after".
+   * Default `true`.
+   */
+  lineChecks?: boolean;
+}
+
+/** Rebuild the gate's line-facts provider from the sidecar's frozen map. A
+ *  path the map never recorded has no content → `null` (as live). */
+function frozenLineFacts(
+  frozen: NonNullable<EvalSidecarArtifact["grounding_inputs"]["line_facts_by_path"]>,
+): EvidenceLineFactsProvider {
+  return (relPath) => {
+    const f = frozen[relPath];
+    if (!f) return null;
+    return {
+      lineCount: f.line_count,
+      lineText: (n) => f.cited_lines[String(n)],
+      changedRanges: f.changed_ranges,
+    };
+  };
 }
 
 /** Synthetic absolute root. The existence predicate is injected, so the gate
@@ -93,7 +125,10 @@ const byIndex = (a: NormalizedDowngrade, b: NormalizedDowngrade): number => a.in
  * result to the recorded downgrade set. Pure + hermetic: no disk, no clock,
  * no network. Same sidecar in → same result out.
  */
-export function rerunGrounding(sidecar: EvalSidecarArtifact): GroundingRerunResult {
+export function rerunGrounding(
+  sidecar: EvalSidecarArtifact,
+  options: RerunGroundingOptions = {},
+): GroundingRerunResult {
   // The manifest delta IS the modified-file set the gate used (per schema).
   const modifiedFiles = new Set(sidecar.manifest_partition.delta);
   const existence = sidecar.grounding_inputs.existence_by_path;
@@ -120,10 +155,12 @@ export function rerunGrounding(sidecar: EvalSidecarArtifact): GroundingRerunResu
     })),
   };
 
+  const frozen = sidecar.grounding_inputs.line_facts_by_path;
   const result = validateObserverFindings(review, {
     workspaceRoot: HERMETIC_ROOT,
     modifiedFiles,
     existsRelative,
+    ...(frozen && options.lineChecks !== false ? { lineFacts: frozenLineFacts(frozen) } : {}),
   });
 
   const recomputed = result.downgrades.map(normalizeRecomputed).sort(byIndex);
@@ -136,6 +173,9 @@ export function rerunGrounding(sidecar: EvalSidecarArtifact): GroundingRerunResu
     recomputed,
     recorded,
     diffs,
+    weak_evidence: result.weakEvidence.map((w) => ({ index: w.index, reason: w.reason })).sort(
+      (a, b) => a.index - b.index,
+    ),
   };
 }
 

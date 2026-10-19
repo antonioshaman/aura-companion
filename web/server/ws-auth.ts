@@ -1,4 +1,5 @@
 import { verifyToken } from "./middleware/managed-auth.js";
+import { isDirectLocalRequest } from "./auth-manager.js";
 
 export interface WsAuthResult {
   ok: boolean;
@@ -39,3 +40,25 @@ export async function authenticateManagedWebSocket(req: Request): Promise<WsAuth
   return { ok: true, status: 200 };
 }
 
+
+/**
+ * Gate for the legacy `/ws/cli/:id` upgrade (the `--sdk-url` callback a
+ * Claude CLI dials on the WS transport). The socket carries no token, so it
+ * must come straight from this machine: loopback source and no reverse-proxy
+ * headers. On the default stdio transport no CLI ever dials back, and
+ * accepting a socket would swap a live stdio session's control channel for an
+ * attacker's — so the endpoint is closed outright.
+ */
+export function checkCliSocketUpgrade(input: {
+  address: string | null | undefined;
+  headers: Headers;
+  transportMode: "stdio" | "ws";
+}): WsAuthResult {
+  if (input.transportMode !== "ws") {
+    return { ok: false, status: 404, body: "Not Found" };
+  }
+  if (!isDirectLocalRequest(input.address, input.headers)) {
+    return { ok: false, status: 403, body: "Forbidden" };
+  }
+  return { ok: true, status: 200 };
+}

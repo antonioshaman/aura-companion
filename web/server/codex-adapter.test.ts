@@ -86,7 +86,7 @@ describe("CodexAdapter", () => {
     // Check stdin received the initialize request
     const allWritten = stdin.chunks.join("");
     expect(allWritten).toContain('"method":"initialize"');
-    expect(allWritten).toContain("thecompanion");
+    expect(allWritten).toContain("aura-companion");
   });
 
   it("translates agent message streaming to content_block_delta events", async () => {
@@ -1126,6 +1126,40 @@ describe("CodexAdapter", () => {
     expect(allWritten).not.toContain('"sandbox":"dangerFullAccess"');
   });
 
+  it("honours an explicit read-only sandbox at thread/start AND turn/start (observer profile)", async () => {
+    // The council observer must not run under codex's danger-full-access
+    // default — its spawn passes sandbox:"read-only" and BOTH protocol
+    // surfaces must carry it: thread/start's `sandbox` is the kebab-case
+    // SandboxMode string, turn/start's `sandboxPolicy` is the camelCase
+    // SandboxPolicy object (per `codex app-server generate-json-schema`,
+    // codex-cli 0.162). A turn-level dangerFullAccess would silently
+    // override the thread-level restriction.
+    const adapter = new CodexAdapter(proc as never, "test-session", {
+      model: "gpt-5.3-codex",
+      cwd: "/tmp",
+      sandbox: "read-only",
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_ro" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const threadWritten = stdin.chunks.join("");
+    expect(threadWritten).toContain('"sandbox":"read-only"');
+    expect(threadWritten).not.toContain('"sandbox":"danger-full-access"');
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "review the checkpoint" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const turnWritten = stdin.chunks.join("");
+    expect(turnWritten).toContain('"method":"turn/start"');
+    expect(turnWritten).toContain('"sandboxPolicy":{"type":"readOnly"}');
+    expect(turnWritten).not.toContain("dangerFullAccess");
+  });
+
   // All Codex modes map to approvalPolicy="never" for full autonomy (no permission prompts).
   it.each([
     { approvalMode: "bypassPermissions", expected: "never" },
@@ -1239,6 +1273,48 @@ describe("CodexAdapter", () => {
 
     expect(errors.length).toBe(1);
     expect(errors[0]).toContain("initialization failed");
+  });
+
+  // Regression (prod 2026-09-08). `onInitError` used to assign into a single
+  // slot, so the LAST registration won. In production two subscribers register
+  // in a fixed order: `cli-launcher` at spawn (SIGTERM both procs, release the
+  // codex WS port, mark the session `exited`, run the model-rejection fallback
+  // respawn), then `WsBridge.attachAdapter` once the launcher emits
+  // `backend:codex-adapter-created`. The bridge's registration silently
+  // replaced the launcher's, so a real init failure left the app-server
+  // subprocess running, the session `connected`, and every server-initiated
+  // send dropping as `socket_disconnected` — a council observer stuck like
+  // that never wakes and the sidebar shows it as healthy. The launcher's
+  // handler has its own unit test, which kept passing because it invokes the
+  // handler directly and never exercises this wiring.
+  it("invokes EVERY onInitError subscriber, not just the last registered", async () => {
+    const calls: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onInitError(() => calls.push("launcher"));
+    adapter.onInitError(() => calls.push("bridge"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, error: { code: -1, message: "server not ready" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls).toEqual(["launcher", "bridge"]);
+  });
+
+  // The two subscribers own unrelated responsibilities (process cleanup vs.
+  // the user-facing error frame); a throw in one must not cancel the other,
+  // or a bug in the newly-registered bridge handler would silently
+  // reintroduce the leak this list exists to prevent.
+  it("keeps invoking later onInitError subscribers when an earlier one throws", async () => {
+    const calls: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onInitError(() => { calls.push("first"); throw new Error("subscriber blew up"); });
+    adapter.onInitError(() => calls.push("second"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, error: { code: -1, message: "server not ready" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls).toEqual(["first", "second"]);
   });
 
   it("rejects messages and discards queue after init failure", async () => {
@@ -2591,6 +2667,36 @@ describe("CodexAdapter", () => {
     await new Promise((r) => setTimeout(r, 40));
   });
 
+  // Council review 2026-10-17 (dahl D-1 / ritchie B-1): the Codex
+  // context-size advisory keys on main-thread compactions, so the adapter must
+  // count `thread/compacted` for the MAIN thread only and forward the count as
+  // `codex_compactions`. The legacy `codex/event/context_compacted` duplicate
+  // must not double-count.
+  it("counts main-thread thread/compacted notifications into codex_compactions (subagent threads and legacy duplicates ignored)", async () => {
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_main", turnId: "t1" } }) + "\n");
+    stdout.push(JSON.stringify({ method: "codex/event/context_compacted", params: { msg: { type: "context_compacted" } } }) + "\n");
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_other_subagent", turnId: "t1" } }) + "\n");
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_main", turnId: "t2" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const counts = messages
+      .filter((m) => m.type === "session_update" && (m as { session?: { codex_compactions?: number } }).session?.codex_compactions !== undefined)
+      .map((m) => (m as { session: { codex_compactions: number } }).session.codex_compactions);
+    // Two main-thread compactions → 1 then 2; the subagent thread and the
+    // legacy duplicate add nothing.
+    expect(counts).toEqual([1, 2]);
+  });
+
   it("computes context_used_percent from last turn, not cumulative total", async () => {
     // Regression: cumulative total.inputTokens can far exceed contextWindow
     // (e.g. 1.2M input on a 258k window). The context bar should use
@@ -2649,6 +2755,167 @@ describe("CodexAdapter", () => {
     expect(lastUpdate.session.codex_token_details?.inputTokens).toBe(1_150_000);
     expect(lastUpdate.session.codex_token_details?.outputTokens).toBe(50_000);
     expect(lastUpdate.session.codex_token_details?.cachedInputTokens).toBe(930_000);
+  });
+
+  it("W6: turn/completed result carries the turn's real usage (normalised), not zeros", async () => {
+    // Regression: the synthesized result frame used to hard-code usage
+    // {0,0,0,0}, so every Codex turn logged zero `llm.turn_usage`. Usage now
+    // comes from the turn's thread/tokenUsage/updated notifications, with
+    // Codex's cached-inclusive inputTokens split into input + cache_read
+    // (see codex-turn-usage.ts for the formula). A duplicate notification
+    // (identical cumulative total, as seen on real recordings) is not counted.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const usageFrame = (total: number, last: Record<string, number>) => JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thr_123",
+        turnId: "turn_w6",
+        tokenUsage: { total: { totalTokens: total }, last, modelContextWindow: 258_400 },
+      },
+    }) + "\n";
+    stdout.push(usageFrame(1000, { inputTokens: 900, cachedInputTokens: 600, outputTokens: 100 }));
+    stdout.push(usageFrame(1000, { inputTokens: 900, cachedInputTokens: 600, outputTokens: 100 })); // dup
+    stdout.push(usageFrame(2100, { inputTokens: 1050, cachedInputTokens: 900, cacheWriteInputTokens: 100, outputTokens: 50 }));
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_123", turn: { id: "turn_w6", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }> | undefined;
+    expect(result).toBeDefined();
+    expect(result!.data.usage).toEqual({
+      input_tokens: (900 - 600) + (1050 - 900 - 100),
+      cache_read_input_tokens: 600 + 900,
+      cache_creation_input_tokens: 100,
+      output_tokens: 150,
+    });
+    // The last request's full prompt is surfaced for the cache-rewrite hint.
+    const updates = messages.filter((m) => m.type === "session_update") as Array<{ session: { last_context_tokens?: number } }>;
+    expect(updates.some((u) => u.session.last_context_tokens === 1050)).toBe(true);
+  });
+
+  it("marks a child-thread turn/completed result as subagent_turn; the main thread's result is unmarked", async () => {
+    // PR #379 review: handleTurnCompleted emits a `result` for collab
+    // subagent threads too. Consumers that care about the MAIN turn's outcome
+    // (observed-working model store) must be able to tell them apart.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_sub", turn: { id: "turn_s", status: "completed", items: [] } },
+    }) + "\n");
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const results = messages.filter((m) => m.type === "result") as Array<Extract<BrowserIncomingMessage, { type: "result" }>>;
+    expect(results).toHaveLength(2);
+    expect(results[0]!.data.subagent_turn).toBe(true);
+    expect(results[1]!.data).not.toHaveProperty("subagent_turn");
+  });
+
+  it("W6 review: subagent-thread tokenUsage neither leaks into the main turn result nor overwrites session context state", async () => {
+    // A collab subagent runs on its own thread and reports its own cumulative
+    // totals. Interleaved with the main thread (and duplicated, as real
+    // recordings are), it must not wipe/double the main turn's usage, and the
+    // session-level context meter / last_context_tokens / codex_token_details
+    // must reflect the MAIN thread only.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const usage = (threadId: string, turnId: string, total: number, last: Record<string, number>) => JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: { threadId, turnId, tokenUsage: { total: { totalTokens: total, inputTokens: total, outputTokens: 0 }, last, modelContextWindow: 100_000 } },
+    }) + "\n";
+    stdout.push(usage("thr_main", "turn_m", 1000, { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 400, { inputTokens: 80_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(usage("thr_main", "turn_m", 1000, { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 400, { inputTokens: 80_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(usage("thr_main", "turn_m", 2200, { inputTokens: 1100, cachedInputTokens: 800, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 900, { inputTokens: 90_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }>;
+    expect(result.data.usage).toEqual({
+      input_tokens: 400 + 300,
+      cache_read_input_tokens: 1300,
+      cache_creation_input_tokens: 0,
+      output_tokens: 200,
+    });
+    const updates = messages.filter((m) => m.type === "session_update") as Array<{ session: Record<string, unknown> }>;
+    const withCtx = updates.filter((u) => u.session.last_context_tokens !== undefined);
+    expect(withCtx.at(-1)!.session.last_context_tokens).toBe(1100);
+    expect(withCtx.every((u) => (u.session.last_context_tokens as number) < 80_000)).toBe(true);
+    const withPct = updates.filter((u) => u.session.context_used_percent !== undefined);
+    expect(withPct.every((u) => (u.session.context_used_percent as number) < 50)).toBe(true);
+    const withDetails = updates.filter((u) => u.session.codex_token_details !== undefined);
+    expect(withDetails.every((u) => (u.session.codex_token_details as { inputTokens: number }).inputTokens <= 2200)).toBe(true);
+  });
+
+  it("W6 review: legacy codex/event/token_count does not disturb v2 per-turn accounting", async () => {
+    // Legacy frames carry no threadId/turnId. Interleaved with v2
+    // notifications they used to reset the duplicate detector, so a later v2
+    // duplicate was counted twice.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const v2 = JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "thr_main", turnId: "turn_m", tokenUsage: { total: { totalTokens: 1000 }, last: { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }, modelContextWindow: 100_000 } },
+    }) + "\n";
+    const legacy = JSON.stringify({
+      method: "codex/event/token_count",
+      params: { msg: { info: { total_token_usage: { total_tokens: 1234, input_tokens: 1100 }, last_token_usage: { total_tokens: 1000, input_tokens: 900, cached_input_tokens: 500, output_tokens: 100 }, model_context_window: 100_000 } } },
+    }) + "\n";
+    stdout.push(v2);
+    stdout.push(legacy);
+    stdout.push(v2); // duplicate of the v2 frame — must still be recognised as one
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }>;
+    expect(result.data.usage).toEqual({ input_tokens: 400, cache_read_input_tokens: 500, cache_creation_input_tokens: 0, output_tokens: 100 });
   });
 
   // ─── ExitPlanMode ───────────────────────────────────────────────────────────
@@ -3246,6 +3513,22 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock.calls[0].method).toBe("initialize");
   });
 
+  // Diagnostics Pairs card (plan Task 6): codex reports when it last heard
+  // from the CLI, so a silent codex observer shows "silent Nm" instead of
+  // being invisible. 0 = nothing received yet.
+  it("stamps the last inbound frame time on notifications and server requests", async () => {
+    const mock = createMockTransport();
+    const adapter = new CodexAdapter(mock.transport, "test-session-frame", { model: "o4-mini" });
+    expect(adapter.getLastCliFrameReceivedMs()).toBe(0);
+    const t0 = Date.now();
+    mock.pushNotification("thread/started", { thread: { id: "th-1" } });
+    expect(adapter.getLastCliFrameReceivedMs()).toBeGreaterThanOrEqual(t0);
+    const t1 = adapter.getLastCliFrameReceivedMs();
+    await new Promise((r) => setTimeout(r, 5));
+    mock.pushRequest("item/commandExecution/requestApproval", 7, {});
+    expect(adapter.getLastCliFrameReceivedMs()).toBeGreaterThan(t1);
+  });
+
   it("disconnect calls killProcess callback when using transport", async () => {
     const killProcess = vi.fn(async () => {});
     const mock = createMockTransport();
@@ -3399,7 +3682,7 @@ describe("CodexAdapter with ICodexTransport", () => {
   });
 
   it("fires initError after all thread/start retries exhaust", async () => {
-    // When all retry attempts for thread/start fail, initErrorCb should fire.
+    // When all retry attempts for thread/start fail, the init-error subscribers should fire.
     const mock = createMockTransport();
     const messages: BrowserIncomingMessage[] = [];
     const initErrors: string[] = [];
@@ -3457,6 +3740,169 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock.calls.length).toBe(2);
   });
 
+  // got-050 (prod 2026-09-08): codex app-server serviced `thread/start` before
+  // the `initialized` notification we sent in the same tick → JSON-RPC -32600
+  // "Not initialized". Previously only "Transport closed" was retried, so the
+  // adapter went initFailed and the council observer stayed dead while its
+  // process kept listening. Validates: the init loop re-sends `initialized`,
+  // waits the short NOT_INITIALIZED backoff (100ms, not 500ms), retries
+  // thread/start and completes init on success.
+  it("retries thread/start after a Not initialized handshake race, re-sending initialized first", async () => {
+    const mock = createMockTransport();
+    const messages: BrowserIncomingMessage[] = [];
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notinit", { model: "gpt-5.5" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // One `initialized` notification sent before the first thread/start.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(1);
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    // Wire shape observed in the recording: {"error":{"code":-32600,"message":"Not initialized"}}
+    mock.rejectCall(2, new Error("Not initialized"));
+
+    // 100ms base backoff + buffer — well under the 500ms transport-drop backoff,
+    // so this also guards that the short path is taken.
+    await new Promise((r) => setTimeout(r, 250));
+
+    // `initialized` was re-sent and thread/start retried.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(2);
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.resolveCall(3, { thread: { id: "thr_after_notinit" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(4, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(initErrors.length).toBe(0);
+    expect(messages.filter((m) => m.type === "session_init").length).toBe(1);
+    expect(adapter.getThreadId()).toBe("thr_after_notinit");
+    expect(adapter.isReadyForServerFrame()).toBe(true);
+  });
+
+  // Bounded: a server that answers "Not initialized" forever must still fail
+  // init after INIT_THREAD_MAX_RETRIES (3) attempts, not spin.
+  it("gives up after max retries when Not initialized persists", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notinit-exhaust", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.rejectCall(2, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 250)); // 100ms backoff
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.rejectCall(3, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 400)); // 200ms backoff
+    expect(mock.calls[3]?.method).toBe("thread/start");
+    mock.rejectCall(4, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(initErrors.length).toBe(1);
+    expect(initErrors[0]).toContain("Codex initialization failed");
+    // initialize + 3 thread/start attempts, nothing more.
+    expect(mock.calls.length).toBe(4);
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(3);
+  });
+
+  // Council review 2026-09-08 #14. `Transport closed` and `Not initialized`
+  // are two independently-tuned mitigations (500ms vs 100ms base) that used to
+  // share ONE attempt counter and ONE budget of 3. A spawn that hit both — the
+  // realistic case, since both correlate with the same app-server startup
+  // jitter — therefore got fewer tries against either than each constant
+  // advertises, and the handshake branch computed its backoff off an exponent
+  // the transport branch had already advanced. Both isolated tests above pass
+  // either way; only a MIXED sequence can tell the two designs apart.
+  it("gives each failure class its own retry budget on a mixed Transport-closed / Not-initialized sequence", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-mixed-retry", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Attempt 1 dies on the transport (500ms branch, spends a TRANSPORT slot).
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    mock.rejectCall(2, new Error("Transport closed"));
+    await new Promise((r) => setTimeout(r, 700));
+
+    // Attempt 2 hits the handshake race (100ms branch, spends a NOT-INIT slot).
+    // Under the old shared counter this attempt was index 1, so it would have
+    // waited 100*2^1=200ms — an exponent inherited from the transport failure.
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.rejectCall(3, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 250));
+
+    // The decisive assertion: a third attempt exists at all. With one shared
+    // budget of 3 the loop would have stopped here (attempt index 2 = last).
+    expect(mock.calls[3]?.method).toBe("thread/start");
+    // And the handshake branch re-sent `initialized` before retrying: one at
+    // init, one for the single Not-initialized failure.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(2);
+
+    mock.resolveCall(4, { thread: { id: "thr_mixed" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(5, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(initErrors.length).toBe(0);
+    expect(adapter.getThreadId()).toBe("thr_mixed");
+  });
+
+  // #13: the `initialized` re-send inside the handshake-race branch used to be
+  // an unguarded await. If the transport dropped in the window between the
+  // failed thread/start and the re-send, that rejection escaped the retry loop
+  // entirely into the outer catch — burning ZERO of the budget and reporting a
+  // generic "initialization failed", which is precisely the "stayed dead"
+  // outcome got-050 exists to remove. It must now be classified as a transport
+  // failure and consume a transport slot instead.
+  it("treats a failed `initialized` re-send as a transport error instead of escaping the retry loop", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notify-fail", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Make the NEXT notify reject, then trigger the handshake-race branch.
+    const originalNotify = mock.transport.notify.bind(mock.transport);
+    let notifyFailures = 0;
+    (mock.transport as { notify: (m: string, p?: Record<string, unknown>) => Promise<void> }).notify = async (m, p) => {
+      if (m === "initialized") {
+        notifyFailures++;
+        throw new Error("Transport closed");
+      }
+      return originalNotify(m, p);
+    };
+
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    mock.rejectCall(2, new Error("Not initialized"));
+    // 500ms transport backoff (the slot the notify failure consumed) + buffer.
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(notifyFailures).toBe(1);
+    // The loop survived the notify rejection and retried thread/start rather
+    // than collapsing into the outer catch.
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    expect(initErrors.length).toBe(0);
+
+    mock.resolveCall(3, { thread: { id: "thr_after_notify_fail" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(4, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+    expect(adapter.getThreadId()).toBe("thr_after_notify_fail");
+  });
+
   it("falls back to thread/start when thread/resume fails with non-transient error", async () => {
     // When thread/resume fails (e.g. "no rollout found"), the adapter should
     // automatically fall back to thread/start instead of failing entirely.
@@ -3509,6 +3955,68 @@ describe("CodexAdapter with ICodexTransport", () => {
     // Should now try to resume "thr_fresh_new", not "thr_stale_rollout"
     expect(mock2.calls[1]?.method).toBe("thread/resume");
     expect(mock2.calls[1]?.params?.threadId).toBe("thr_fresh_new");
+  });
+
+  // aura-meta-diet FIX-C3-1: the system prompt (observer role prompt, layer
+  // directive) must use the field Codex app-server actually defines —
+  // `developerInstructions` in ThreadStartParams/ThreadResumeParams
+  // (codex-cli 0.142.5 schema). The old `instructions` key was dropped
+  // silently: prod observer rollouts showed no trace of the observer prompt.
+  // It must also ride thread/resume, since a server restart resumes the thread.
+  describe("system prompt delivery (FIX-C3-1)", () => {
+    const PROMPT = "# Aura layer flags\nThe council layer is disabled.";
+
+    it("thread/start sends developerInstructions, never the unknown `instructions` key", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-start", { model: "gpt-5.5", cwd: "/w", systemPrompt: PROMPT });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mock.calls[1]?.method).toBe("thread/start");
+      expect(mock.calls[1]?.params?.developerInstructions).toBe(PROMPT);
+      expect(mock.calls[1]?.params).not.toHaveProperty("instructions");
+      // baseInstructions would REPLACE Codex's own system prompt — must stay unset.
+      expect(mock.calls[1]?.params).not.toHaveProperty("baseInstructions");
+    });
+
+    it("thread/resume re-sends developerInstructions", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-resume", {
+        model: "gpt-5.5", cwd: "/w", threadId: "thr_old", systemPrompt: PROMPT,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mock.calls[1]?.method).toBe("thread/resume");
+      expect(mock.calls[1]?.params?.threadId).toBe("thr_old");
+      expect(mock.calls[1]?.params?.developerInstructions).toBe(PROMPT);
+    });
+
+    it("resume→start fallback keeps developerInstructions", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-fallback", {
+        model: "gpt-5.5", cwd: "/w", threadId: "thr_gone", systemPrompt: PROMPT,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      mock.rejectCall(2, new Error("no rollout found for thread id thr_gone"));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(mock.calls[2]?.method).toBe("thread/start");
+      expect(mock.calls[2]?.params?.developerInstructions).toBe(PROMPT);
+    });
+
+    it("no system prompt → neither thread call carries an instructions field", async () => {
+      // Prod parity for plain sessions: params byte-identical to before.
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-plain", { model: "gpt-5.5", cwd: "/w", threadId: "thr_x" });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(Object.keys(mock.calls[1]?.params ?? {}).sort()).toEqual(
+        ["approvalPolicy", "cwd", "model", "sandbox", "threadId"],
+      );
+    });
   });
 
   it("propagates thread/start failure even after resume fallback", async () => {
@@ -4097,6 +4605,42 @@ describe("CodexAdapter with ICodexTransport", () => {
     warnSpy.mockRestore();
   });
 
+  it("accepts current app-server informational notifications without protocol drift", async () => {
+    const { mock, messages } = await initAdapter();
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    const informationalNotifications: Array<{ method: string; params: Record<string, unknown> }> = [
+      { method: "configWarning", params: { message: "ignored warning" } },
+      { method: "remoteControl/status/changed", params: { status: "disabled" } },
+      { method: "mcpServer/startupStatus/updated", params: { status: "ready" } },
+      { method: "thread/settings/updated", params: { threadId: "thr_init" } },
+      { method: "thread/goal/cleared", params: { threadId: "thr_init" } },
+      // Newer Codex CLIs emit this (empty payload) when the skills set
+      // changes; it surfaced to the observer UI as "protocol drift".
+      { method: "skills/changed", params: {} },
+      // codex-cli 0.162 emits a generic per-thread `warning` notification
+      // (e.g. "Codex is ignoring 1 unrecognized configuration setting");
+      // like skills/changed it surfaced to the observer UI as drift.
+      { method: "warning", params: { threadId: "thr_init", message: "Codex is ignoring 1 unrecognized configuration setting." } },
+    ];
+
+    for (const notification of informationalNotifications) {
+      mock.pushNotification(notification.method, notification.params);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    for (const notification of informationalNotifications) {
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        "protocol-monitor",
+        "Backend protocol drift detected",
+        expect.objectContaining({ messageName: notification.method }),
+      );
+    }
+    expect(messages.some((m) => m.type === "error" && `${m.message}`.includes("protocol drift"))).toBe(false);
+
+    warnSpy.mockRestore();
+  });
+
   it("logs and surfaces unknown notification methods as protocol drift", async () => {
     // Unknown notifications should be elevated as compatibility warnings so
     // backend protocol drift is visible in logs and in the session UI.
@@ -4157,6 +4701,103 @@ describe("CodexAdapter with ICodexTransport", () => {
     // No generic drift banner for this frame
     expect(errors.some((e) => e.message.includes("Companion may need an update"))).toBe(false);
     warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  // ─── Auto-resume: usage-limit detection (session:usage-limit) ─────────────
+  // Shapes: the account/rateLimits/updated params are the REAL recorded frame
+  // shape (usedPercent raised to 100 to model the exhausted window); the
+  // error notification is the real v2 shape with codexErrorInfo
+  // "usageLimitExceeded" + the message string from the installed codex binary.
+  it("usage-limit error → session:usage-limit with the exhausted rateLimits window reset, once per turn", async () => {
+    const { mock } = await initAdapter({ model: "gpt-6.1-sol" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: Array<Record<string, unknown>> = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e as unknown as Record<string, unknown>);
+    });
+    const resetSec = Math.floor(Date.now() / 1000) + 3600;
+    mock.pushNotification("account/rateLimits/updated", {
+      rateLimits: {
+        limitId: "codex", limitName: null,
+        primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: resetSec },
+        secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: resetSec + 86400 },
+        credits: { hasCredits: false, unlimited: false, balance: "0" },
+        individualLimit: null, planType: "plus", rateLimitReachedType: null,
+      },
+    });
+    mock.pushNotification("error", {
+      error: { message: "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 3:45 PM.", codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_9",
+    });
+    // The failed turn/completed for the same turn must not double-emit.
+    mock.pushNotification("turn/completed", {
+      threadId: "thr_1",
+      turn: { id: "turn_9", status: "failed", error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" } },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionId: "test-session-transport",
+      backend: "codex",
+      model: "gpt-6.1-sol",
+      resetAt: resetSec * 1000,
+      resetSource: "codex_rate_limits",
+      limitType: "primary",
+    });
+    off();
+    errorSpy.mockRestore();
+  });
+
+  // Review WARN1: real adapter path (no defaultTimeZone, no rateLimits
+  // snapshot) — Codex formats "Try again at" in its own local zone, read here
+  // in the server zone and flagged text_no_zone.
+  it("zoneless 'Try again at h:mm PM' via the real adapter path → server-zone reset, source text_no_zone", async () => {
+    const { mock } = await initAdapter({ model: "gpt-6.1-sol" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: Array<Record<string, unknown>> = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e as unknown as Record<string, unknown>);
+    });
+    // Pin the clock to local 10:00 (Date only — real timers keep the
+    // adapter's async plumbing working) so +2h never crosses midnight.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 16, 10, 0));
+    const target = new Date(2026, 9, 16, 12, 0);
+    const h12 = target.getHours() % 12 === 0 ? 12 : target.getHours() % 12;
+    const clock = `${h12}:${String(target.getMinutes()).padStart(2, "0")} ${target.getHours() < 12 ? "AM" : "PM"}`;
+    mock.pushNotification("error", {
+      error: { message: `You've hit your usage limit. Try again at ${clock}.`, codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_tz",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ resetAt: target.getTime(), resetSource: "text_no_zone" });
+    vi.useRealTimers();
+    off();
+    errorSpy.mockRestore();
+  });
+
+  it("a non-limit Codex error (real model-not-supported frame) does not emit session:usage-limit", async () => {
+    const { mock } = await initAdapter();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: unknown[] = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e);
+    });
+    mock.pushNotification("error", {
+      error: { message: "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.\"}}", codexErrorInfo: "other", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_1",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(0);
+    off();
     errorSpy.mockRestore();
   });
 
@@ -5238,6 +5879,61 @@ describe("CodexAdapter WS reconnection handling", () => {
     const turnStartCalls = (transport.call as ReturnType<typeof vi.fn>).mock.calls
       .filter((args: unknown[]) => args[0] === "turn/start");
     expect(turnStartCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("coalesces concurrent Not-initialized recoveries into a single re-init", async () => {
+    // Regression (council F6): two in-flight ops (a turn and an mcp query) that
+    // BOTH reject with "Not initialized" must trigger exactly ONE re-init. The
+    // old code let the second recovery bump initEpoch and reset initInProgress
+    // out from under the first, letting an extra initialize() run concurrently.
+    let serverInit = false;
+
+    const transport: ICodexTransport = {
+      call: vi.fn(async (method: string) => {
+        if (method === "initialize") return { userAgent: "codex" };
+        if (method === "thread/start" || method === "thread/create") return { thread: { id: "thr_1" } };
+        if (method === "account/rateLimits/read") return {};
+        if (method === "turn/start") {
+          if (!serverInit) throw new Error("Not initialized");
+          return { turn: { id: "turn_1" } };
+        }
+        if (method === "mcpServerStatus/list") {
+          if (!serverInit) throw new Error("Not initialized");
+          return { data: [] };
+        }
+        if (method === "config/read") return { config: {} };
+        return {};
+      }),
+      notify: vi.fn(async (method: string) => {
+        if (method === "initialized") serverInit = true;
+      }),
+      respond: vi.fn(async () => {}),
+      onNotification: vi.fn(),
+      onRequest: vi.fn(),
+      onRawIncoming: vi.fn(),
+      onRawOutgoing: vi.fn(),
+      onParseError: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+
+    const adapter = new CodexAdapter(transport, "coalesce-reinit-test", { model: "o4-mini", cwd: "/tmp" });
+
+    // Let the initial handshake complete (initialize call #1).
+    await new Promise((r) => setTimeout(r, 100));
+    expect(serverInit).toBe(true);
+
+    // Simulate the server losing its init state, then fire two ops in the same
+    // tick so both are awaiting transport.call when the rejections arrive.
+    serverInit = false;
+    adapter.sendBrowserMessage({ type: "user_message", content: "hi" });
+    adapter.sendBrowserMessage({ type: "mcp_get_status" });
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Exactly one recovery: initialize should have run twice total (initial + 1).
+    const initializeCalls = (transport.call as ReturnType<typeof vi.fn>).mock.calls
+      .filter((args: unknown[]) => args[0] === "initialize");
+    expect(initializeCalls.length).toBe(2);
   });
 
   it("resets overloadRetryCount on companion/wsReconnected", async () => {

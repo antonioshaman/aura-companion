@@ -19,7 +19,7 @@ interface MockStoreState {
   sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string }[];
   cliConnected: Map<string, boolean>;
   cliReconnecting: Map<string, boolean>;
-  sessions: Map<string, { model?: string; backend_type?: string }>;
+  sessions: Map<string, { model?: string; backend_type?: string; last_context_tokens?: number; last_turn_completed_at?: number }>;
   pendingCodexModelSwitches: Map<string, { requestedModel: string; requestedAt: number }>;
   // PLAN-aura-dynamic-model-list Task 11: ModelSwitcher subscribes to the
   // settings-slice cache. Empty default → fallback to static models (the
@@ -98,9 +98,10 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // All three Claude models should appear as options
-    expect(screen.getByRole("option", { name: /Opus/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sonnet/ })).toBeInTheDocument();
+    // The registry-verified Claude models appear as options (the static
+    // fallback also lists fresh untested models — Opus 5.5, Sonnet 5, …)
+    expect(screen.getByRole("option", { name: /Opus 4\.8/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Sonnet 4\.6/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Haiku/ })).toBeInTheDocument();
   });
 
@@ -108,17 +109,17 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    const opusOption = screen.getByRole("option", { name: /Opus/ });
+    const opusOption = screen.getByRole("option", { name: /Opus 4\.8/ });
     expect(opusOption).toHaveAttribute("aria-selected", "true");
 
-    const sonnetOption = screen.getByRole("option", { name: /Sonnet/ });
+    const sonnetOption = screen.getByRole("option", { name: /Sonnet 4\.6/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
   });
 
   it("sends set_model via WebSocket on selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockSendToSession).toHaveBeenCalledWith("s1", {
       type: "set_model",
@@ -129,7 +130,7 @@ describe("ModelSwitcher", () => {
   it("optimistically updates the store after selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
@@ -143,7 +144,7 @@ describe("ModelSwitcher", () => {
   it("optimistically updates the runtime session model so the label changes immediately", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockUpdateSession).toHaveBeenCalledWith("s1", { model: "claude-sonnet-4-6" });
   });
@@ -155,7 +156,7 @@ describe("ModelSwitcher", () => {
   it("records the pending Claude model switch with the previous model for revert", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockSetPendingClaudeModelSwitch).toHaveBeenCalledWith(
       "s1",
@@ -167,7 +168,7 @@ describe("ModelSwitcher", () => {
   it("does not send when selecting the already-active model", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Opus/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Opus 4\.8/ }));
 
     // Same model — no WS message, no store update
     expect(mockSendToSession).not.toHaveBeenCalled();
@@ -761,6 +762,64 @@ describe("ModelSwitcher", () => {
       );
     });
 
+    it("shows a subtle 'Untested' hint on models the registry never verified, still selectable", () => {
+      // The served catalogue flags registry-unknown models `untested`. The
+      // hint is honest metadata (muted text, not a warning) — the model stays
+      // selectable and can coexist with the 'Latest' badge.
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const opus5 = screen.getByRole("option", { name: /Opus 5/ });
+      expect(within(opus5).getByText("Untested")).toBeInTheDocument();
+      expect(within(opus5).getByText("Latest")).toBeInTheDocument();
+      expect(opus5).toHaveAttribute("title", expect.stringMatching(/no session has run/i));
+      // A verified (registry-known) model carries no hint.
+      const opus48 = screen.getByRole("option", { name: /Opus 4\.8/ });
+      expect(within(opus48).queryByText("Untested")).not.toBeInTheDocument();
+      fireEvent.click(opus5);
+      expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "claude-opus-5" });
+    });
+
+    it("a model observed working (verifiedBy=observed) shows no 'Untested' hint and says why in its title", () => {
+      // Self-maintaining verification: a registry-unknown model a session
+      // already ran successfully is verified — no hint, explanatory tooltip.
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-sonnet-5", label: "Sonnet 5", icon: "", verifiedBy: "observed" },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const sonnet5 = screen.getByRole("option", { name: /Sonnet 5/ });
+      expect(within(sonnet5).queryByText("Untested")).not.toBeInTheDocument();
+      expect(sonnet5).toHaveAttribute("title", expect.stringMatching(/ran it successfully/i));
+    });
+
+    it("passes axe checks with untested hints rendered", async () => {
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      const { axe } = await import("vitest-axe");
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(await axe(container)).toHaveNoViolations();
+    });
+
     it("passes axe checks with status-annotated options rendered", async () => {
       resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
       const { axe } = await import("vitest-axe");
@@ -769,5 +828,37 @@ describe("ModelSwitcher", () => {
       const results = await axe(container);
       expect(results).toHaveNoViolations();
     });
+  });
+});
+
+// W7(b) — right before a model switch, the open picker tells the user the
+// switch rebuilds the prompt cache (≈ last known context). Informational only:
+// selecting a model still works exactly as before.
+describe("ModelSwitcher cache-rewrite hint", () => {
+  beforeEach(() => {
+    mockSendToSession.mockClear();
+  });
+
+  it("shows the rewrite estimate in the open dropdown for a large context, and selection still switches", () => {
+    resetStore({
+      sessions: new Map([["s1", { model: DEFAULT_MODEL.value, last_context_tokens: 90_000, last_turn_completed_at: Date.now() }]]),
+    });
+    render(<ModelSwitcher sessionId="s1" />);
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull(); // closed → no hint
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    const hint = screen.getByTestId("cache-rewrite-hint");
+    expect(hint).toHaveTextContent("Смена модели сбросит кеш: ≈90.0k токенов будут записаны заново");
+    // The hint sits outside the listbox so screen readers don't iterate it as an option.
+    expect(within(screen.getByRole("listbox")).queryByTestId("cache-rewrite-hint")).toBeNull();
+    const other = CLAUDE_MODELS.find((m) => m.value !== DEFAULT_MODEL.value)!;
+    fireEvent.click(screen.getByText(other.label));
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: other.value });
+  });
+
+  it("no hint for a small context", () => {
+    resetStore({ sessions: new Map([["s1", { model: DEFAULT_MODEL.value, last_context_tokens: 3_000 }]]) });
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull();
   });
 });

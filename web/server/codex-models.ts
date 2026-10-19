@@ -68,25 +68,45 @@ export function readLaunchableCodexModels(): CodexModelSelection | { kind: "list
   }
 }
 
+/**
+ * Tier affinity outranks version affinity, and both are broken by `priority`.
+ *
+ * The requested slug is usually STALE — a pin left in `~/.codex/config.toml`
+ * (codex's own `[notice.model_migrations]` rewrites it) or a persisted session
+ * whose model the account no longer launches. So a version match is weak
+ * evidence: it means "this candidate is as old as the thing that stopped
+ * working". Tier (`mini` / `max` / `codex`) is the durable part of the user's
+ * intent and must survive the fallback.
+ *
+ * Weighting version above tier inverts that and silently DOWNGRADES the class
+ * of model. Observed 2026-09-07: a `gpt-5.4` pin resolved to `gpt-5.4-mini`
+ * (same version, smaller model) instead of `gpt-5.5`, because the version
+ * bonus outweighed the tier mismatch.
+ *
+ * "Newest" is deliberately NOT parsed out of the slug — `priority` is the
+ * server's own ranking, arrives in the cache, and covers slugs with no version
+ * token at all (e.g. `codex-auto-review`). Within a tier it already orders
+ * newest-first, so it is the tiebreak rather than a hand-rolled comparator.
+ */
 function modelScore(requested: string, candidate: CodexModelInfo): number {
   let score = 0;
   if (candidate.slug === requested) score += 10_000;
 
-  const requestedMajor = requested.match(/^gpt-\d+(?:\.\d+)?/)?.[0];
-  const candidateMajor = candidate.slug.match(/^gpt-\d+(?:\.\d+)?/)?.[0];
-  if (requestedMajor && requestedMajor === candidateMajor) score += 500;
-
   const requestedCodex = requested.includes("codex");
   const candidateCodex = candidate.slug.includes("codex");
-  if (requestedCodex === candidateCodex) score += 200;
+  if (requestedCodex === candidateCodex) score += 1_000;
 
   const requestedMini = requested.includes("mini");
   const candidateMini = candidate.slug.includes("mini");
-  if (requestedMini === candidateMini) score += 100;
+  if (requestedMini === candidateMini) score += 1_000;
 
   const requestedMax = requested.includes("max");
   const candidateMax = candidate.slug.includes("max");
-  if (requestedMax === candidateMax) score += 100;
+  if (requestedMax === candidateMax) score += 1_000;
+
+  const requestedMajor = requested.match(/^gpt-\d+(?:\.\d+)?/)?.[0];
+  const candidateMajor = candidate.slug.match(/^gpt-\d+(?:\.\d+)?/)?.[0];
+  if (requestedMajor && requestedMajor === candidateMajor) score += 100;
 
   return score - candidate.priority;
 }

@@ -17,7 +17,10 @@ export interface CLIDedupState {
  */
 export function parseNDJSON(raw: string | Buffer): string[] {
   const data = typeof raw === "string" ? raw : raw.toString("utf-8");
-  return data.split("\n").filter((l) => l.trim());
+  return data
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 }
 
 /**
@@ -78,4 +81,30 @@ export function isDuplicateCLIMessage(
   // stream content in the UI — acceptable since stream_events are transient
   // and the final assistant message is always deduplicated.
   return false;
+}
+
+/** JSON with object keys sorted — key order must not decide equality. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .filter((k) => obj[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Identity of one delivered `assistant` frame: API message id + its content
+ * blocks. The Claude CLI emits one frame per content block, all sharing the
+ * message id, so the id alone is not unique; the content is what the CLI's
+ * jsonl record and its stdout frame have in common byte-for-byte. Used by the
+ * drift recovery to deliver a jsonl-only reply exactly once.
+ */
+export function assistantDeliveryKey(message: Record<string, unknown> | null | undefined): string {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return `${id}\u0000${stableStringify(message?.content ?? null)}`;
 }

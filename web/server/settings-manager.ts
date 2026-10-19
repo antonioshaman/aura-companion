@@ -1,15 +1,30 @@
+import { DEFAULT_KB_ANALYSIS_SETTINGS, normalizeKbAnalysisSettings, type KbAnalysisSettings } from "./diagnostics/kb-analysis-settings.js";
 import {
-  mkdirSync,
   readFileSync,
-  writeFileSync,
   existsSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
+import {
+  type SecondReviewerConfig,
+  DEFAULT_SECOND_REVIEWER_CONFIG,
+  normalizeSecondReviewerConfig,
+} from "./second-reviewer-config.js";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 export type UpdateChannel = "stable" | "prerelease";
+
+/**
+ * Default mode for a NEW session created from the UI.
+ *  - `solo`    — one agent (the default since aura-diet: AuraBench measured the
+ *                observer at +0pp for 2.4x cost and full council at −6pp for 2.9x).
+ *  - `council` — the create-session Council toggle starts ON. The REST API is
+ *                unaffected: a pair is only ever created on an explicit
+ *                `councilMode: "council"` in the request body.
+ */
+export type DefaultSessionMode = "solo" | "council";
 
 export interface CompanionSettings {
   anthropicApiKey: string;
@@ -45,6 +60,31 @@ export interface CompanionSettings {
   dockerAutoUpdate: boolean;
   /** Opt-in: send an anonymous 30-day heartbeat to the global usage counter. Default off. */
   telemetryEnabled: boolean;
+  /** UI default for new sessions. Default `solo` — see {@link DefaultSessionMode}. */
+  defaultSessionMode: DefaultSessionMode;
+  /**
+   * Opt-in: append a "consult the knowledge base at session start" directive to
+   * new sessions' system prompt (Claude `--append-system-prompt` / Codex
+   * `developerInstructions`). Default off — the KB is consulted on demand.
+   */
+  kbAutoPrime: boolean;
+  /**
+   * When a session stops on a usage limit (Claude session/weekly limit,
+   * Codex usage limit), automatically send a continuation prompt shortly
+   * after the limit resets. Default ON. See `auto-resume-scheduler.ts`.
+   */
+  autoResumeAfterLimit: boolean;
+  /**
+   * W15 multi-model review: global default for the Council "second opinion"
+   * reviewer (another backend/model reviewing each in-scope checkpoint next to
+   * the observer). A pair's own setting (`.council/state/<group>-second-reviewer.json`)
+   * wins. Default off. See `second-reviewer-config.ts`.
+   */
+  councilSecondReviewer: SecondReviewerConfig;
+  /** Accumulation thresholds for the background KB analyzer (diagnostics spec §3.2). */
+  kbAnalysis: KbAnalysisSettings;
+  /** Report-only memory analysis on the Diagnostics page. Default off; manual runs only. */
+  diagnosticsMemoryReport: boolean;
   updatedAt: number;
 }
 
@@ -76,7 +116,13 @@ let settings: CompanionSettings = {
   publicUrl: "",
   updateChannel: "stable",
   dockerAutoUpdate: false,
-  telemetryEnabled: false,
+  telemetryEnabled: true,
+  defaultSessionMode: "solo",
+  kbAutoPrime: false,
+  autoResumeAfterLimit: true,
+  councilSecondReviewer: { ...DEFAULT_SECOND_REVIEWER_CONFIG },
+  kbAnalysis: { ...DEFAULT_KB_ANALYSIS_SETTINGS },
+  diagnosticsMemoryReport: false,
   updatedAt: 0,
 };
 
@@ -108,7 +154,13 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
-    telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : false,
+    telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : true,
+    defaultSessionMode: raw?.defaultSessionMode === "council" ? "council" : "solo",
+    kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
+    autoResumeAfterLimit: typeof raw?.autoResumeAfterLimit === "boolean" ? raw.autoResumeAfterLimit : true,
+    councilSecondReviewer: normalizeSecondReviewerConfig(raw?.councilSecondReviewer),
+    kbAnalysis: normalizeKbAnalysisSettings(raw?.kbAnalysis),
+    diagnosticsMemoryReport: raw?.diagnosticsMemoryReport === true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -117,6 +169,7 @@ function ensureLoaded(): void {
   if (loaded) return;
   try {
     if (existsSync(filePath)) {
+      tightenFileMode(filePath);
       const raw = readFileSync(filePath, "utf-8");
       settings = normalize(JSON.parse(raw) as Partial<CompanionSettings>);
     }
@@ -126,9 +179,10 @@ function ensureLoaded(): void {
   loaded = true;
 }
 
+// Secrets live in this file (API keys / OAuth tokens) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(settings, null, 2), "utf-8");
+  writeAtomicJson(filePath, settings, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
 }
 
 export function getSettings(): CompanionSettings {
@@ -137,7 +191,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -165,6 +219,12 @@ export function updateSettings(
     updateChannel: patch.updateChannel ?? settings.updateChannel,
     dockerAutoUpdate: patch.dockerAutoUpdate ?? settings.dockerAutoUpdate,
     telemetryEnabled: patch.telemetryEnabled ?? settings.telemetryEnabled,
+    defaultSessionMode: patch.defaultSessionMode ?? settings.defaultSessionMode,
+    kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
+    autoResumeAfterLimit: patch.autoResumeAfterLimit ?? settings.autoResumeAfterLimit,
+    councilSecondReviewer: patch.councilSecondReviewer ?? settings.councilSecondReviewer,
+    kbAnalysis: patch.kbAnalysis ?? settings.kbAnalysis,
+    diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? settings.diagnosticsMemoryReport,
     updatedAt: Date.now(),
   });
   persist();

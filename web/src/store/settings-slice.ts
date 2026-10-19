@@ -70,13 +70,30 @@ export interface SettingsHydratePayload {
  *    (`dynamicBackendModels[backend]` is `undefined`). Hard reject.
  *  - `rejected-stale` — last fetch failed BUT prior successful result is
  *    preserved in `dynamicBackendModels[backend]`. Soft reject.
+ *  - `unconfigured` — the server answered `no_key_configured` (no Anthropic
+ *    API key). The static fallback is the EXPECTED list here, not a
+ *    failure: no retry, no "list didn't load" hint.
  */
 export type DynamicModelsStatus =
   | "idle"
   | "pending"
   | "resolved"
   | "rejected"
-  | "rejected-stale";
+  | "rejected-stale"
+  | "unconfigured";
+
+/**
+ * Backoff (ms) for automatic re-fetches after a HARD reject of the Claude
+ * model list. Before this, one failed/timed-out `/v1/models` fetch at page
+ * load pinned the New Session dropdown to the static fallback for the whole
+ * tab lifetime (owner bug 2026-10-16: fresh models missing). Index = attempt
+ * number of the retry being scheduled; length = max automatic retries.
+ */
+export const MODEL_LIST_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000];
+
+/** Backends whose hard reject schedules automatic retries. Codex's 404
+ * ("run codex once") is not transient, so it is not retried on a timer. */
+const RETRYING_BACKENDS: ReadonlySet<BackendType> = new Set<BackendType>(["claude"]);
 
 export interface SettingsSlice {
   // ── Server-authoritative facts (null = unhydrated) ────────────────────
@@ -170,6 +187,18 @@ export interface SettingsSlice {
   loadBackendModels: (backend: BackendType) => Promise<void>;
 }
 
+/** Pending automatic-retry timers, one chain per backend (module scope like
+ * the inflight tokens, so every consumer shares one chain). */
+const retryTimers: Partial<Record<BackendType, ReturnType<typeof setTimeout>>> = {};
+
+function clearRetryTimer(backend: BackendType): void {
+  const t = retryTimers[backend];
+  if (t !== undefined) {
+    clearTimeout(t);
+    delete retryTimers[backend];
+  }
+}
+
 /**
  * Module-level inflight tokens — NOT in Zustand state so multiple
  * `useStore.getState().loadBackendModels(...)` calls across components
@@ -190,73 +219,18 @@ const inflightModelLoadTokens: Record<BackendType, number> = {
 export function __resetBackendModelInflightForTests(): void {
   inflightModelLoadTokens.claude = 0;
   inflightModelLoadTokens.codex = 0;
+  clearRetryTimer("claude");
+  clearRetryTimer("codex");
 }
 
-export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set) => ({
-  anthropicApiKeyConfigured: null,
-  claudeCodeOAuthTokenConfigured: null,
-  openaiApiKeyConfigured: null,
-  aiValidationEnabled: null,
-  aiValidationAutoApprove: null,
-  aiValidationAutoDeny: null,
-  anthropicModel: null,
-  settingsHydrated: false,
-  dynamicBackendModels: {},
-  dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
-
-  hydrateSettings: (payload) =>
-    set((s) => ({
-      anthropicApiKeyConfigured:
-        typeof payload.anthropicApiKeyConfigured === "boolean"
-          ? payload.anthropicApiKeyConfigured
-          : s.anthropicApiKeyConfigured,
-      claudeCodeOAuthTokenConfigured:
-        typeof payload.claudeCodeOAuthTokenConfigured === "boolean"
-          ? payload.claudeCodeOAuthTokenConfigured
-          : s.claudeCodeOAuthTokenConfigured,
-      openaiApiKeyConfigured:
-        typeof payload.openaiApiKeyConfigured === "boolean"
-          ? payload.openaiApiKeyConfigured
-          : s.openaiApiKeyConfigured,
-      aiValidationEnabled:
-        typeof payload.aiValidationEnabled === "boolean"
-          ? payload.aiValidationEnabled
-          : s.aiValidationEnabled,
-      aiValidationAutoApprove:
-        typeof payload.aiValidationAutoApprove === "boolean"
-          ? payload.aiValidationAutoApprove
-          : s.aiValidationAutoApprove,
-      aiValidationAutoDeny:
-        typeof payload.aiValidationAutoDeny === "boolean"
-          ? payload.aiValidationAutoDeny
-          : s.aiValidationAutoDeny,
-      // Sticky model preference — accept null (explicit clear) AND string,
-      // but reject non-string non-null. Forward-compat for a future API
-      // shape that ships `"expired" | "default"` discriminator strings.
-      anthropicModel:
-        typeof payload.anthropicModel === "string" || payload.anthropicModel === null
-          ? payload.anthropicModel
-          : s.anthropicModel,
-      settingsHydrated: true,
-    })),
-
-  setProviderConfigured: (next) =>
-    set((s) => ({
-      claudeCodeOAuthTokenConfigured:
-        typeof next.claudeCodeOAuthTokenConfigured === "boolean"
-          ? next.claudeCodeOAuthTokenConfigured
-          : s.claudeCodeOAuthTokenConfigured,
-      openaiApiKeyConfigured:
-        typeof next.openaiApiKeyConfigured === "boolean"
-          ? next.openaiApiKeyConfigured
-          : s.openaiApiKeyConfigured,
-      anthropicApiKeyConfigured:
-        typeof next.anthropicApiKeyConfigured === "boolean"
-          ? next.anthropicApiKeyConfigured
-          : s.anthropicApiKeyConfigured,
-    })),
-
-  loadBackendModels: async (backend) => {
+export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set, get) => {
+  /**
+   * One fetch attempt. `attempt` = how many automatic retries already ran
+   * (0 for every external call). External calls (mount, focus, the "Refresh"
+   * button, Settings save) cancel any pending retry and restart the chain.
+   */
+  const loadAttempt = async (backend: BackendType, attempt: number): Promise<void> => {
+    clearRetryTimer(backend);
     const myToken = ++inflightModelLoadTokens[backend];
     set((s) => ({
       dynamicBackendModelsStatus: {
@@ -281,31 +255,28 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
           [backend]: "resolved" as const,
         },
       }));
-    } catch {
-      // Silent error fallback (per scope summary). Status flips so future
-      // UI surfaces can render a "could not reach upstream" inline hint
-      // if they want; today every consumer falls through to static.
+    } catch (err: unknown) {
+      // Silent error fallback: never throws to the caller.
       //
       // Council Review 2026-06-04-0823 P2 #9 (Backend × React — EC-41):
-      // when a NEWER token (`myToken < counter`) is still pending OR the
-      // slice already holds a successful list from a prior call, this
-      // failing call MUST NOT clobber state to "rejected". The naive
-      // `if (token !== myToken) return` shape on its own is insufficient
-      // because B (fast reject) and A (slow success) both pass the
-      // counter check at their own resolution moments — B's reject lands
-      // first and flips status, then A's success lands but is silently
-      // dropped because `myToken !== counter` after B already incremented.
-      // New shape: skip the rejected-state commit if a newer call has
-      // already begun (myToken < counter — A is slow, B started). Keep
-      // status "pending" so A's success can still commit when it lands.
+      // when a NEWER token is still pending, this failing call MUST NOT
+      // clobber state — the newer call owns the outcome.
       if (inflightModelLoadTokens[backend] !== myToken) return;
+      // No API key configured → static list is the intended list. Not a
+      // failure, nothing to retry.
+      if (err instanceof Error && err.message === "no_key_configured") {
+        set((s) => ({
+          dynamicBackendModelsStatus: {
+            ...s.dynamicBackendModelsStatus,
+            [backend]: "unconfigured" as const,
+          },
+        }));
+        return;
+      }
       set((s) => {
         const currentSlot = s.dynamicBackendModels[backend];
-        // PR #91 burndown Task 2 (EC-44): the two branches now mutate
-        // genuinely-different literal status values, replacing the
-        // prior overload-via-JSDoc shape. EC-42 mutation-resistance:
-        // collapsing the if/else makes one of the two re-write tests
-        // go RED.
+        // PR #91 burndown Task 2 (EC-44): soft vs hard reject are distinct
+        // literals; collapsing the branches turns a test RED (EC-42).
         if (currentSlot !== undefined && currentSlot.length > 0) {
           // Soft-reject — last known data preserved.
           return {
@@ -323,9 +294,89 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
           },
         };
       });
+      // Hard reject → schedule the next automatic attempt (transient
+      // upstream timeouts / event-loop stalls must not pin the UI to the
+      // static fallback for the whole tab lifetime).
+      if (
+        RETRYING_BACKENDS.has(backend)
+        && get().dynamicBackendModelsStatus[backend] === "rejected"
+        && attempt < MODEL_LIST_RETRY_DELAYS_MS.length
+      ) {
+        retryTimers[backend] = setTimeout(() => {
+          delete retryTimers[backend];
+          void loadAttempt(backend, attempt + 1);
+        }, MODEL_LIST_RETRY_DELAYS_MS[attempt]);
+      }
     }
-  },
-});
+  };
+
+  return {
+    anthropicApiKeyConfigured: null,
+    claudeCodeOAuthTokenConfigured: null,
+    openaiApiKeyConfigured: null,
+    aiValidationEnabled: null,
+    aiValidationAutoApprove: null,
+    aiValidationAutoDeny: null,
+    anthropicModel: null,
+    settingsHydrated: false,
+    dynamicBackendModels: {},
+    dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
+
+    hydrateSettings: (payload) =>
+      set((s) => ({
+        anthropicApiKeyConfigured:
+          typeof payload.anthropicApiKeyConfigured === "boolean"
+            ? payload.anthropicApiKeyConfigured
+            : s.anthropicApiKeyConfigured,
+        claudeCodeOAuthTokenConfigured:
+          typeof payload.claudeCodeOAuthTokenConfigured === "boolean"
+            ? payload.claudeCodeOAuthTokenConfigured
+            : s.claudeCodeOAuthTokenConfigured,
+        openaiApiKeyConfigured:
+          typeof payload.openaiApiKeyConfigured === "boolean"
+            ? payload.openaiApiKeyConfigured
+            : s.openaiApiKeyConfigured,
+        aiValidationEnabled:
+          typeof payload.aiValidationEnabled === "boolean"
+            ? payload.aiValidationEnabled
+            : s.aiValidationEnabled,
+        aiValidationAutoApprove:
+          typeof payload.aiValidationAutoApprove === "boolean"
+            ? payload.aiValidationAutoApprove
+            : s.aiValidationAutoApprove,
+        aiValidationAutoDeny:
+          typeof payload.aiValidationAutoDeny === "boolean"
+            ? payload.aiValidationAutoDeny
+            : s.aiValidationAutoDeny,
+        // Sticky model preference — accept null (explicit clear) AND string,
+        // but reject non-string non-null. Forward-compat for a future API
+        // shape that ships `"expired" | "default"` discriminator strings.
+        anthropicModel:
+          typeof payload.anthropicModel === "string" || payload.anthropicModel === null
+            ? payload.anthropicModel
+            : s.anthropicModel,
+        settingsHydrated: true,
+      })),
+
+    setProviderConfigured: (next) =>
+      set((s) => ({
+        claudeCodeOAuthTokenConfigured:
+          typeof next.claudeCodeOAuthTokenConfigured === "boolean"
+            ? next.claudeCodeOAuthTokenConfigured
+            : s.claudeCodeOAuthTokenConfigured,
+        openaiApiKeyConfigured:
+          typeof next.openaiApiKeyConfigured === "boolean"
+            ? next.openaiApiKeyConfigured
+            : s.openaiApiKeyConfigured,
+        anthropicApiKeyConfigured:
+          typeof next.anthropicApiKeyConfigured === "boolean"
+            ? next.anthropicApiKeyConfigured
+            : s.anthropicApiKeyConfigured,
+      })),
+
+    loadBackendModels: (backend) => loadAttempt(backend, 0),
+  };
+};
 
 // ── Narrow selectors (PLAN Task 6 — prevent render storms) ────────────────
 //

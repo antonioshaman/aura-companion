@@ -143,6 +143,59 @@ describe("SessionItem", () => {
     expect(screen.getByTitle("Scheduled")).toBeInTheDocument();
   });
 
+  // --- Worktree chip (worktree isolation) ---
+
+  it("shows a worktree chip with path + branch when the session runs in a worktree", () => {
+    // The chip is how the user sees WHERE an isolated session works.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/repo/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true },
+          }),
+        })}
+      />,
+    );
+    const chip = screen.getByTestId("session-worktree-chip");
+    expect(chip).toHaveTextContent("wt");
+    expect(chip).toHaveAccessibleName("Isolated worktree: /wt/repo/s1 · branch aura/s1");
+  });
+
+  it("marks a worktree kept after archive because of uncommitted changes", () => {
+    // Cleanup never deletes a dirty worktree; the row must say it was kept.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/x", branch: "aura/x", repoRoot: "/repo", isolated: true, retained: "dirty" },
+          }),
+        })}
+      />,
+    );
+    const chip = screen.getByTestId("session-worktree-chip");
+    expect(chip).toHaveTextContent("wt kept");
+    expect(chip.getAttribute("title")).toContain("kept: has uncommitted changes");
+  });
+
+  it("renders no worktree chip for sessions in place", () => {
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("session-worktree-chip")).not.toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks with the worktree chip", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/repo/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true },
+          }),
+        })}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   // --- Active state styling ---
 
   it("applies active background class when isActive is true", () => {
@@ -712,6 +765,177 @@ describe("SessionItem", () => {
     render(<SessionItem {...buildProps({ councilRole: "orchestrator", onStartRename })} />);
     fireEvent.doubleClick(screen.getByRole("button", { name: /claude-sonnet-4-6/i }));
     expect(onStartRename).toHaveBeenCalledWith("session-1", "claude-sonnet-4-6");
+  });
+
+  // ─── Convergence badge (bidirectional pipeline Story 4.1.5) ──────────────
+  //
+  // The badge is data-gated: it reads the server-authoritative convergence
+  // fields already on GroupRecord (threaded through Sidebar.councilInfoFor).
+  // It renders in the meta-row chip cluster only for council pairs that have
+  // convergence progress or a degraded status. These tests lock the priority
+  // ladder (degraded > converged > cycle-progress > nothing) and the absent
+  // cases so a future edit can't silently make the badge appear on solo rows.
+
+  it("renders the mid-cycle convergence badge (🔄 N/T) with an accessible label", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge).toHaveAttribute("aria-label", "Convergence cycle 2 of 3 clean cycles");
+  });
+
+  // P3/CONV-HONEST: the converged badge reports a streak, never readiness.
+  it("renders the converged badge (✅) as an honest streak, with a not-a-guarantee tooltip", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "converged", cycleNumber: 3, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "converged");
+    expect(badge.textContent).toContain("3× no blockers");
+    expect(badge.getAttribute("aria-label")).toMatch(/^3 reviews in a row without blockers\. Not a readiness guarantee/);
+    expect(badge.getAttribute("title")).toContain("Not a readiness guarantee");
+    expect(badge.textContent).not.toMatch(/ready to ship|converged/i);
+    expect(badge.getAttribute("aria-label")).not.toMatch(/ready to ship/i);
+  });
+
+  it("renders a muted 'not counted' badge at cycle 0 when the latest review read nothing", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "not-counted");
+    expect(badge.textContent).toBe("not counted");
+    expect(badge.getAttribute("aria-label")).toContain("not counted: no files read");
+  });
+
+  it("keeps mid-cycle progress and explains an uncounted latest review in the tooltip", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "no_changed_files" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge.getAttribute("title")).toContain("not counted: no changed files");
+  });
+
+  // P3/CONV-DOWNGRADE: a downgraded STOP keeps the streak (2/3) and the
+  // tooltip names the reason with the STOP acronym intact.
+  it("keeps progress and explains a downgraded-STOP review in the tooltip", async () => {
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "downgraded_stop" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge.getAttribute("title")).toContain("not counted: downgraded STOP");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("renders the muted 'not counted' badge at cycle 0 for a downgraded-STOP review", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "downgraded_stop" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "not-counted");
+    expect(badge.getAttribute("aria-label")).toContain("Last review not counted: downgraded STOP.");
+  });
+
+  it("passes axe a11y checks with the 'not counted' badge rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" },
+        })}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("shows the degraded badge (⚠️) with the counter frozen, taking priority over cycle progress (AC 193)", () => {
+    // Even though the pair had mid-cycle progress (cycleNumber 2), a degraded
+    // status must flip the badge to the frozen ⚠️ state — the counter must not
+    // keep advancing while a half is offline.
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: true },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "degraded");
+    expect(badge.textContent).toContain("Degraded");
+    // The frozen counter must NOT surface a misleading "2/3" progress figure.
+    expect(badge.textContent).not.toContain("2/3");
+  });
+
+  it("does NOT render a convergence badge for solo sessions (no councilConvergence prop)", () => {
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("council-convergence-badge")).not.toBeInTheDocument();
+  });
+
+  it("does NOT render a convergence badge at cycle 0 with no progress and not degraded", () => {
+    // A freshly-paired group that has never checkpointed carries cycleNumber 0
+    // and in-progress state — the badge must stay hidden to avoid clutter.
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-convergence-badge")).not.toBeInTheDocument();
+  });
+
+  it("passes axe a11y checks with the convergence badge rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "converged", cycleNumber: 3, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 
   // ─── Continue-in-new-session menu item ───────────────────────────────────

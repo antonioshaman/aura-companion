@@ -82,9 +82,17 @@ async function expandSystemGroup(label?: string) {
   const button = label
     ? await screen.findByRole("button", { name: `Toggle process group ${label}` })
     : await screen.findByRole("button", { name: /Toggle process group/ });
-  // Wait for default-collapse effect to settle before toggling.
+  // `collapsedSystemGroups` starts empty, so a group first renders EXPANDED and the
+  // default-collapse effect flips it a commit later. Asserting the attribute merely
+  // exists passes on that first render, so the toggle below can be skipped and the
+  // group then collapses underneath the test. Poll until the value is stable across
+  // two reads — waitFor flushes effects between attempts — so we read the settled state.
+  let previous: string | null = null;
   await waitFor(() => {
-    expect(button).toHaveAttribute("aria-expanded");
+    const current = button.getAttribute("aria-expanded");
+    const settled = current !== null && current === previous;
+    previous = current;
+    expect(settled).toBe(true);
   });
   if (button.getAttribute("aria-expanded") === "false") {
     fireEvent.click(button);

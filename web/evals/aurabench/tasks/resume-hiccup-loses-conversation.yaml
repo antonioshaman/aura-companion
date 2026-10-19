@@ -1,0 +1,55 @@
+# AuraBench task mined from PR #171 ("fix(server): require two consecutive fast resume-deaths before discarding cliSessionId").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: resume-hiccup-loses-conversation
+title: "One transient crash on resume no longer throws away the conversation"
+start_commit: d6f31c5f7f3a3a261e4774b46ac71aa3221935b5
+prompt: |
+  When a Claude CLI spawned with `--resume` exits within 5 seconds, the session's
+  conversation is dropped: the next message starts a brand-new conversation. A
+  fast exit like that is often just a transient error, a model 400 or a
+  version/transport mismatch, and users lose their whole conversation to a
+  one-off hiccup.
+
+  Require two consecutive fast resume-deaths before discarding. Put the decision
+  in an exported pure function in `web/server/cli-launcher.ts`,
+  `shouldClearResumeAfterExit(session, uptimeMs, resuming)` (the third argument says
+  whether the spawn carried `--resume`), returning whether
+  to discard, and keep the streak on the session as
+  `resumeImmediateFailures` (a new optional field of the session info). A spawn
+  that outlives the 5 s window resets the streak to 0; a fast death that was not
+  a resume never counts and also leaves the streak at 0. Each fast resume-death
+  adds one to the streak, including the one that triggers the discard: after the
+  call that returns "discard", the streak reads 2 (the discard itself does not
+  reset it; only a spawn that outlives the window does). This must hold for both the WebSocket and the stdio
+  transport.
+expected_files:
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "only one of the two exit handlers uses the new rule"
+  - "a dead resume target is never discarded"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 171
+  merge_commit: 46455ec3c95bb19023bef8b1dd57a93d6b43bd28
+  class: debug
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:39:35.346Z"

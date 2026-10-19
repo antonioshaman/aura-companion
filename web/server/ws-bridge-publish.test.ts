@@ -205,7 +205,7 @@ describe("broadcastToBrowsers", () => {
 
 // ─── Council wire variants — seq coverage ────────────────────────────────────
 //
-// PLAN-aura-consolidated-refactor.md Task 1 acceptance criterion (promoted
+// docs/history/PLAN-aura-consolidated-refactor.md Task 1 acceptance criterion (promoted
 // from Risks v2 → Task 1 v2 patch): every `group_*` and `observer_review`
 // emit MUST pass through the same `sequenceEvent` + `eventBuffer` path as
 // `assistant`/`stream_event`, so reconnect-replay (`session_subscribe

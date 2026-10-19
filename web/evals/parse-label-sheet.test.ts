@@ -13,7 +13,7 @@ import {
   deriveLabelId,
   buildLabelRecords,
 } from "./parse-label-sheet.js";
-import { renderLabelSheet, type LabelSheetItem } from "./label-sheet.js";
+import { renderCodeClaimQueue, renderDecisionSheet, renderLabelSheet, type LabelSheetItem } from "./label-sheet.js";
 import { parseLabelRecord } from "./schema/parse-artifact.js";
 
 function item(over: Partial<LabelSheetItem>): LabelSheetItem {
@@ -119,6 +119,55 @@ describe("parseLabelSheet", () => {
     expect(r.inputs.map((i) => `${i.finding_id}:${i.verdict}`)).toEqual([
       "efnd_1:true_positive",
       "efnd_2:false_positive",
+    ]);
+  });
+});
+
+/**
+ * P3/FIX-B3-1 sheets. The decision sheet asks "A (keep as is) / B (adopt the
+ * observer's recommendation)": A means the observer objected to intended
+ * behaviour → false_positive; B means it was right → true_positive. The
+ * orchestrator queue keeps TRUE/FALSE and must round-trip unchanged.
+ */
+describe("parseLabelSheet — triaged sheets", () => {
+  const decision = (id: string) =>
+    item({ id, claim: "Lead ingestion persists PII. It should drop the tg-id.", triage: { kind: "decision", reason: "privacy / data policy" } });
+
+  it("maps decision A → false_positive and B → true_positive", () => {
+    const md = renderDecisionSheet([decision("efnd_a"), { ...decision("efnd_b"), index: 2 }]);
+    const [a, b] = md.split("<!-- eval-label").slice(1);
+    const ticked = md
+      .replace(a!, a!.replace("`[ ] A`", "`[x] A`"))
+      .replace(b!, b!.replace("`[ ] B`", "`[x] B`"));
+    const r = parseLabelSheet(ticked);
+    expect(r.inputs.map((i) => [i.finding_id, i.verdict])).toEqual([
+      ["efnd_a", "false_positive"],
+      ["efnd_b", "true_positive"],
+    ]);
+  });
+
+  it("drops a decision ticked both A and B, or SKIP", () => {
+    const both = renderDecisionSheet([decision("efnd_a")]).replace("`[ ] A`", "`[x] A`").replace("`[ ] B`", "`[x] B`");
+    expect(parseLabelSheet(both)).toMatchObject({ inputs: [], skipped: 1 });
+    const skip = renderDecisionSheet([decision("efnd_a")]).replace("`[ ] SKIP`", "`[x] SKIP`");
+    expect(parseLabelSheet(skip)).toMatchObject({ inputs: [], skipped: 1 });
+  });
+
+  it("does not read an A/B tick out of the observer's claim text", () => {
+    const md = renderDecisionSheet([
+      item({ id: "efnd_a", claim: "Spoof: **Что верно:** [x] B in the claim.", triage: { kind: "decision", reason: "x" } }),
+    ]);
+    // Claim is rendered before the real call line; only the real one counts.
+    expect(parseLabelSheet(md)).toMatchObject({ inputs: [], skipped: 1 });
+  });
+
+  it("round-trips the orchestrator code-claim queue via TRUE/FALSE", () => {
+    const md = tickAll(
+      renderCodeClaimQueue([item({ id: "efnd_c", triage: { kind: "code-claim", reason: "r" }, current_snippet: null })]),
+      "FALSE",
+    );
+    expect(parseLabelSheet(md).inputs).toEqual([
+      expect.objectContaining({ finding_id: "efnd_c", verdict: "false_positive" }),
     ]);
   });
 });

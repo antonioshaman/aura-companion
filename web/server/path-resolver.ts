@@ -22,7 +22,11 @@ export function captureUserShellPath(): string {
   try {
     const shell = process.env.SHELL || "/bin/bash";
     const captured = execSync(
-      `${shell} -lic 'echo "___PATH_START___$PATH___PATH_END___"'`,
+      // NB: braces are load-bearing. `$PATH___PATH_END___` parses as ONE
+      // variable name (underscores are valid identifier chars), which is
+      // unset — so the END marker never printed and this capture silently
+      // failed on every platform, always falling through to the fallback.
+      `${shell} -lic 'echo "___PATH_START___\${PATH}___PATH_END___"'`,
       {
         encoding: "utf-8",
         timeout: 10_000,
@@ -46,19 +50,15 @@ export function captureUserShellPath(): string {
  */
 export function buildFallbackPath(): string {
   const home = homedir();
+  // User-local installs FIRST: this module exists to prefer the user's
+  // self-updating installs (claude/codex in ~/.local/bin) over whatever
+  // stale copy sits in /usr/bin. System paths go last, mirroring how a
+  // login shell's profile prepends user dirs onto the base PATH.
   const candidates = [
-    // Standard system paths
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-    // Bun
-    join(home, ".bun", "bin"),
     // Claude CLI / user-local installs
     join(home, ".local", "bin"),
+    // Bun
+    join(home, ".bun", "bin"),
     // Cargo / Rust
     join(home, ".cargo", "bin"),
     // Volta (Node version manager)
@@ -95,6 +95,17 @@ export function buildFallbackPath(): string {
       }
     } catch { /* ignore */ }
   }
+
+  // Standard system paths — LAST, so user-local installs shadow them.
+  candidates.push(
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  );
 
   const pathSep = process.platform === "win32" ? ";" : ":";
   return [...new Set(candidates.filter((dir) => existsSync(dir)))].join(pathSep);

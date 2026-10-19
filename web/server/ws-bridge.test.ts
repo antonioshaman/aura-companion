@@ -45,6 +45,7 @@ import { WsBridge, type SocketData } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import { VerifiedModelStore, setVerifiedModelStore } from "./verified-models.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -554,6 +555,37 @@ describe("CLI handlers", () => {
     expect(session.state.model).toBe("claude-opus-4-6");
   });
 
+  it("handleCLIMessage: session_update broadcasts merged state to connected browsers", async () => {
+    // Codex sends session_update for runtime state changes after attach. The
+    // browser must receive it or it can stay stuck in a stale disconnected UI.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+
+    const cli = makeCliSocket("s1");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "cli-internal-uuid-abc123" }));
+    browser.send.mockClear();
+
+    const session = bridge.getSession("s1")!;
+    const adapter = session.backendAdapter as any;
+    adapter.browserMessageCb({
+      type: "session_update",
+      session: {
+        session_id: "cli-internal-uuid-abc123",
+        model: "claude-opus-4-6",
+      },
+    });
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const updateCall = calls.find((c: any) => c.type === "session_update");
+    expect(updateCall).toBeDefined();
+    expect(updateCall.session.session_id).toBe("s1");
+    expect(updateCall.session.model).toBe("claude-opus-4-6");
+  });
+
   it("handleCLIMessage: updates state from init (model, cwd, tools, permissionMode)", async () => {
     mockExecSync.mockImplementation(() => {
       throw new Error("not a git repo");
@@ -633,7 +665,7 @@ describe("CLI handlers", () => {
     const getContainerSpy = vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "abc123def456",
       name: "companion-test",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/Users/stan/Dev/myproject",
       containerCwd: "/workspace",
@@ -670,7 +702,7 @@ describe("CLI handlers", () => {
     const getContainerSpy = vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "abc123def456",
       name: "companion-test",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/Users/stan/Dev/myproject",
       containerCwd: "/workspace",
@@ -1095,6 +1127,132 @@ describe("Browser handlers", () => {
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     const disconnectedMsg = calls.find((c: any) => c.type === "cli_disconnected");
     expect(disconnectedMsg).toBeUndefined();
+  });
+
+  // RC-1 regression: after a stdio Claude process dies, `handleTransportClose`
+  // nulls the transport but leaves the ClaudeAdapter object attached (and fires
+  // no disconnect cb). The OLD `backendConnected = !!session.backendAdapter`
+  // presence check read that corpse as alive, so a returning user never
+  // triggered a relaunch — the "idle session won't come back" bug. The fix uses
+  // LIVENESS (`isConnected()`) for Claude, so a present-but-dead adapter relaunches.
+  it("handleBrowserOpen: RC-1 — relaunches when a Claude adapter is present but its transport is dead", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    // Attach a REAL ClaudeAdapter via the CLI-open path (transport present →
+    // isConnected() true), then simulate the process death.
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    const adapter = bridge.getSession("s1")!.backendAdapter as any;
+    expect(adapter.isConnected()).toBe(true);
+    adapter.handleTransportClose(); // transport → null; adapter object stays attached
+    expect(adapter.isConnected()).toBe(false);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    // Liveness-aware: the dead-but-present adapter is treated as disconnected.
+    // EXACTLY ONE relaunch request (no duplicate emit from the same open).
+    expect(relaunchCb).toHaveBeenCalledWith("s1");
+    expect(relaunchCb).toHaveBeenCalledTimes(1);
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeDefined();
+  });
+
+  // RC-1 negative: an ARCHIVED session whose backend is dead must NOT relaunch
+  // (the user closed it on purpose) and must NOT emit a spurious cli_disconnected
+  // flap. The archived guard sits alongside the liveness check.
+  it("handleBrowserOpen: does NOT relaunch an archived session even when the Claude adapter is dead", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    const adapter = bridge.getSession("s1")!.backendAdapter as any;
+    adapter.handleTransportClose();
+    bridge.getSession("s1")!.archived = true;
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    expect(relaunchCb).not.toHaveBeenCalled();
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
+  });
+
+  // Positive control for the RC-1 fix: a live (transport-attached) Claude adapter
+  // must NOT be relaunched on browser-open — proving the liveness change didn't
+  // regress into always-relaunching a healthy session (incl. the mid-init window,
+  // where the transport is attached before `system.init`).
+  it("handleBrowserOpen: does NOT relaunch when a Claude adapter is present and connected", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    expect((bridge.getSession("s1")!.backendAdapter as any).isConnected()).toBe(true);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    expect(relaunchCb).not.toHaveBeenCalled();
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
+  });
+
+  // RC-1 legacy-WS regression guard (COMPANION_CLAUDE_TRANSPORT=ws). The liveness
+  // change treats a transport-closed Claude adapter as dead — but WS legitimately
+  // cycles its socket (~30s) and reconnects. handleCLIClose arms a 15s debounce;
+  // while it is pending, handleBrowserOpen MUST defer (via !disconnectTimers.has)
+  // and not emit its own relaunch. The single relaunch (if the CLI never returns)
+  // comes from the existing debounce timer — exactly once, not doubled by the fix.
+  it("handleBrowserOpen: RC-1 — legacy WS reconnect during the disconnect debounce does NOT double-emit relaunch", () => {
+    vi.useFakeTimers();
+    try {
+      const relaunchCb = vi.fn();
+      companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
+      bridge.handleCLIClose(cli); // arms 15s debounce; WS detached → isConnected() false
+      expect((bridge.getSession("s1")!.backendAdapter as any).isConnected()).toBe(false);
+
+      // Browser reconnects WHILE the debounce is pending → handleBrowserOpen defers.
+      const browser = makeBrowserSocket("s1");
+      bridge.handleBrowserOpen(browser, "s1");
+      expect(relaunchCb).not.toHaveBeenCalled();
+
+      // Debounce expires with no CLI recovery → the TIMER emits exactly one relaunch.
+      vi.advanceTimersByTime(16_000);
+      expect(relaunchCb).toHaveBeenCalledTimes(1);
+      expect(relaunchCb).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // RC-1 legacy-WS: if the CLI reconnects INSIDE the debounce window, neither the
+  // browser-open path nor the timer relaunches (the timer's isConnected() recheck
+  // short-circuits). Proves the fix doesn't turn a healthy WS cycle into a relaunch.
+  it("handleBrowserOpen: RC-1 — legacy WS CLI recovery within the debounce yields NO relaunch", () => {
+    vi.useFakeTimers();
+    try {
+      const relaunchCb = vi.fn();
+      companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
+      bridge.handleCLIClose(cli); // arms debounce
+      const browser = makeBrowserSocket("s1");
+      bridge.handleBrowserOpen(browser, "s1"); // deferred, no emit
+      // CLI reconnects within the window → transport re-attached, isConnected() true.
+      const cli2 = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli2, "s1");
+      vi.advanceTimersByTime(16_000); // timer sees isConnected() === true → returns
+      expect(relaunchCb).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("handleBrowserClose: removes from set", () => {
@@ -3445,6 +3603,46 @@ describe("onUserFrameObserved (Task 11.6)", () => {
     expect(userMessages.length).toBe(3);
   });
 
+  // Usage-limit auto-resume: the continuation prompt is a server injection
+  // (must not count as user activity, or it would cancel itself / advance
+  // auto-proceed) and is tagged in history so the chat renders it as an
+  // automatic resume rather than as the user's own words.
+  it("server:auto-resume injection skips user-frame observers and is tagged origin=auto_resume in history", () => {
+    const cli = makeCliSocket("s-auto-resume-1");
+    const browser = makeBrowserSocket("s-auto-resume-1");
+    bridge.handleCLIOpen(cli, "s-auto-resume-1");
+    bridge.handleBrowserOpen(browser, "s-auto-resume-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+    bridge.injectUserMessage("s-auto-resume-1", "Лимит сброшен — продолжай", "server:auto-resume");
+
+    expect(observed).toEqual([]);
+    const session = bridge.getSession("s-auto-resume-1")!;
+    const msg = session.messageHistory.find((m) => m.type === "user_message");
+    expect(msg).toMatchObject({ type: "user_message", origin: "auto_resume" });
+    const sent = (browser.send as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(sent.some((m: { type: string; origin?: string }) => m.type === "user_message" && m.origin === "auto_resume")).toBe(true);
+  });
+
+  it("setAutoResumeState stores the banner state on the session and broadcasts session_update; null clears it", () => {
+    const browser = makeBrowserSocket("s-auto-resume-2");
+    bridge.handleBrowserOpen(browser, "s-auto-resume-2");
+    const state = { resetAt: 1_000, fireAt: 2_000, resetSource: "rate_limit_event" as const };
+
+    bridge.setAutoResumeState("s-auto-resume-2", state);
+    expect(bridge.getSession("s-auto-resume-2")!.state.auto_resume).toEqual(state);
+    bridge.setAutoResumeState("s-auto-resume-2", null);
+    expect(bridge.getSession("s-auto-resume-2")!.state.auto_resume).toBeNull();
+
+    const updates = (browser.send as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => JSON.parse(c[0] as string))
+      .filter((m: { type: string; session?: Record<string, unknown> }) => m.type === "session_update" && m.session && "auto_resume" in m.session);
+    expect(updates.map((u: { session: { auto_resume: unknown } }) => u.session.auto_resume)).toEqual([state, null]);
+    // Unknown session: no throw.
+    expect(() => bridge.setAutoResumeState("nope", state)).not.toThrow();
+  });
+
   it("DOES fire observers when injectUserMessage has no origin (legacy / browser-equivalent path)", () => {
     const cli = makeCliSocket("s-uf-server-2");
     const browser = makeBrowserSocket("s-uf-server-2");
@@ -5340,39 +5538,158 @@ describe("injectMcpSetServers", () => {
 describe("sendInitializeKickoff", () => {
   // Validates the bootstrap fix for Council Mode observers (and the latent
   // orchestrator fragility): Claude Code CLI in `--print -p stream-json` mode
-  // does not emit `system` init until it receives a first input frame. Before
-  // this fix, sessions only handshaked if a browser happened to push some
-  // control_request (e.g. mcp_get_status on subscribe). Observers have no
-  // chat-surface subscription, so they were stuck in "initializing" forever
-  // and the UI banner read "Reconnecting" indefinitely. handleCLIOpen now
-  // fires a bare `initialize` control_request right after attachWebSocket so
-  // the CLI handshake completes deterministically, independent of any client.
-  it("sends bare initialize control_request automatically on handleCLIOpen", () => {
-    // No browser involvement — just a CLI socket opening. The kickoff must
-    // fire so the CLI emits its system init frame.
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
+  // does not emit `system` init until it receives a `user` frame on stdin.
+  //
+  // 2026-09-20 update: the prior implementation sent `control_request{initialize}`
+  // at kickoff — that frame is accepted by CLI 2.1.265+ but does NOT trigger
+  // the `system.init` emit (verified on aura-companion prod across 2.1.263,
+  // 2.1.265, 2.1.266, 2.1.278 — recording showed `control_response{success}`
+  // arriving but no `system.init` frame). The kickoff now sends a probe `user`
+  // frame followed by `control_request{interrupt}`: CLI reads the user frame,
+  // emits `system.init`, and the interrupt aborts before an API call generates
+  // an assistant reply. See `sendInitializeKickoff` JSDoc for full rationale.
+  it("sends probe user frame + interrupt to force system.init emit when no user message queued", () => {
+    vi.useFakeTimers();
+    try {
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
 
-    const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
-    const initMsg = calls.find((s: string) => {
-      try {
-        const j = JSON.parse(s.trim());
-        return j.type === "control_request" && j.request?.subtype === "initialize";
-      } catch { return false; }
-    });
-    expect(initMsg).toBeDefined();
-    const parsed = JSON.parse(initMsg!.trim());
-    expect(parsed.type).toBe("control_request");
-    expect(parsed.request.subtype).toBe("initialize");
-    // Bare kickoff carries no appendSystemPrompt — that's the orthogonal
-    // injectSystemPrompt path, used for Linear / agent-executor flows.
-    expect(parsed.request.appendSystemPrompt).toBeUndefined();
-    expect(parsed.request_id).toBeDefined();
-    expect(typeof parsed.request_id).toBe("string");
+      const initialCalls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const probeMsg = initialCalls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "user";
+        } catch { return false; }
+      });
+      expect(probeMsg).toBeDefined();
+      const probeParsed = JSON.parse(probeMsg!.trim());
+      expect(probeParsed.message.role).toBe("user");
+      expect(probeParsed.message.content).toContain("Aura Companion init probe");
+      // The marker must not ask for silence: the CLI folds the next real
+      // prompt into the same turn, and "do not respond" used to make the
+      // model answer the user's message with "No response requested."
+      expect(probeParsed.message.content).not.toMatch(/do not respond|don't respond|no response/i);
+      expect(probeParsed.message.content).toMatch(/answer any user message that follows normally/);
+
+      // The interrupt is no longer a blind timer (it cancelled a cron turn the
+      // resumed CLI had started first — prod 40f03a1e 2026-10-15/16). With no
+      // CLI output yet, time alone writes no interrupt.
+      vi.advanceTimersByTime(5_000);
+      const beforeInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const noInterruptYet = beforeInterrupt.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(noInterruptYet).toBeUndefined();
+
+      // Legacy CLI (no command_lifecycle frames): system.init is the trigger,
+      // then AURA_INIT_PROBE_INTERRUPT_DELAY_MS grace.
+      bridge.handleCLIMessage(cli, makeInitMsg() + "\n");
+      vi.advanceTimersByTime(250);
+      const afterInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const interruptMsg = afterInterrupt.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(interruptMsg).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips probe user frame when a real user message is already queued", () => {
+    // If the browser sent a user_message before the CLI socket opened,
+    // that message is queued in `session.pendingMessages` and will be
+    // flushed by `handleCLIOpen`. That real frame naturally triggers CLI
+    // init emit, so the probe would be redundant transcript pollution.
+    vi.useFakeTimers();
+    try {
+      const session = bridge.getOrCreateSession("s-queued", "claude");
+      session.pendingMessages.push(
+        JSON.stringify({ type: "user_message", client_msg_id: "cm-1", text: "hello" }),
+      );
+      const cli = makeCliSocket("s-queued");
+      bridge.handleCLIOpen(cli, "s-queued");
+
+      // Advance past the interrupt delay so we'd catch a stray interrupt.
+      vi.advanceTimersByTime(500);
+      const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const probeFrame = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "user" && String(j.message?.content ?? "").includes("Aura Companion init probe");
+        } catch { return false; }
+      });
+      const interruptFrame = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(probeFrame).toBeUndefined();
+      expect(interruptFrame).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still sends control_request{initialize, appendSystemPrompt} when a pending prompt is set", () => {
+    // The `appendSystemPrompt` side effect of the initialize control_request
+    // still works even though init emit doesn't come from it. Preserved so
+    // agent-executor / Linear / OBS-STOP-1 paths keep working.
+    vi.useFakeTimers();
+    try {
+      const session = bridge.getOrCreateSession("s-prompt", "claude");
+      session.pendingSystemPromptInjection = "You are a helpful assistant.";
+      const cli = makeCliSocket("s-prompt");
+      bridge.handleCLIOpen(cli, "s-prompt");
+
+      const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const initCtrl = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return (
+            j.type === "control_request" &&
+            j.request?.subtype === "initialize" &&
+            typeof j.request?.appendSystemPrompt === "string"
+          );
+        } catch { return false; }
+      });
+      expect(initCtrl).toBeDefined();
+      const parsed = JSON.parse(initCtrl!.trim());
+      expect(parsed.request.appendSystemPrompt).toBe("You are a helpful assistant.");
+      // Slot cleared so a subsequent injectSystemPrompt takes the
+      // direct-send path, not the buffered-kickoff path.
+      expect(session.pendingSystemPromptInjection).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is a no-op for nonexistent session", () => {
     expect(() => bridge.sendInitializeKickoff("nonexistent")).not.toThrow();
+  });
+
+  it("harmlessly drops the interrupt if the session is torn down before the delay elapses", () => {
+    // Regression guard: the interrupt timer fires against a session id
+    // that may have been removed. The scheduled callback must guard
+    // against `sessions.get(sessionId) == undefined` and not throw.
+    vi.useFakeTimers();
+    try {
+      const cli = makeCliSocket("s-tornoff");
+      bridge.handleCLIOpen(cli, "s-tornoff");
+      // Mid-delay: nuke the session state.
+      (bridge as unknown as { sessions: Map<string, unknown> }).sessions.delete(
+        "s-tornoff",
+      );
+      expect(() => vi.advanceTimersByTime(500)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -5838,5 +6155,712 @@ describe("flushInterruptedStreamsForShutdown", () => {
       (m) => m.type === "assistant" && m.streamStatus === "interrupted",
     );
     expect(interruptedFrames).toHaveLength(1);
+  });
+});
+
+// ─── countDistinctBrowsers (Variant-2 presence headcount) ─────────────────────
+
+describe("countDistinctBrowsers", () => {
+  function makeBrowserSocketWithClient(sessionId: string, clientId?: string) {
+    return createMockSocket({ kind: "browser", sessionId, clientId });
+  }
+
+  it("returns 0 when no browser is connected", () => {
+    expect(bridge.countDistinctBrowsers()).toBe(0);
+  });
+
+  // The whole point of Variant-2: one human viewing N sessions holds N sockets
+  // (one per session) but sends the SAME clientId, so they must collapse to 1 —
+  // unlike countConnectedBrowsers which sums the raw sockets.
+  it("collapses one human's N session-sockets (same clientId) to 1", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-A"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2", "human-A"), "s2");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s3", "human-A"), "s3");
+
+    expect(bridge.countConnectedBrowsers()).toBe(3);
+    expect(bridge.countDistinctBrowsers()).toBe(1);
+  });
+
+  it("counts distinct clientIds as distinct people", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-A"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-B"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2", "human-A"), "s2");
+
+    // A + B distinct; A's second socket dedupes → 2 people.
+    expect(bridge.countDistinctBrowsers()).toBe(2);
+  });
+
+  // Sockets without a clientId are non-human server-side consumers of the
+  // browser WS surface (Council orchestrator/observer, agent sessions) — only
+  // real browsers mint a clientId. They must be EXCLUDED so agent connections
+  // don't inflate the global "people online" headcount above real humans.
+  it("excludes clientId-less (agent/non-browser) sockets from the headcount", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2"), "s2");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s3", "human-A"), "s3");
+
+    // 2 clientId-less agents excluded, only the 1 real browser counts.
+    expect(bridge.countDistinctBrowsers()).toBe(1);
+  });
+
+  // With no real browsers at all (only agent connections), the headcount is 0 —
+  // the presence-ping loop then treats the install as "nobody looking" and
+  // sends nothing, so agent-only installs don't appear in the global count.
+  it("returns 0 when only clientId-less agent sockets are connected", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2"), "s2");
+
+    expect(bridge.countDistinctBrowsers()).toBe(0);
+  });
+});
+
+// WS-3 A-1 (prompt-cache audit C-5): a mid-session initialize{appendSystemPrompt}
+// rewrites the system prompt and busts the CLI's whole prompt-cache prefix.
+// The guard must refuse injection once the conversation has a user turn.
+// History stores user turns as type "user_message" — the first version of the
+// guard checked "user" and was a silent no-op; this pins the real tag.
+describe("injectSystemPrompt mid-session guard (WS-3 A-1)", () => {
+  it("buffers the prompt for kickoff when no user turn exists yet", () => {
+    const session = bridge.getOrCreateSession("s-guard-1");
+    bridge.injectSystemPrompt("s-guard-1", "extra context");
+    expect(session.pendingSystemPromptInjection).toBe("extra context");
+  });
+
+  it("refuses injection once the conversation has a user_message turn", () => {
+    const session = bridge.getOrCreateSession("s-guard-2");
+    session.messageHistory.push({
+      type: "user_message",
+      content: "hi",
+      timestamp: Date.now(),
+    } as never);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    bridge.injectSystemPrompt("s-guard-2", "late context");
+    expect(session.pendingSystemPromptInjection).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("REFUSED"));
+    warnSpy.mockRestore();
+  });
+});
+
+// Session model stays in sync with the model the MAIN session actually runs —
+// taken from the main assistant frame (parent_tool_use_id === null), NOT from
+// a token-dominance guess over result.modelUsage (which can pick a subagent's
+// model). Fixes the stale/alarming label after a /model switch, and persists
+// the real model so a relaunch doesn't revert to the spawn-time --model.
+describe("session model sync from the main assistant frame", () => {
+  /** Build a Claude assistant frame; `parent` null = main turn, non-null = subagent. */
+  function assistantFrame(sessionId: string, model: string, parent: string | null, uuid: string): string {
+    return JSON.stringify({
+      type: "assistant",
+      message: {
+        id: uuid, type: "message", role: "assistant", model,
+        content: [{ type: "text", text: "hi" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: parent,
+      uuid,
+      session_id: sessionId,
+    });
+  }
+
+  // Review STOP (PR #367): a model_fallback record must not outlive the
+  // fallback. Once the main session CONFIRMS a model other than fallback.to
+  // (user picked another model / switched back), the record is cleared,
+  // persisted and the clear is broadcast, so every device drops the banner.
+  it("clears model_fallback when the confirmed main model moves away from fallback.to", async () => {
+    const cli = makeCliSocket("fb1");
+    bridge.handleCLIOpen(cli, "fb1");
+    const browser = makeBrowserSocket("fb1");
+    bridge.handleBrowserOpen(browser, "fb1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "fb1", model: "claude-opus-4-7" }));
+    bridge.recordModelFallback("fb1", { from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive" });
+
+    // Still on the fallback model → record stays.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-opus-4-7", null, "f1"));
+    expect(bridge.getSession("fb1")!.state.model_fallback?.to).toBe("claude-opus-4-7");
+    // A subagent on another model is NOT a session model change.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-haiku-4-5", "tool-1", "f2"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-sonnet-4-6", null, "f3"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
+  it("dismiss_model_fallback clears the record server-side only for the matching event", async () => {
+    // Dismissal used to live only in one browser's localStorage, so another
+    // device brought the banner back. Now it clears the shared state — but a
+    // stale dismiss (older `at`) never clears a NEWER fallback.
+    const browser = makeBrowserSocket("fb2");
+    bridge.handleBrowserOpen(browser, "fb2");
+    bridge.recordModelFallback("fb2", { from: "a", to: "b", reason: "rejected" });
+    const at = bridge.getSession("fb2")!.state.model_fallback!.at;
+
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at: at - 1 }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
+  // Context-overflow handoff: the >= 5 MB advisory lives on session.state so
+  // the "Continue in a new session" banner survives a reload (session_init
+  // replays it) and live tabs get it as a session_update.
+  it("recordContextAdvisory persists on state and broadcasts a session_update", () => {
+    const browser = makeBrowserSocket("ca1");
+    bridge.handleBrowserOpen(browser, "ca1");
+    browser.send.mockClear();
+    const ok = bridge.recordContextAdvisory("ca1", { milestoneBytes: 10_000_000, message: "too big", action: "continue_in_new" });
+    expect(ok).toBe(true);
+    const record = bridge.getSession("ca1")!.state.context_advisory;
+    expect(record).toMatchObject({ milestoneBytes: 10_000_000, message: "too big", action: "continue_in_new" });
+    expect(typeof record!.at).toBe("number");
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { context_advisory: record } }));
+  });
+
+  it("recordContextAdvisory never creates a bridge session for an unknown id", () => {
+    expect(bridge.recordContextAdvisory("ghost", { milestoneBytes: 5_000_000, message: "m", action: "continue_in_new" })).toBe(false);
+    expect(bridge.getSession("ghost")).toBeUndefined();
+  });
+
+  it("updates session.state.model to the MAIN assistant frame's model", async () => {
+    const cli = makeCliSocket("sm1");
+    bridge.handleCLIOpen(cli, "sm1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm1", model: "claude-fable-5" }));
+    expect(bridge.getSession("sm1")!.state.model).toBe("claude-fable-5");
+
+    await bridge.handleCLIMessage(cli, assistantFrame("sm1", "claude-opus-4-8", null, "a1"));
+    expect(bridge.getSession("sm1")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("IGNORES a subagent frame (parent_tool_use_id !== null) — a Task on another model never overwrites the session model", async () => {
+    const cli = makeCliSocket("sm2");
+    bridge.handleCLIOpen(cli, "sm2");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm2", model: "claude-opus-4-8" }));
+    // A subagent frame on haiku must not change the session's model.
+    await bridge.handleCLIMessage(cli, assistantFrame("sm2", "claude-haiku-4-5", "toolu_sub", "a2"));
+    expect(bridge.getSession("sm2")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("skips the <synthetic> sentinel (stamped when a model is unavailable)", async () => {
+    const cli = makeCliSocket("sm3");
+    bridge.handleCLIOpen(cli, "sm3");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm3", model: "claude-opus-4-8" }));
+    await bridge.handleCLIMessage(cli, assistantFrame("sm3", "<synthetic>", null, "a3"));
+    expect(bridge.getSession("sm3")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("result.modelUsage drives context% but NOT the model", async () => {
+    const cli = makeCliSocket("sm4");
+    bridge.handleCLIOpen(cli, "sm4");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm4", model: "claude-opus-4-8" }));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "result", subtype: "success", is_error: false,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+      stop_reason: "end_turn", session_id: "sm4", uuid: "r4",
+      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      modelUsage: {
+        // Even if a subagent model dominates tokens here, the session model is
+        // unchanged — modelUsage is for context%, not model identity.
+        "claude-haiku-4-5": { inputTokens: 99999, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+      },
+    }));
+    const s = bridge.getSession("sm4")!;
+    expect(s.state.model).toBe("claude-opus-4-8");
+    expect(s.state.context_used_percent).toBeGreaterThan(0);
+  });
+
+  // ── Observed-working models (verified-models.ts) ──────────────────────
+  // A successful MAIN-thread turn on model X marks (backend, X) verified so
+  // the dropdown stops calling the operator's daily model "Untested". Each
+  // test wires a store on a tmp path — never the real ~/.companion file.
+  describe("records observed-working models", () => {
+    let vmDir: string;
+    let store: VerifiedModelStore;
+    beforeEach(() => {
+      vmDir = mkdtempSync(join(tmpdir(), "ws-bridge-verified-"));
+      store = new VerifiedModelStore({ path: join(vmDir, "verified-models.json"), debounceMs: 0 });
+      setVerifiedModelStore(store);
+    });
+    afterEach(() => {
+      setVerifiedModelStore(null);
+      rmSync(vmDir, { recursive: true, force: true });
+    });
+
+    function resultFrame(sessionId: string, ok: boolean): string {
+      return JSON.stringify({
+        type: "result", subtype: ok ? "success" : "error_during_execution", is_error: !ok,
+        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+        stop_reason: "end_turn", session_id: sessionId, uuid: `r-${sessionId}`,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      });
+    }
+
+    it("claude: a successful main-thread turn on an unknown model marks it verified", async () => {
+      const cli = makeCliSocket("vm1");
+      bridge.handleCLIOpen(cli, "vm1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm1", model: "claude-sonnet-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm1", "claude-sonnet-5", null, "va1"));
+      expect(store.has("claude", "claude-sonnet-5")).toBe(false); // not until the turn succeeds
+      await bridge.handleCLIMessage(cli, resultFrame("vm1", true));
+      expect(store.has("claude", "claude-sonnet-5")).toBe(true);
+    });
+
+    it("claude: a failed turn does NOT mark the model verified", async () => {
+      const cli = makeCliSocket("vm2");
+      bridge.handleCLIOpen(cli, "vm2");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm2", model: "claude-sonnet-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm2", "claude-sonnet-5", null, "va2"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm2", false));
+      expect(store.size()).toBe(0);
+    });
+
+    it("claude: a <synthetic> turn (model unavailable) does NOT mark anything verified", async () => {
+      const cli = makeCliSocket("vm3");
+      bridge.handleCLIOpen(cli, "vm3");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm3", model: "claude-opus-9" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm3", "<synthetic>", null, "va3"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm3", true));
+      // The init/spawn model alone is not evidence the model works.
+      expect(store.size()).toBe(0);
+    });
+
+    it("claude: a subagent-only turn does not verify the subagent's model", async () => {
+      const cli = makeCliSocket("vm4");
+      bridge.handleCLIOpen(cli, "vm4");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm4", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm4", "claude-haiku-9", "toolu_sub", "va4"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm4", true));
+      expect(store.has("claude", "claude-haiku-9")).toBe(false);
+    });
+
+    it("claude: the observation is per-turn — a later failed turn records nothing new", async () => {
+      const cli = makeCliSocket("vm5");
+      bridge.handleCLIOpen(cli, "vm5");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm5", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm5", "claude-sonnet-5", null, "va5"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm5", false));
+      // Next turn: result with no assistant frame — must not reuse the stale turn model.
+      await bridge.handleCLIMessage(cli, resultFrame("vm5", true));
+      expect(store.size()).toBe(0);
+    });
+
+    // PR #379 review (council observer WARN): CodexAdapter emits a `result`
+    // for child (subagent) threads too. Observation must follow the MAIN
+    // turn's result only: a subagent result must neither record nor clear it.
+    function attachCodex(sessionId: string): (msg: any) => void {
+      let cb: ((msg: any) => void) | undefined;
+      bridge.attachBackendAdapter(sessionId, {
+        isConnected: () => true,
+        send: vi.fn(() => true),
+        disconnect: async () => {},
+        onBrowserMessage: (fn: (msg: any) => void) => { cb = fn; },
+        onSessionMeta: () => {},
+        onDisconnect: () => {},
+        onInitError: () => {},
+      } as any, "codex");
+      return (msg) => cb!(msg);
+    }
+    function codexAssistant(model: string) {
+      return {
+        type: "assistant",
+        message: {
+          id: `cx-${Math.random()}`, type: "message", role: "assistant", model,
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+        parent_tool_use_id: null,
+        timestamp: Date.now(),
+      };
+    }
+    function codexResult(sessionId: string, ok: boolean, subagent: boolean) {
+      const data = JSON.parse(resultFrame(sessionId, ok));
+      return { type: "result", data: subagent ? { ...data, subagent_turn: true } : data };
+    }
+
+    it("codex: main assistant X → subagent SUCCESS → main ERROR does NOT record X", () => {
+      const emit = attachCodex("vm-cx-a");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-a", true, true)); // child thread completed fine
+      emit(codexResult("vm-cx-a", false, false)); // the MAIN turn failed
+      expect(store.size()).toBe(0);
+    });
+
+    it("codex: main assistant X → subagent ERROR → main SUCCESS records X", () => {
+      const emit = attachCodex("vm-cx-b");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-b", false, true)); // child failure must not clear the observation
+      emit(codexResult("vm-cx-b", true, false));
+      expect(store.has("codex", "gpt-6-sol")).toBe(true);
+    });
+
+    it("codex: a successful turn records under the codex backend", () => {
+      let onBrowserMessage: ((msg: any) => void) | undefined;
+      const adapter = {
+        isConnected: () => true,
+        send: vi.fn(() => true),
+        disconnect: async () => {},
+        onBrowserMessage: (cb: (msg: any) => void) => { onBrowserMessage = cb; },
+        onSessionMeta: () => {},
+        onDisconnect: () => {},
+        onInitError: () => {},
+      };
+      bridge.attachBackendAdapter("vm-codex", adapter as any, "codex");
+      onBrowserMessage!({
+        type: "assistant",
+        message: {
+          id: "cx1", type: "message", role: "assistant", model: "gpt-6-sol",
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+        parent_tool_use_id: null,
+        timestamp: Date.now(),
+      });
+      onBrowserMessage!({ type: "result", data: JSON.parse(resultFrame("vm-codex", true)) });
+      expect(store.has("codex", "gpt-6-sol")).toBe(true);
+      expect(store.has("claude", "gpt-6-sol")).toBe(false);
+    });
+  });
+
+  // The model change must be PERSISTED for relaunch, not just reflected in the
+  // UI label. The bridge emits `session:model-active-changed`; the orchestrator
+  // listener turns that into launcher.setModel so a `--resume` relaunch spawns
+  // on the current model instead of the frozen spawn-time --model.
+  it("emits session:model-active-changed (source=assistant) so the relaunch model tracks the switch", async () => {
+    const events: Array<{ sessionId: string; model: string; source: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm5");
+      bridge.handleCLIOpen(cli, "sm5");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm5", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("sm5", "claude-opus-4-8", null, "a5"));
+      expect(events).toContainEqual({ sessionId: "sm5", model: "claude-opus-4-8", source: "assistant" });
+    } finally {
+      off();
+    }
+  });
+
+  // Observed live (session 8b26ccb7, 2026-10-12..15): after a composer
+  // set_model the CLI emits a SECOND init frame carrying the new model
+  // BEFORE the first assistant frame. That init updated state.model, so the
+  // assistant-frame check (model !== state.model) was already false and the
+  // persistence event never fired — 25 relaunches in a row spawned the
+  // creation-time --model claude-fable-5 over the user's opus-4-8 choice.
+  // Persistence must compare against the model THIS process was spawned
+  // with, not the UI label the post-switch init already moved.
+  it("emits after a model switch even when the CLI's post-switch init frame already moved state.model", async () => {
+    const events: Array<{ sessionId: string; model: string; source: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm8");
+      bridge.handleCLIOpen(cli, "sm8");
+      // Spawn-time init: the process runs fable.
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm8", model: "claude-fable-5" }));
+      // set_model → the CLI re-emits init with the new model (UI label moves).
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm8", model: "claude-opus-4-8" }));
+      expect(bridge.getSession("sm8")!.state.model).toBe("claude-opus-4-8");
+      // First main assistant frame confirms the switch → must persist.
+      await bridge.handleCLIMessage(cli, assistantFrame("sm8", "claude-opus-4-8", null, "a8"));
+      expect(events).toContainEqual({ sessionId: "sm8", model: "claude-opus-4-8", source: "assistant" });
+      // Steady state afterwards: no churn on the next same-model turn.
+      events.length = 0;
+      await bridge.handleCLIMessage(cli, assistantFrame("sm8", "claude-opus-4-8", null, "a8b"));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
+
+  // A fresh spawn re-baselines: after a relaunch the new process's first init
+  // is the spawn model (= the launcher's persisted model), so a same-model
+  // assistant frame on the new process does not re-emit.
+  it("re-baselines on a new CLI connection (relaunch) — no spurious emit", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli1 = makeCliSocket("sm9");
+      bridge.handleCLIOpen(cli1, "sm9");
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm9", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm9", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli1, assistantFrame("sm9", "claude-opus-4-8", null, "a9"));
+      expect(events).toHaveLength(1);
+      // Relaunch spawns on the persisted opus-4-8.
+      const cli2 = makeCliSocket("sm9");
+      bridge.handleCLIOpen(cli2, "sm9");
+      await bridge.handleCLIMessage(cli2, makeInitMsg({ session_id: "sm9", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli2, assistantFrame("sm9", "claude-opus-4-8", null, "a9b"));
+      expect(events).toHaveLength(1);
+    } finally {
+      off();
+    }
+  });
+
+  // Observer review cp 152 (WARN): a legacy WS reconnect can re-dial the
+  // SAME live process. If the baseline were reset there, a set_model →
+  // reconnect → init(new) → assistant(new) sequence would re-seed the
+  // baseline with the new model and swallow the switch again.
+  it("a WS reconnect to the same process keeps the baseline — the switch still persists", async () => {
+    const events: Array<{ model: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli1 = makeCliSocket("sm10");
+      bridge.handleCLIOpen(cli1, "sm10");
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm10", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm10", model: "claude-opus-4-8" }));
+      // Socket drops and the same CLI re-dials before its next turn.
+      const cli2 = makeCliSocket("sm10");
+      bridge.handleCLIOpen(cli2, "sm10");
+      await bridge.handleCLIMessage(cli2, makeInitMsg({ session_id: "sm10", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli2, assistantFrame("sm10", "claude-opus-4-8", null, "a10"));
+      expect(events.map((e) => e.model)).toEqual(["claude-opus-4-8"]);
+    } finally {
+      off();
+    }
+  });
+
+  // A stdio open is always a fresh process: the launcher passes the real
+  // spawn --model, which becomes the baseline even before any init frame.
+  it("a stdio spawn seeds the baseline from the launcher's spawn model", async () => {
+    const events: Array<{ model: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const transport = {
+        kind: "stdio" as const, raw: {}, send: () => {}, isOpen: () => true,
+        bufferedAmount: () => 0, close: () => {},
+      };
+      bridge.handleCLIStdioOpen("sm11", transport, { spawnModel: "claude-fable-5" });
+      expect(bridge.getSession("sm11")!.launcherModel).toBe("claude-fable-5");
+      // A post-switch init does NOT move the baseline …
+      const adapter = bridge.getSession("sm11")!.backendAdapter as unknown as { handleRawMessage: (l: string) => void };
+      adapter.handleRawMessage(makeInitMsg({ session_id: "sm11", model: "claude-opus-5-5" }));
+      expect(bridge.getSession("sm11")!.launcherModel).toBe("claude-fable-5");
+    } finally {
+      off();
+    }
+  });
+
+  it("does not emit when the model did not change turn-to-turn (no write churn)", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm6");
+      bridge.handleCLIOpen(cli, "sm6");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm6", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("sm6", "claude-opus-4-8", null, "a6"));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
+
+  it("does NOT emit for an observer session (its model is fixed at spawn — EC-1)", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm7");
+      bridge.handleCLIOpen(cli, "sm7");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm7", model: "claude-opus-4-8" }));
+      const s = bridge.getSession("sm7")!;
+      s.state.sessionGroupId = "grp_x";
+      s.state.sessionGroupRole = "observer";
+      // Even a genuine main-frame model change must not persist for an observer.
+      await bridge.handleCLIMessage(cli, assistantFrame("sm7", "claude-sonnet-4-6", null, "a7"));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
+});
+
+describe("recordModelFallback (persistent fallback notice)", () => {
+  // Validates Task A.2: when the server moves a session off the user's model
+  // the record lands on session.state (so the session_init snapshot replays
+  // it to a reloaded tab), is broadcast to live browsers as a session_update,
+  // and is persisted — not just an ephemeral error toast.
+  it("stores the record on state, broadcasts a session_update, and replays it on reconnect", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    bridge.recordModelFallback("s1", {
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+      detail: "model not available for this account",
+    });
+
+    const session = bridge.getSession("s1")!;
+    expect(session.state.model_fallback).toMatchObject({
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+    });
+    expect(typeof session.state.model_fallback!.at).toBe("number");
+
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const update = frames.find((f: { type: string }) => f.type === "session_update");
+    expect(update.session.model_fallback.to).toBe("gpt-5.3-codex");
+
+    // A tab that connects later (reload) gets it through the snapshot.
+    const late = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(late, "s1");
+    const init = JSON.parse(late.send.mock.calls[0][0]);
+    expect(init.type).toBe("session_init");
+    expect(init.session.model_fallback.from).toBe("gpt-6.1-sol");
+  });
+
+  it("creates the bridge session when the fallback happens before any browser attached (spawn-time)", () => {
+    bridge.recordModelFallback("fresh", { from: "a-model", to: "b-model", reason: "cli-incompatible" });
+    expect(bridge.getSession("fresh")?.state.model_fallback?.reason).toBe("cli-incompatible");
+  });
+});
+
+// W6/W7 — prompt-cache telemetry at the bridge chokepoint (both backends).
+// `llm.turn_usage` gains backend/model/subtype/idle-gap/countable, and a
+// prefix-changing control request (set_model, mcp_toggle, mcp_set_servers)
+// emits `cache.prefix_change` and is attributed on the NEXT turn's line so a
+// cache_creation spike can be explained. Lines are read back from the spied
+// console.log (the bridge writes them as JSON strings).
+describe("prompt-cache telemetry (W6/W7)", () => {
+  function loggedEvents(name: string): Array<Record<string, unknown>> {
+    const calls = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const out: Array<Record<string, unknown>> = [];
+    for (const [arg] of calls) {
+      if (typeof arg !== "string" || !arg.startsWith("{")) continue;
+      try {
+        const parsed = JSON.parse(arg) as Record<string, unknown>;
+        if (parsed.event === name) out.push(parsed);
+      } catch { /* not JSON */ }
+    }
+    return out;
+  }
+  function resultFrame(sessionId: string, usage: Record<string, number>, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: "result", subtype: "success", is_error: false,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+      stop_reason: "end_turn", session_id: sessionId, uuid: `r-${Math.random()}`,
+      usage, ...extra,
+    });
+  }
+  const USAGE = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 2000, cache_read_input_tokens: 30000 };
+
+  it("llm.turn_usage carries backend, model, subtype, countable and the idle gap since the previous real turn", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-10-16T09:00:00Z"));
+      const cli = makeCliSocket("tu1");
+      bridge.handleCLIOpen(cli, "tu1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu1", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, resultFrame("tu1", USAGE));
+      // 90 minutes later the next turn completes.
+      vi.setSystemTime(Date.parse("2026-10-16T10:30:00Z"));
+      await bridge.handleCLIMessage(cli, resultFrame("tu1", USAGE));
+
+      const lines = loggedEvents("llm.turn_usage");
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatchObject({ backend: "claude", model: "claude-opus-4-8", subtype: "success", countable: true, minutesSinceLastTurn: null });
+      expect(lines[1]).toMatchObject({ minutesSinceLastTurn: 90, prompt_tokens: 32010 });
+      // The completion time is stored on state so the browser can estimate cache expiry.
+      expect(bridge.getSession("tu1")!.state.last_turn_completed_at).toBe(Date.parse("2026-10-16T10:30:00Z"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a zero-usage frame is flagged non-countable and does NOT reset the idle clock", async () => {
+    const cli = makeCliSocket("tu2");
+    bridge.handleCLIOpen(cli, "tu2");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu2" }));
+    await bridge.handleCLIMessage(cli, resultFrame("tu2", USAGE));
+    const completedAt = bridge.getSession("tu2")!.state.last_turn_completed_at;
+    await bridge.handleCLIMessage(cli, resultFrame("tu2", { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }));
+    const lines = loggedEvents("llm.turn_usage");
+    expect(lines[1]).toMatchObject({ usageStatus: "zero", countable: false });
+    expect(bridge.getSession("tu2")!.state.last_turn_completed_at).toBe(completedAt);
+  });
+
+  it("set_model / mcp_toggle emit cache.prefix_change and are attributed on the next turn only", async () => {
+    const cli = makeCliSocket("tu3");
+    bridge.handleCLIOpen(cli, "tu3");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu3", model: "claude-opus-4-8" }));
+    const browser = makeBrowserSocket("tu3");
+    bridge.handleBrowserOpen(browser, "tu3");
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-sonnet-4-6" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "mcp_toggle", serverName: "linear", enabled: false }));
+    // Re-selecting the model the session is already on is not a prefix change.
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-opus-4-8" }));
+
+    const changes = loggedEvents("cache.prefix_change");
+    expect(changes.map((c) => c.reason)).toEqual(["set_model", "mcp_toggle"]);
+    expect(changes[0]).toMatchObject({ sessionId: "tu3", backend: "claude", from: "claude-opus-4-8", to: "claude-sonnet-4-6" });
+    // Counters only: no MCP server config bodies in the event.
+    expect(changes[1]).toMatchObject({ serverName: "linear", enabled: false });
+
+    await bridge.handleCLIMessage(cli, resultFrame("tu3", USAGE));
+    await bridge.handleCLIMessage(cli, resultFrame("tu3", USAGE));
+    const lines = loggedEvents("llm.turn_usage");
+    expect(lines[0].prefixChanges).toEqual(["set_model", "mcp_toggle"]);
+    expect(lines[1].prefixChanges).toEqual([]);
+  });
+
+  it("tracks the main assistant frame's full prompt as last_context_tokens (subagent frames ignored)", async () => {
+    const cli = makeCliSocket("tu4");
+    bridge.handleCLIOpen(cli, "tu4");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu4" }));
+    const frame = (parent: string | null, usage: Record<string, number>, id: string) => JSON.stringify({
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "x" }], stop_reason: "end_turn", usage },
+      parent_tool_use_id: parent, uuid: id, session_id: "tu4",
+    });
+    await bridge.handleCLIMessage(cli, frame(null, { input_tokens: 5, output_tokens: 1, cache_creation_input_tokens: 1000, cache_read_input_tokens: 80000 }, "m1"));
+    await bridge.handleCLIMessage(cli, frame("toolu_sub", { input_tokens: 5, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 3000 }, "m2"));
+    expect(bridge.getSession("tu4")!.state.last_context_tokens).toBe(81005);
+  });
+});
+
+// Review fix (PR #365 NOTE): turns that are not opened by a routed
+// user_message (council wakes injected in the adapter, auto-proceed, codex
+// observer turns) must still get a turn-start time, otherwise
+// minutesSinceLastTurn degenerates to "previous completion → this result".
+describe("prompt-cache telemetry — turn start without a user_message", () => {
+  it("the first assistant/stream frame after a result opens the turn for the idle-gap measurement", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const T0 = Date.parse("2026-10-16T09:00:00Z");
+      vi.setSystemTime(T0);
+      const cli = makeCliSocket("ts1");
+      bridge.handleCLIOpen(cli, "ts1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "ts1" }));
+      const result = () => JSON.stringify({
+        type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1,
+        num_turns: 1, total_cost_usd: 0, stop_reason: "end_turn", session_id: "ts1", uuid: `r-${Date.now()}`,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 30000 },
+      });
+      await bridge.handleCLIMessage(cli, result());
+      // 90 min later a server-driven turn starts streaming (no user_message routed)...
+      vi.setSystemTime(T0 + 90 * 60_000);
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "assistant",
+        message: { id: "m-wake", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "x" }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 30000 } },
+        parent_tool_use_id: null, uuid: "m-wake", session_id: "ts1",
+      }));
+      // ...and completes 10 min after that.
+      vi.setSystemTime(T0 + 100 * 60_000);
+      await bridge.handleCLIMessage(cli, result());
+      const calls = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const lines = calls
+        .map(([a]) => (typeof a === "string" && a.startsWith("{") ? JSON.parse(a) : null))
+        .filter((l): l is Record<string, unknown> => l?.event === "llm.turn_usage");
+      expect(lines.at(-1)!.minutesSinceLastTurn).toBe(90);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

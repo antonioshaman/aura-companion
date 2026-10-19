@@ -397,7 +397,9 @@ describe("LinearAgentBridge", () => {
       );
 
       // Should inject message into the Companion session
-      expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("comp-sess-1", "What's the status?");
+      // FIX-AP-2: relayed Linear turns carry a server origin, so they never
+      // count as a human message (auto-proceed cap reset / turn-token).
+      expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("comp-sess-1", "What's the status?", "server:agent");
     });
 
     it("creates new session with follow-up message when Companion session is dead", async () => {
@@ -479,7 +481,7 @@ describe("LinearAgentBridge", () => {
       await restoredBridge.handleEvent(makePromptedEvent("linear-restored-1", "Still there?"));
 
       // Should inject into the restored session, NOT create a new one
-      expect(wsBridgeWithMappings.injectUserMessage).toHaveBeenCalledWith("comp-restored-1", "Still there?");
+      expect(wsBridgeWithMappings.injectUserMessage).toHaveBeenCalledWith("comp-restored-1", "Still there?", "server:agent");
       expect(executor.executeAgent).not.toHaveBeenCalled();
 
       restoredBridge.shutdown();
@@ -995,7 +997,7 @@ describe("LinearAgentBridge", () => {
       // Now send a follow-up — should inject into existing session, NOT create new
       await bridge.handleEvent(makePromptedEvent("linear-session-1", "What about the tests?"));
 
-      expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("comp-sess-1", "What about the tests?");
+      expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("comp-sess-1", "What about the tests?", "server:agent");
       // Should NOT launch a new session
       expect(executor.executeAgent).not.toHaveBeenCalled();
     });

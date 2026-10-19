@@ -45,10 +45,27 @@ export interface IBackendAdapter {
   /** Register callback for transport disconnection. */
   onDisconnect(cb: () => void): void;
 
-  /** Register callback for initialization errors. */
+  /**
+   * Register callback for initialization errors.
+   *
+   * **Additive, not last-writer-wins.** An adapter has two independent
+   * init-error subscribers by design: the launcher that spawned it (process
+   * teardown, port release, model-fallback respawn) and the bridge that
+   * attached it (user-facing error frame). An implementation that stores a
+   * single callback silently disables the launcher's cleanup as soon as the
+   * bridge attaches — see the note on `CodexAdapter.initErrorCbs`.
+   */
   onInitError?(cb: (error: string) => void): void;
 
   // ── Optional capabilities (not all backends support these) ──
+
+  /**
+   * Epoch ms of the last frame received from the CLI (0 = none yet). Read by
+   * the Diagnostics Pairs card for "observer silent Nm" (plan Task 6). Claude
+   * stamps every stdout frame; Codex stamps every inbound notification and
+   * server request.
+   */
+  getLastCliFrameReceivedMs?(): number;
 
   /**
    * Register the idle-kill activity hook (#12). The Claude adapter wires the
@@ -77,6 +94,12 @@ export interface IBackendAdapter {
    * socket-readyState gate already coincides with isConnected()).
    */
   isReadyForServerFrame?(): boolean;
+  /**
+   * Council observer turn-state: `in-flight` while a server-sent wake turn has
+   * not terminated yet. W14: the orchestrator defers an auto-heal relaunch
+   * until a still-streaming wake turn ends.
+   */
+  getObserverTurnState?(): "idle" | "in-flight";
 
   /** Send a server-synthesized user turn to the orchestrator half. */
   sendOrchestratorSyntheticFrame?(content: string): ServerSyntheticSendOutcome;

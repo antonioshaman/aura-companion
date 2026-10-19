@@ -31,7 +31,7 @@ describe("sw-register", () => {
     vi.useRealTimers();
   });
 
-  it("calls registerSW with onRegisteredSW and onOfflineReady callbacks", async () => {
+  it("calls registerSW with onRegisteredSW, onOfflineReady, and onNeedRefresh callbacks", async () => {
     await import("./sw-register.js");
 
     expect(mockRegisterSW).toHaveBeenCalledOnce();
@@ -39,8 +39,40 @@ describe("sw-register", () => {
     const config = mockRegisterSW.mock.calls[0]![0] as any;
     expect(config).toHaveProperty("onRegisteredSW");
     expect(config).toHaveProperty("onOfflineReady");
+    expect(config).toHaveProperty("onNeedRefresh");
     expect(typeof config.onRegisteredSW).toBe("function");
     expect(typeof config.onOfflineReady).toBe("function");
+    expect(typeof config.onNeedRefresh).toBe("function");
+  });
+
+  // Auto-apply: onNeedRefresh flips the update-ready flag, notifies subscribers
+  // (the banner is now an inert fallback), AND immediately activates the waiting
+  // SW via updateSW(true) so the tab reloads onto the fresh bundle without a
+  // user gesture. This prevents a stale cached bundle from stranding the tab.
+  it("auto-applies the waiting SW on onNeedRefresh and notifies subscribers", async () => {
+    const updateSWFn = vi.fn();
+    mockRegisterSW.mockReturnValueOnce(updateSWFn);
+
+    const mod = await import("./sw-register.js");
+    expect(mod.isUpdateReady()).toBe(false);
+
+    const listener = vi.fn();
+    const unsubscribe = mod.subscribeUpdateReady(listener);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const config = mockRegisterSW.mock.calls[0]![0] as any;
+    config.onNeedRefresh();
+
+    expect(mod.isUpdateReady()).toBe(true);
+    expect(listener).toHaveBeenCalledWith(true);
+    // The refresh no longer waits on applyUpdate()/a banner click.
+    expect(updateSWFn).toHaveBeenCalledWith(true);
+
+    // applyUpdate() remains available as an explicit fallback and is idempotent.
+    mod.applyUpdate();
+    expect(updateSWFn).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
   });
 
   it("sets up periodic update check every 60 minutes", async () => {

@@ -36,6 +36,14 @@ export const OBSERVER_WAKE_MAX_BYTES = 32 * 1024;
  *  cannot displace `carried`/`dropped` from the observer's view. */
 export const OBSERVER_WAKE_MAX_PATHS_PER_SECTION = 50;
 
+/** A review file whose mtime predates the wake dispatch by MORE than this
+ *  answered a PREVIOUS delivery of the checkpoint (EC-13 redelivery) and
+ *  must not stand as the current wake's review. The slack absorbs clock
+ *  skew between `Date.now()` and the kernel's coarse-grained file-timestamp
+ *  clock (mtime can lag wall time by a few ms); genuine redeliveries are
+ *  separated by at least a server restart or a failsafe tick (≥ minutes). */
+export const STALE_REVIEW_SLACK_MS = 10_000;
+
 /**
  * Council Mode auto-wake — frontend-side timeout bound for the
  * `reviewing` panel state. Published on the `group_created` wire frame
@@ -166,6 +174,24 @@ export interface ObserverReviewPayload {
    * and a stale prompt that still parses against the old one.
    */
   observer_wake_payload_version_echo?: number;
+  /**
+   * Observer rigor (2026-10-16): HOST verdict on an empty review whose turn
+   * never read or searched anything beyond the checkpoint's prose artifact
+   * (`observer-reply.ts`). "unverified" = no findings, but nothing was
+   * checked either — the UI says "не проверено", never "clean", and
+   * convergence does not count it. Absent = the host makes no claim.
+   * An observer-written file may carry it too: it can only weaken a review.
+   */
+  host_verification?: "unverified";
+  /**
+   * W15 multi-model review: "second" = this review was produced by the
+   * host-run one-shot SECOND-OPINION reviewer (`second-reviewer.ts`, a
+   * different backend/model than the observer), not by the observer
+   * session. Absent = the observer's review. Host-stamped only; every
+   * reader that means "the observer answered this checkpoint" (reply
+   * capture, Gate 0b, watchdog rescan, coverage) ignores second reviews.
+   */
+  reviewer_role?: "second";
 }
 
 // ── Validators ───────────────────────────────────────────────────────────────
@@ -401,6 +427,17 @@ export function parseObserverReviewPayload(
     }
     wakeEcho = v;
   }
+  // Observer rigor: optional host verdict. Present-but-unknown is rejected
+  // (EC-5: a typo must not silently read as "verified").
+  if (parsed.host_verification !== undefined && parsed.host_verification !== "unverified") {
+    onDrop?.("invalid-field", "host_verification");
+    return null;
+  }
+  // W15: optional reviewer role. Present-but-unknown is rejected (EC-5).
+  if (parsed.reviewer_role !== undefined && parsed.reviewer_role !== "second") {
+    onDrop?.("invalid-field", "reviewer_role");
+    return null;
+  }
   return {
     schema_version: COUNCIL_SCHEMA_VERSION,
     checkpoint_id: parsed.checkpoint_id,
@@ -412,6 +449,8 @@ export function parseObserverReviewPayload(
     observer_cli_version: parsed.observer_cli_version,
     findings,
     ...(wakeEcho !== undefined ? { observer_wake_payload_version_echo: wakeEcho } : {}),
+    ...(parsed.host_verification === "unverified" ? { host_verification: "unverified" as const } : {}),
+    ...(parsed.reviewer_role === "second" ? { reviewer_role: "second" as const } : {}),
   };
 }
 
@@ -550,6 +589,48 @@ function normalizeCodexFinding(f: unknown): unknown {
     out.evidence_lines = [f.line, f.line];
   }
   return out;
+}
+
+/**
+ * Map native-shaped FINDINGS to the schema's shape, leaving the envelope alone.
+ *
+ * Why this is separate from {@link normalizeCodexObserverReviewRaw} (2026-09-06,
+ * live probe across three council pairs): envelope-conformance and
+ * findings-conformance are independent axes, and the codex normalizer conflates
+ * them. It early-returns on `"schema_version" in parsed` as an idempotency
+ * guard, so a review with a CORRECT envelope and NATIVE findings is never
+ * touched — and then drops on `findings.severity`.
+ *
+ * That combination is not hypothetical and not codex-specific. A `claude`
+ * observer (opus-4-5, workspace `/root/razumai_space_bot`) emitted exactly it:
+ * all nine envelope keys correct, findings as
+ * `{severity:"low", file, line, title, description}`. The review file landed on
+ * disk and the server dropped it — `protocol.frame_dropped … field=findings.severity`
+ * — so the pair looked silent while the observer was doing real work. The same
+ * hole swallows a codex observer that learned to emit `schema_version` (which
+ * the system prompt loudly demands, calling it the "most-omitted field"), which
+ * makes prompt-tightening actively able to REGRESS delivery.
+ *
+ * So severity mapping runs for every provider. Envelope synthesis deliberately
+ * does not: it stamps `observer_provider: "codex"`, which would misattribute a
+ * claude review. Provider-specific identity stays provider-gated; a shape the
+ * parser rejects does not.
+ *
+ * Pure and idempotent — canonical severities pass through untouched and
+ * schema-shaped fields always win, so applying this after the codex normalizer
+ * is a no-op. Returns the raw string unchanged when it does not parse as JSON,
+ * is not a JSON object, or carries no `findings` array.
+ */
+export function normalizeObserverFindingShapeRaw(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isObject(parsed)) return raw;
+  if (!Array.isArray(parsed.findings)) return raw;
+  return JSON.stringify({ ...parsed, findings: parsed.findings.map(normalizeCodexFinding) });
 }
 
 // ─── Peer-message formatter (bidirectional pipeline) ────────────────────────

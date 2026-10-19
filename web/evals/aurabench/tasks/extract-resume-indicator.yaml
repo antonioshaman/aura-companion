@@ -1,0 +1,56 @@
+# AuraBench task mined from PR #80 ("refactor(chat): extract ResumeIndicator — resume-history banner with CTA + progress variants").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: extract-resume-indicator
+title: "The resume-history banner is extracted from MessageFeed into its own component"
+start_commit: b9c3a83ac98d2fd332206dcf0f3d5c3d5870b573
+prompt: |
+  `MessageFeed.tsx` is a god-module being split up. Extract the resume-history
+  banner (the card shown for resumed/forked sessions with a "load history"
+  button, plus the progress text shown after loading) into
+  `web/src/components/chat/ResumeIndicator.tsx`, exporting `ResumeIndicator`.
+
+  It takes plain props: `canLoadResumeHistory`, `resumeHistoryLoaded`,
+  `resumeModeLabel`, `resumeSourceSessionId`, `sdkSessionCwd` (optional),
+  `resumeHistoryLoading`, `resumeHistoryError`, `resumeHistoryHasMore`,
+  `onLoadResumeHistory`. It renders nothing at all when `canLoadResumeHistory`
+  is false; before loading it shows the card exactly as today (mode label,
+  source id, the last two path segments of the cwd with the separator omitted
+  when there is no cwd, the button with its loading state, and the error with
+  `role="alert"`), with the card marked `data-testid="resume-indicator-cta"`;
+  after loading it shows today's progress text variants in an element marked
+  `data-testid="resume-indicator-progress"`. Move
+  any helper it needs along with it, add its variants to the Playground, and do
+  not change what users see. This is a pure refactor.
+expected_files:
+  - web/src/components/MessageFeed.tsx
+  - web/src/components/Playground.tsx
+  - web/src/components/chat/ResumeIndicator.tsx
+expected_tests:
+  - web/src/components/chat/ResumeIndicator.test.tsx
+failure_modes:
+  - "visible copy or behaviour of the banner changes"
+  - "an empty wrapper is rendered when the banner is gated off"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 80
+  merge_commit: f62f062ab56584cc8d350a1b874793db4e4d9649
+  class: refactor
+  hidden_tests:
+    - web/src/components/chat/ResumeIndicator.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:21:35.683Z"

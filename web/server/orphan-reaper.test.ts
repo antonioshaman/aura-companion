@@ -30,6 +30,7 @@ import {
   classifyArgv,
   splitCmdline,
   parsePpidFromStat,
+  resolveOrphanReaperGate,
   type OrphanReaperDeps,
   type ReaperKnownSession,
 } from "./orphan-reaper.js";
@@ -149,6 +150,82 @@ describe("classifyArgv — Companion-shape detection + EC-23 redaction", () => {
     expect(c.argvShape).toEqual(["claude", "--cwd", "<PATH>", "--sdk-url", "<URL>"]);
     // cwdDepth captures structure of the deepest path token.
     expect(c.cwdDepth).toBeGreaterThanOrEqual(3);
+  });
+
+  // 2026-09-11 addition: stdio transport (default for CLI >= 2.1.123).
+  // Companion-spawned Claude subprocesses under stdio carry a specific
+  // token quorum (`--print` + `--output-format stream-json` +
+  // `--input-format stream-json`). Reproduced orphan on prod 2026-09-11
+  // was exactly this shape.
+  it("detects stdio-transport Claude by quorum: --print + --output-format stream-json + --input-format stream-json", () => {
+    const c = classifyArgv([
+      "/home/auracomp/.local/bin/claude",
+      "--print",
+      "--output-format", "stream-json",
+      "--input-format", "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--model", "claude-opus-4-8",
+      "--permission-mode", "bypassPermissions",
+      "--resume", "2eaf079e-91c0-4e10-80db-18b340d1b97c",
+    ]);
+    expect(c.isCompanionShape).toBe(true);
+    expect(c.isServerManagedShape).toBe(true);
+    // No --sdk-url → no Companion sessionId extracted (stdio orphans
+    // fall through to the REAP branch since they can't re-attach
+    // anyway — bun can't recover stdin/stdout of a subprocess it
+    // didn't spawn).
+    expect(c.sessionId).toBeNull();
+  });
+
+  it("stdio quorum requires ALL three markers — --print alone is not enough", () => {
+    // A bare `claude --print "hi"` from a user script should NOT be
+    // treated as Companion-spawned. Only reap when the full stream-json
+    // stdio combination is present.
+    const c = classifyArgv([
+      "/usr/local/bin/claude",
+      "--print", "hi",
+    ]);
+    expect(c.isCompanionShape).toBe(true); // basename says "claude"
+    expect(c.isServerManagedShape).toBe(false); // quorum incomplete
+  });
+
+  it("stdio quorum requires ALL three markers — output-format alone is not enough", () => {
+    const c = classifyArgv([
+      "/usr/local/bin/claude",
+      "--output-format", "stream-json",
+      "hi",
+    ]);
+    expect(c.isServerManagedShape).toBe(false);
+  });
+
+  it("stdio quorum is basename-gated — random `node` binary with matching args is NOT reaped as claude", () => {
+    // Defense-in-depth: even if some other tool happens to use the same
+    // three flag names, we require argv[0] basename === "claude".
+    const c = classifyArgv([
+      "/usr/bin/node",
+      "--print",
+      "--output-format", "stream-json",
+      "--input-format", "stream-json",
+    ]);
+    expect(c.isCompanionShape).toBe(false); // basename check filters upfront
+    expect(c.isServerManagedShape).toBe(false);
+  });
+
+  it("stdio Claude with fable/opus/haiku model — model id does not affect classification", () => {
+    // The 2026-09-10 model rotation (PR #182) means orphans may be on
+    // any chain entry. Assert the classification is model-agnostic.
+    for (const model of ["claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-haiku-4-5"]) {
+      const c = classifyArgv([
+        "/home/auracomp/.local/bin/claude",
+        "--print",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--model", model,
+        "--resume", "some-cli-session-id",
+      ]);
+      expect(c.isServerManagedShape).toBe(true);
+    }
   });
 });
 
@@ -608,5 +685,111 @@ describe("reapOrphans — non-ESRCH kill failure not counted as reaped (NOTE fix
     const sum = await reapOrphans(deps);
     expect(sum.reaped).toBe(1); // already-gone == effective reap
     expect(sum.killFailed).toBe(0);
+  });
+});
+
+// aura-meta-diet P6/D2: the AuraBench bench instance shares the host and user
+// with prod, and the reaper scans all of /proc — so a second instance must be
+// able to boot with the reaper off. The gate is fail-closed: only an explicit
+// off-value disables it; typos keep prod behaviour (on) and warn.
+describe("resolveOrphanReaperGate — COMPANION_ORPHAN_REAPER boot gate", () => {
+  it("defaults to enabled when the variable is absent or empty (prod behaviour)", () => {
+    expect(resolveOrphanReaperGate(undefined)).toEqual({ enabled: true });
+    expect(resolveOrphanReaperGate("")).toEqual({ enabled: true });
+    expect(resolveOrphanReaperGate("  ")).toEqual({ enabled: true });
+  });
+
+  it("accepts the closed on/off set case-insensitively", () => {
+    for (const v of ["on", "1", "true", "ON", " True "]) expect(resolveOrphanReaperGate(v)).toEqual({ enabled: true });
+    for (const v of ["off", "0", "false", "OFF", " False "]) expect(resolveOrphanReaperGate(v)).toEqual({ enabled: false });
+  });
+
+  it("fails closed to enabled with a warning on an unknown value", () => {
+    // A typo like "of" must never silently disable the reaper in prod.
+    const r = resolveOrphanReaperGate("of");
+    expect(r.enabled).toBe(true);
+    expect(r.warning).toContain("COMPANION_ORPHAN_REAPER");
+    expect(r.warning).toContain('"of"');
+  });
+});
+
+describe("reapOrphans — SIGTERM-ignoring orphan escalates to SIGKILL (W10a)", () => {
+  // Prod regression: a codex `app-server` orphan (PPID=1) ignored SIGTERM for
+  // weeks while every boot logged "orphan reaped via SIGTERM". The reaper must
+  // (1) observe exit before claiming a reap, (2) escalate to SIGKILL after the
+  // SIGTERM grace, and (3) report a survivor honestly instead of as reaped.
+  function codexCmdline(): string {
+    return ["/usr/bin/node", "/usr/lib/node_modules/@openai/codex/bin/codex.js", "app-server", "--listen", "ws://127.0.0.1:4502"].join("\0") + "\0";
+  }
+  function depsWith(over: Partial<OrphanReaperDeps>): OrphanReaperDeps {
+    let t = 1_700_000_001_000;
+    return {
+      loadedSessions: [],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [4502],
+      readStat: () => fakeStat("node", 1),
+      readCmdline: () => codexCmdline(),
+      sleep: async (ms: number) => { t += ms; },
+      now: () => t,
+      ...over,
+    };
+  }
+  const reapedLogs = () =>
+    infoSpy.mock.calls.filter((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaped");
+
+  it("SIGTERM ignored → SIGKILL sent → exit observed → reaped, logged as SIGKILL", async () => {
+    let alive = true;
+    const kill = vi.fn((_pid: number, sig: string) => { if (sig === "SIGKILL") alive = false; });
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => alive }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sum.reaped).toBe(1);
+    expect(sum.escalatedToSigkill).toBe(1);
+    expect(sum.survived).toBe(0);
+    expect(reapedLogs()).toHaveLength(1);
+    expect(reapedLogs()[0][1]).toBe("orphan reaped via SIGKILL");
+    expect(reapedLogs()[0][2]).toMatchObject({ signal: "SIGKILL" });
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "4502.json"))).toBe(false);
+  });
+
+  it("process exits on SIGTERM → no SIGKILL, logged as SIGTERM", async () => {
+    let alive = true;
+    const kill = vi.fn(() => { alive = false; });
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => alive }));
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(4502, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+    expect(sum.escalatedToSigkill).toBe(0);
+    expect(reapedLogs()[0][1]).toBe("orphan reaped via SIGTERM");
+  });
+
+  it("survives SIGTERM and SIGKILL → NOT counted as reaped, survived=1, honest WARN", async () => {
+    const kill = vi.fn();
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => true }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sum.reaped).toBe(0);
+    expect(sum.survived).toBe(1);
+    expect(reapedLogs()).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.stringContaining("survived"),
+      expect.objectContaining({ event: "orphan_reaper.survived", pid: 4502 }),
+    );
+  });
+
+  it("identity drifts during the SIGTERM grace (PID reuse) → SIGKILL is NOT sent", async () => {
+    // The first two cmdline reads (classify + pre-SIGTERM re-verify) see the
+    // orphan; afterwards the pid belongs to an unrelated process.
+    let reads = 0;
+    const kill = vi.fn();
+    const sum = await reapOrphans(depsWith({
+      kill,
+      killCheck: () => true,
+      readCmdline: () => (++reads <= 2 ? codexCmdline() : ["/usr/bin/vim", "notes.txt"].join("\0") + "\0"),
+    }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM"]);
+    expect(sum.reaped).toBe(0);
+    expect(sum.killAbortedDrift).toBe(1);
   });
 });

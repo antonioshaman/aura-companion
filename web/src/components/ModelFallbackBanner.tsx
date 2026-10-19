@@ -14,7 +14,14 @@
  * The proactive (validate-before-switch) and reactive (runtime revert) paths
  * MUST produce identical copy here — the user shouldn't be able to tell which
  * mechanism caught the unavailable model.
+ *
+ * Task A.2: this is also the ONE persistent notice for server-side fallbacks
+ * (spawn substitution, Codex rejection, chain fallback, silence rotation),
+ * recorded on the session state so it survives reloads. It names from→to and
+ * why, and offers "Switch back to <from>" when the caller can do that.
  */
+
+import type { ModelFallbackReason } from "../types.js";
 
 interface ModelFallbackBannerProps {
   /** Human label of the model the session WANTED but can't use. */
@@ -25,7 +32,15 @@ interface ModelFallbackBannerProps {
    * Why the preferred model is unavailable. Drives one clause of the copy;
    * omit for a generic "unavailable".
    */
-  reason?: "retired" | "blocked" | "overloaded";
+  reason?: ModelFallbackReason;
+  /** Optional extra context (e.g. the raw rejection message). */
+  detail?: string;
+  /** Return to `fromModel`. Omit when that model can't be selected. */
+  onSwitchBack?: () => void;
+  /** A switch-back request is in flight — the action is disabled. */
+  switchingBack?: boolean;
+  /** Why the last switch-back attempt failed (notice stays open, retry allowed). */
+  switchBackError?: string;
   /** Dismiss the notice. The fallback stays in effect; this only hides the banner. */
   onDismiss?: () => void;
 }
@@ -38,12 +53,29 @@ function reasonClause(reason: ModelFallbackBannerProps["reason"]): string {
       return "is blocked for this session (region or policy)";
     case "overloaded":
       return "is temporarily overloaded";
+    case "cli-incompatible":
+      return "does not work with the installed Claude CLI";
+    case "rejected":
+      return "was rejected by your account";
+    case "unavailable":
+      return "was reported as unavailable";
+    case "unresponsive":
+      return "stopped responding on this session";
     default:
       return "is unavailable";
   }
 }
 
-export function ModelFallbackBanner({ fromModel, toModel, reason, onDismiss }: ModelFallbackBannerProps) {
+export function ModelFallbackBanner({
+  fromModel,
+  toModel,
+  reason,
+  detail,
+  onSwitchBack,
+  switchingBack = false,
+  switchBackError,
+  onDismiss,
+}: ModelFallbackBannerProps) {
   return (
     <div
       role="status"
@@ -62,15 +94,35 @@ export function ModelFallbackBanner({ fromModel, toModel, reason, onDismiss }: M
           <p className="text-xs text-cc-fg/80 leading-snug mb-2">
             {fromModel} {reasonClause(reason)}. This session is running on {toModel} instead.
           </p>
-          {onDismiss && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onDismiss}
-                className="text-xs text-cc-muted hover:text-cc-fg cursor-pointer"
-              >
-                Dismiss
-              </button>
+          {detail && (
+            <p className="text-[11px] text-cc-muted leading-snug mb-2 break-words">{detail}</p>
+          )}
+          {switchBackError && (
+            <p className="text-[11px] text-cc-error leading-snug mb-2 break-words">
+              Couldn't switch back to {fromModel}: {switchBackError}
+            </p>
+          )}
+          {(onSwitchBack || onDismiss) && (
+            <div className="flex items-center gap-3">
+              {onSwitchBack && (
+                <button
+                  type="button"
+                  onClick={onSwitchBack}
+                  disabled={switchingBack}
+                  className="text-xs font-medium text-cc-fg underline underline-offset-2 hover:text-cc-primary cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                >
+                  {switchingBack ? `Switching back to ${fromModel}…` : `Switch back to ${fromModel}`}
+                </button>
+              )}
+              {onDismiss && (
+                <button
+                  type="button"
+                  onClick={onDismiss}
+                  className="text-xs text-cc-muted hover:text-cc-fg cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              )}
             </div>
           )}
         </div>

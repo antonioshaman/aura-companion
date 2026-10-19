@@ -1,11 +1,15 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession } from "./ws.js";
+import { connectSession, disconnectSession } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
-import { parseHash, navigateToSession } from "./utils/routing.js";
+import { parseHash, navigateToSession, navigateHome } from "./utils/routing.js";
+import { decideRestoreBounce, isReloadNavigation, type ArmedRestore } from "./utils/restore-bounce.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
 import { useCouncilShortcuts } from "./use-council-shortcuts.js";
+import { useSwUpdate } from "./use-sw-update.js";
+import { applyUpdate } from "./sw-register.js";
+import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
@@ -17,6 +21,7 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { ObserverPanel } from "./components/council/index.js";
+import { SectionErrorBoundary } from "./components/SectionErrorBoundary.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -28,6 +33,8 @@ const TailscalePage = lazy(() => import("./components/TailscalePage.js").then((m
 const PromptsPage = lazy(() => import("./components/PromptsPage.js").then((m) => ({ default: m.PromptsPage })));
 const EnvManager = lazy(() => import("./components/EnvManager.js").then((m) => ({ default: m.EnvManager })));
 const SandboxManager = lazy(() => import("./components/SandboxManager.js").then((m) => ({ default: m.SandboxManager })));
+const SweepPage = lazy(() => import("./components/SweepPage.js").then((m) => ({ default: m.SweepPage })));
+const DiagnosticsPage = lazy(() => import("./components/diagnostics/DiagnosticsPage.js").then((m) => ({ default: m.DiagnosticsPage })));
 const CronManager = lazy(() => import("./components/CronManager.js").then((m) => ({ default: m.CronManager })));
 const AgentsPage = lazy(() => import("./components/AgentsPage.js").then((m) => ({ default: m.AgentsPage })));
 const RunsPage = lazy(() => import("./components/RunsPage.js").then((m) => ({ default: m.RunsPage })));
@@ -60,6 +67,8 @@ export default function App() {
   const sessionCreatingBackend = useStore((s) => s.sessionCreatingBackend);
   const creationProgress = useStore((s) => s.creationProgress);
   const creationError = useStore((s) => s.creationError);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const sdkSessionsLoaded = useStore((s) => s.sdkSessionsLoaded);
   const hash = useHash();
   const route = useMemo(() => parseHash(hash), [hash]);
   const isSettingsPage = route.page === "settings";
@@ -70,6 +79,8 @@ export default function App() {
   const isTailscaleIntegrationPage = route.page === "integration-tailscale";
   const isEnvironmentsPage = route.page === "environments";
   const isSandboxesPage = route.page === "sandboxes";
+  const isSweepPage = route.page === "sweep";
+  const isDiagnosticsPage = route.page === "diagnostics";
   const isScheduledPage = route.page === "scheduled";
   const isAgentsPage = route.page === "agents" || route.page === "agent-detail";
   const isRunsPage = route.page === "runs";
@@ -89,6 +100,12 @@ export default function App() {
   // single-mount discipline — multiple instances would double-fire toggle.
   useCouncilShortcuts();
 
+  // PWA update prompt: when a new SW has installed and is waiting, surface an
+  // unobtrusive toaster so the user can reload onto the fresh bundle instead of
+  // silently running stale cached code after a frontend deploy.
+  const updateReady = useSwUpdate();
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
@@ -96,16 +113,31 @@ export default function App() {
   // Capture the localStorage-restored session ID during render (before any effects run)
   // so the mount logic can use it even if the hash-sync branch would clear it.
   const restoredIdRef = useRef(useStore.getState().currentSessionId);
+  const initialServerSessionRecoveryRef = useRef(false);
+  // The session (if any) this page load reopened on its own — a hash-less
+  // localStorage restore, or a browser reload of `#/session/<id>`. The session
+  // list is empty at mount (not persisted across reload), so whether it is
+  // archived is decided once the server's list lands — see the bounce effect.
+  const autoRestoredRef = useRef<ArmedRestore | null>(null);
+  const mountRouteHandledRef = useRef(false);
 
   // Sync hash → store. On mount, restore a localStorage session into the URL first.
   useEffect(() => {
+    const isMountRoute = !mountRouteHandledRef.current;
+    mountRouteHandledRef.current = true;
     // On first mount with no session hash, restore from localStorage
     if (restoredIdRef.current !== null && route.page === "home") {
+      autoRestoredRef.current = { sessionId: restoredIdRef.current, sawSessionRoute: false };
       navigateToSession(restoredIdRef.current, true);
       restoredIdRef.current = null;
       return; // navigateToSession triggers hashchange → this effect re-runs with the session route
     }
     restoredIdRef.current = null;
+    // A reload of a session URL reopens it just like the hash-less restore
+    // (review 2026-10-14-2248 #2); a pasted / followed deep link does not arm.
+    if (isMountRoute && route.page === "session" && isReloadNavigation()) {
+      autoRestoredRef.current = { sessionId: route.sessionId, sawSessionRoute: true };
+    }
 
     if (route.page === "session") {
       const store = useStore.getState();
@@ -121,6 +153,52 @@ export default function App() {
     }
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);
+
+  // Archived auto-restore bounce. A session this page load reopened on its
+  // own (see `autoRestoredRef`) gets its socket before the session list
+  // arrives; if the server's list shows it archived, drop the socket and land
+  // on home instead of parking a dead session as the main panel. Exited (not
+  // archived) sessions are kept: a message resumes them. Never fires for an
+  // explicit click or a pasted deep link (those never arm), and disarms if the
+  // user navigates elsewhere before the list lands. Decision: `decideRestoreBounce`.
+  useEffect(() => {
+    const armed = autoRestoredRef.current;
+    if (!armed) return;
+    const decision = decideRestoreBounce(armed, route, sdkSessions, sdkSessionsLoaded);
+    if (decision.kind === "wait") {
+      autoRestoredRef.current = decision.armed;
+      return;
+    }
+    autoRestoredRef.current = null; // one-shot: decided for this page load
+    if (!decision.bounce) return;
+    disconnectSession(armed.sessionId);
+    if (useStore.getState().currentSessionId === armed.sessionId) {
+      navigateHome(true);
+    }
+  }, [route, sdkSessions, sdkSessionsLoaded]);
+
+  // If the browser opens with no persisted selection but the server already has
+  // live sessions (for example an agent was started from a CLI-side entrypoint),
+  // route to the newest active session once. Sidebar polling still owns the
+  // session list; this closes the gap where messages stream and ack in the
+  // background while the main panel remains on the empty home route.
+  useEffect(() => {
+    if (initialServerSessionRecoveryRef.current) return;
+    if (!isAuthenticated) return;
+    if (route.page !== "home" || currentSessionId !== null) {
+      initialServerSessionRecoveryRef.current = true;
+      return;
+    }
+    if (sdkSessions.length === 0) return;
+    initialServerSessionRecoveryRef.current = true;
+
+    const latestActive = sdkSessions
+      .filter((session) => !session.archived && session.state !== "exited")
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (latestActive) {
+      navigateToSession(latestActive.sessionId, true);
+    }
+  }, [currentSessionId, isAuthenticated, route.page, sdkSessions]);
 
   // Keep git changed-files count in sync for the badge regardless of which tab is active.
   // DiffPanel does the same when mounted; this covers the case where the diff tab is closed.
@@ -164,7 +242,7 @@ export default function App() {
   // EXCLUSIVELY by the live `group:created` push, so a tab reloading
   // after pair creation landed without the Sidebar ☼/☽ glyph + role
   // suffix and without ObserverPanel pair context
-  // (`BUG-council-mode-group-rest-bootstrap-gap.md`).
+  // (`docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`).
   //
   // `hydrateGroups` is idempotent — it only INSERTS groups not already
   // in the store, so this bootstrap cannot clobber mutable runtime
@@ -172,8 +250,7 @@ export default function App() {
   // live `group:created` push may have populated first. Failure is
   // best-effort: live WS events still arrive on the next group_*
   // frame, so a network blip here doesn't strand the UI.
-  useEffect(() => {
-    if (!isAuthenticated) return;
+  const bootstrapGroups = useCallback(() => {
     api.fetchGroups().then(({ groups }) => {
       useStore.getState().hydrateGroups(groups);
     }).catch((err) => {
@@ -184,7 +261,31 @@ export default function App() {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-  }, [isAuthenticated]);
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    bootstrapGroups();
+  }, [isAuthenticated, bootstrapGroups]);
+
+  // Re-hydrate groups when the tab regains visibility/focus. A long-open tab that
+  // was already connected when a pair spawned can miss the live `group:created`
+  // push AND never reconnect (so the WS-reconnect re-hydrate never fires) — leaving
+  // the ObserverPanel + Sidebar ☼/☽ glyph silently absent for a LIVE pair until a
+  // full reload. `hydrateGroups` is insert-only/idempotent (never clobbers mutable
+  // runtime fields a live push set), so re-running on focus is safe.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") bootstrapGroups();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", bootstrapGroups);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", bootstrapGroups);
+    };
+  }, [isAuthenticated, bootstrapGroups]);
 
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
@@ -219,6 +320,9 @@ export default function App() {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {updateReady && !updateDismissed && (
+          <UpdateAvailableBanner onUpdate={applyUpdate} onDismiss={() => setUpdateDismissed(true)} />
+        )}
         <TopBar />
         <div className="flex-1 overflow-hidden relative">
           {isSettingsPage && (
@@ -276,6 +380,18 @@ export default function App() {
             </div>
           )}
 
+          {isSweepPage && (
+            <div className="absolute inset-0">
+              <Suspense fallback={<LazyFallback />}><SweepPage embedded /></Suspense>
+            </div>
+          )}
+
+          {isDiagnosticsPage && (
+            <div className="absolute inset-0">
+              <Suspense fallback={<LazyFallback />}><DiagnosticsPage embedded /></Suspense>
+            </div>
+          )}
+
           {isAgentsPage && (
             <div className="absolute inset-0">
               <Suspense fallback={<LazyFallback />}><AgentsPage route={route} /></Suspense>
@@ -294,7 +410,14 @@ export default function App() {
                 {currentSessionId ? (
                   activeTab === "diff"
                     ? <DiffPanel sessionId={currentSessionId} />
-                    : <ChatView sessionId={currentSessionId} />
+                    : (
+                      // Contain a chat-subtree render throw to this region so a
+                      // bad message/finding never escapes to the root
+                      // AppErrorBoundary and blanks the viewport (RC-1 T13 / RC-5).
+                      <SectionErrorBoundary label="Chat">
+                        <ChatView sessionId={currentSessionId} />
+                      </SectionErrorBoundary>
+                    )
                 ) : (
                   <HomePage key={homeResetKey} />
                 )}
@@ -320,7 +443,12 @@ export default function App() {
           behaviour mirrors TaskPanel's open/closed pattern. */}
       {currentSessionId && isSessionView && (
         <div className="hidden md:flex shrink-0 h-full">
-          <ObserverPanel sessionId={currentSessionId} />
+          {/* Contain a render throw in the observer UI (fires once per
+              group:checkpoint / group:review update) to this rail rather than
+              letting it escape to the root AppErrorBoundary (RC-1 T13 / RC-5). */}
+          <SectionErrorBoundary label="Observer">
+            <ObserverPanel sessionId={currentSessionId} />
+          </SectionErrorBoundary>
         </div>
       )}
 

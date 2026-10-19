@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { MessageBubble } from "./MessageBubble.js";
+import { CacheRewriteHint } from "./CacheRewriteHint.js";
 import {
   ToolBlock,
   getToolIcon,
@@ -16,6 +17,7 @@ import { ChatView } from "./ChatView.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ResumeIndicator } from "./chat/ResumeIndicator.js";
+import { CollapsedSystemMarkers } from "./chat/CollapsedSystemMarkers.js";
 import { api } from "../api.js";
 import type {
   PermissionRequest,
@@ -26,8 +28,14 @@ import type {
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { ContextAdvisoryBanner } from "./ContextAdvisoryBanner.js";
+import { AutoResumeBanner } from "./AutoResumeBanner.js";
+import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
+  AutoProceedRestoreNotice,
   BlockerBanner,
+  CheckpointCoverageList,
+  ObserverProbeMessage,
   CouncilToggle,
   DegradedBanner,
   FindingsLog,
@@ -35,7 +43,8 @@ import {
   ProviderBadges,
   type CouncilPairing,
 } from "./council/index.js";
-import type { GroupRecord, ObserverFinding } from "../types.js";
+import type { ConvergenceNotCountedReason, GroupRecord, ObserverFinding } from "../types.js";
+import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -49,6 +58,7 @@ import {
   GitHubPRDisplay,
   CodexRateLimitsSection,
   CodexTokenDetailsSection,
+  ClaudeContextSection,
 } from "./TaskPanel.js";
 import { LinearLogo } from "./LinearLogo.js";
 import { SessionCreationProgress } from "./SessionCreationProgress.js";
@@ -304,6 +314,15 @@ const MSG_USER: ChatMessage = {
   timestamp: Date.now() - 60000,
 };
 
+// Usage-limit auto-resume: the continuation prompt Aura sends after the reset.
+const MSG_USER_AUTO_RESUME: ChatMessage = {
+  id: "msg-auto-resume",
+  role: "user",
+  content: "Лимит сброшен — продолжай с того места, где остановился.",
+  origin: "auto_resume",
+  timestamp: Date.now() - 50000,
+};
+
 const MSG_USER_IMAGE: ChatMessage = {
   id: "msg-2",
   role: "user",
@@ -328,6 +347,27 @@ const MSG_ASSISTANT: ChatMessage = {
     },
   ],
   timestamp: Date.now() - 50000,
+};
+
+// Council observer final reply (observer reply contract): a bare JSON
+// findings array renders as severity cards, an empty array as the
+// "review clean" status line (ObserverFindingsBlock inside MessageBubble).
+const MSG_OBSERVER_FINDINGS: ChatMessage = {
+  id: "msg-obs-1",
+  role: "assistant",
+  content: JSON.stringify([
+    { severity: "STOP", claim: "ws-bridge drops the ack when the socket closes mid-flush — the browser never learns the frame was lost.", evidence_path: "web/server/ws-bridge.ts", evidence_lines: [112, 128], confidence: "high" },
+    { severity: "WARN", claim: "Extracted helper has no direct coverage; the only test exercises it through the happy path.", evidence_path: "web/server/routes.ts", confidence: "medium" },
+    { severity: "INFO", claim: "OBSERVER-BLOCKED: exec_command failed to read the checkpoint file: bwrap: Operation not permitted", evidence_path: ".council/review-input/plan.md", confidence: "high" },
+  ]),
+  timestamp: Date.now() - 42000,
+};
+
+const MSG_OBSERVER_FINDINGS_CLEAN: ChatMessage = {
+  id: "msg-obs-2",
+  role: "assistant",
+  content: "[]",
+  timestamp: Date.now() - 41000,
 };
 
 const MSG_ASSISTANT_TOOLS: ChatMessage = {
@@ -409,6 +449,54 @@ const MSG_SYSTEM: ChatMessage = {
   timestamp: Date.now() - 30000,
 };
 
+// Result frame with a real execution error (red)
+const MSG_SYSTEM_ERROR: ChatMessage = {
+  id: "msg-6-error",
+  role: "system",
+  content: "Error: Tool execution failed: permission denied",
+  timestamp: Date.now() - 29000,
+  systemVariant: "error",
+};
+
+// Result frame closing a turn cut off by a restart or a user Stop (muted, collapsed)
+const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
+  id: "msg-6-resume",
+  role: "system",
+  content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+  timestamp: Date.now() - 28000,
+  systemVariant: "resume-interrupted",
+};
+
+// W16: a run of these two adjacent in the feed is what MessageFeed collapses
+// into one "Interrupted ×N" row (chat/CollapsedSystemMarkers.tsx) — a
+// long-lived session could otherwise show 15+ of these in a row.
+const COLLAPSED_SYSTEM_MARKERS_ITEMS = [
+  {
+    id: "coll-1",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+    timestamp: Date.now() - 27000,
+    systemVariant: "resume-interrupted" as const,
+  },
+  {
+    id: "coll-2",
+    content: "Backend transcript 1813s behind CLI's jsonl — relaunching to recover.",
+    timestamp: Date.now() - 26000,
+    systemVariant: "drift-recovery" as const,
+  },
+  {
+    id: "coll-3",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use",
+    timestamp: Date.now() - 25000,
+    systemVariant: "resume-interrupted" as const,
+  },
+  {
+    id: "coll-4",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+    timestamp: Date.now() - 24000,
+    systemVariant: "resume-interrupted" as const,
+  },
+];
+
 // Tool result with error
 const MSG_TOOL_ERROR: ChatMessage = {
   id: "msg-7",
@@ -432,6 +520,29 @@ const MSG_TOOL_ERROR: ChatMessage = {
     { type: "text", text: "There's a test failure. Let me fix the issue." },
   ],
   timestamp: Date.now() - 20000,
+};
+
+const MSG_TOOL_AUTH_ERROR: ChatMessage = {
+  id: "msg-7b",
+  role: "assistant",
+  content: "",
+  contentBlocks: [
+    { type: "text", text: "I'll run a web search for the latest API guidance." },
+    {
+      type: "tool_use",
+      id: "tu-auth-error",
+      name: "WebSearch",
+      input: { query: "latest API guidance" },
+    },
+    {
+      type: "tool_result",
+      tool_use_id: "tu-auth-error",
+      content:
+        'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"},"request_id":"req_123"}',
+      is_error: true,
+    },
+  ],
+  timestamp: Date.now() - 19000,
 };
 
 // PLAN Task 12 — interrupted-stream variant. Mirrors a synthesised assistant
@@ -1069,11 +1180,20 @@ export function Playground() {
             <Card label="User message with image">
               <MessageBubble message={MSG_USER_IMAGE} />
             </Card>
+            <Card label="User message — automatic resume after usage limit">
+              <MessageBubble message={MSG_USER_AUTO_RESUME} />
+            </Card>
             <Card label="Assistant message (markdown)">
               <MessageBubble message={MSG_ASSISTANT} />
             </Card>
             <Card label="Assistant message (with tool calls)">
               <MessageBubble message={MSG_ASSISTANT_TOOLS} />
+            </Card>
+            <Card label="Observer review reply (findings cards)">
+              <MessageBubble message={MSG_OBSERVER_FINDINGS} isObserverSession />
+            </Card>
+            <Card label="Observer review reply (clean — no findings)">
+              <MessageBubble message={MSG_OBSERVER_FINDINGS_CLEAN} isObserverSession />
             </Card>
             <Card label="Assistant message (streaming)">
               <MessageBubble message={MSG_ASSISTANT_STREAMING} />
@@ -1087,11 +1207,23 @@ export function Playground() {
             <Card label="Tool result with error">
               <MessageBubble message={MSG_TOOL_ERROR} />
             </Card>
+            <Card label="Tool result with auth error">
+              <MessageBubble message={MSG_TOOL_AUTH_ERROR} />
+            </Card>
             <Card label="Assistant message (interrupted)">
               <MessageBubble message={MSG_ASSISTANT_INTERRUPTED} />
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
+            </Card>
+            <Card label="System message (execution error)">
+              <MessageBubble message={MSG_SYSTEM_ERROR} />
+            </Card>
+            <Card label="System message (previous turn interrupted by restart)">
+              <MessageBubble message={MSG_SYSTEM_RESUME_INTERRUPTED} />
+            </Card>
+            <Card label="Collapsed system markers — run of 4 restart/drift-recovery notes (W16)">
+              <CollapsedSystemMarkers items={COLLAPSED_SYSTEM_MARKERS_ITEMS} />
             </Card>
           </div>
         </Section>
@@ -1532,7 +1664,7 @@ export function Playground() {
         {/* ─── Task Panel ──────────────────────────────── */}
         <Section
           title="Tasks"
-          description="Task list states: pending, in progress, completed, blocked"
+          description="Task list states: pending, in progress, completed, blocked. Backend-agnostic — fed by Claude TodoWrite frames and by Codex plan updates (re-emitted as synthetic TodoWrite)."
         >
           <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
             {/* Session stats mock */}
@@ -1965,6 +2097,14 @@ export function Playground() {
           <div className="space-y-4">
             <Card label="Rate limits with token breakdown">
               <CodexPlaygroundDemo />
+            </Card>
+            {/* W7(b) — prompt-cache hint; reads last_context_tokens /
+                last_turn_completed_at seeded on the demo session above. */}
+            <Card label="Cache-rewrite hint — composing after a 95 min pause">
+              <CacheRewriteHint sessionId={CODEX_DEMO_SESSION} reason="idle" />
+            </Card>
+            <Card label="Cache-rewrite hint — inside the model picker">
+              <CacheRewriteHint sessionId={CODEX_DEMO_SESSION} reason="model-switch" className="border-t border-cc-separator pt-2" />
             </Card>
           </div>
         </Section>
@@ -3084,9 +3224,15 @@ function CouncilModeSection() {
         { id: "fnd_warn", severity: "WARN", claim: "Extracted helper has no negative-path test.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
         { id: "fnd_note", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands.", evidence_path: "web/server/backend-provider.ts" },
         { id: "fnd_downgraded", severity: "STOP", claim: "Suspicious cast in unrelated file (downgraded by grounding).", evidence_path: "src/unrelated.ts", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", severity: "STOP", claim: "Off-by-one in retry loop (cited lines untouched this phase).", evidence_path: "web/server/session-orchestrator.ts", evidence_lines: [12, 14], wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" },
+        { id: "fnd_weak", severity: "STOP", claim: "`bun run --cwd web kb:record` fails at runtime (no cited lines — kept off the banner).", evidence_path: ".council/review/A2.diff", weakEvidence: "no_cited_lines" },
+        { id: "fnd_disputed", severity: "STOP", claim: "The mandatory `bun run --cwd web kb:record` step will fail (repeats a dismissed claim — kept off the banner).", evidence_path: ".council/review/A3.diff", evidence_lines: [106, 106], disputed: "shared_anchor" },
         { id: "fnd_info", severity: "INFO", claim: "Spec coverage matches phase A boundaries.", evidence_path: "specs/council-mode-paired-sessions.md" },
       ],
-      downgrades: [{ id: "fnd_downgraded", reason: "evidence_not_in_modified_set" }],
+      downgrades: [
+        { id: "fnd_downgraded", reason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", reason: "evidence_lines_unchanged" },
+      ],
       observerModel: "gpt-5-codex",
       observerProvider: "codex",
       timestamp: Date.now() - 60_000,
@@ -3152,8 +3298,41 @@ function CouncilModeSection() {
             finding={liveBlockerFinding}
             nowMs={Date.now()}
             onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
             onOpenEvidence={() => { /* noop */ }}
             onMarkAddressed={() => { /* noop */ }}
+          />
+        </Card>
+
+        <Card label="BlockerBanner — STOP raised by the second-opinion reviewer (W15)">
+          <BlockerBanner
+            finding={{
+              ...liveBlockerFinding,
+              id: "fnd_second",
+              claim: "relaunch() has no backoff — a crash loop restarts the CLI hundreds of times a minute",
+              observerProvider: "claude",
+              observerModel: "claude-sonnet-5",
+              secondOpinion: true,
+            }}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
+          />
+        </Card>
+
+        <Card label="BlockerBanner — holding auto-proceed (unfrozen STOP re-checked as NOTE, FIX-AP-3)">
+          <BlockerBanner
+            finding={{
+              ...liveBlockerFinding,
+              id: "fnd_held",
+              severity: "NOTE",
+              wasDowngraded: true,
+              downgradeReason: "evidence_not_in_modified_set",
+              holdsAutoProceed: true,
+            }}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
           />
         </Card>
 
@@ -3167,6 +3346,80 @@ function CouncilModeSection() {
           <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
         </Card>
 
+        {/* FIX-AP-4 — auto-proceed paused by an incomplete STOP-hold restore:
+            an ignorable legacy review file + a non-ignorable verdicts gap. */}
+        <Card label="AutoProceedRestoreNotice — restore incomplete (ignorable file + verdicts gap)">
+          <AutoProceedRestoreNotice
+            gaps={[
+              {
+                gap: "review_unparseable:phase-3-claude-observer.md",
+                reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+                file: "phase-3-claude-observer.md",
+                fingerprint: "0".repeat(64),
+              },
+              { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" },
+            ]}
+            onIgnore={() => { /* noop in playground */ }}
+          />
+        </Card>
+
+        {/* Observer rigor (2026-10-16) — checkpoints with no review ("без ревью")
+            or only an unverified rubber-stamp review ("не проверено"). */}
+        <Card label="CheckpointCoverageList — без ревью + не проверено (collapsible)">
+          <CheckpointCoverageList
+            gaps={[
+              { checkpointId: "council-plan-145", phase: "council-plan", sequence: 145, kind: "unreviewed", reason: "superseded" },
+              { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "degraded" },
+              { checkpointId: "council-review-148-taska-closure-rereview", phase: "council-review", sequence: 148, kind: "unverified" },
+              { checkpointId: "council-review-150", phase: "council-review", sequence: 150, kind: "unreviewed", reason: "probe_reply" },
+            ]}
+          />
+        </Card>
+        {/* Observer rigor — liveness probe + reply in the observer's chat feed. */}
+        <Card label="ObserverProbeMessage — probe and observer reply (collapsed rows)">
+          <ObserverProbeMessage role="user" text="[liveness probe] Это проверка связи после перезапуска на новой модели. Ответь одной короткой строкой: кто ты (роль) и что видел последним в .council/." />
+          <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council; содержимое .council/ после перезапуска ещё не видел." />
+        </Card>
+        {/* Prod 2026-10-16: a later review after a probe (wakes are never user
+            messages in the feed) must still render as findings cards, not as
+            a third probe row. */}
+        <Card label="Observer feed — probe exchange, then a later review (findings cards)">
+          <ObserverProbeMessage role="user" text="[liveness probe] Ответь одной строкой: кто ты?" />
+          <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council." />
+          <MessageBubble message={MSG_OBSERVER_FINDINGS} isObserverSession />
+        </Card>
+
+        {/* Context-overflow handoff banner (mock data only). */}
+        <Card label="ContextAdvisoryBanner — 10 MB, continue in a new session">
+          <ContextAdvisoryBanner
+            milestoneBytes={10_000_000}
+            message="Session context is >10 MB. Compaction alone may not be enough — continue in a new session with a handoff of the current task."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ContextAdvisoryBanner — Codex, compacted twice">
+          <ContextAdvisoryBanner
+            signal="codex_compactions"
+            milestone={2}
+            message="Codex has compacted this thread's context twice — the task is outgrowing the window. Continue in a new session with a handoff of the current task."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ContextAdvisoryBanner — preparing handoff">
+          <ContextAdvisoryBanner milestoneBytes={5_000_000} message="Session context is ~5 MB." onContinue={() => {}} pending />
+        </Card>
+        <Card label="ContextAdvisoryBanner — handoff failed">
+          <ContextAdvisoryBanner
+            milestoneBytes={10_000_000}
+            message="Session context is >10 MB."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+            error="Cannot write handoff file: EACCES"
+          />
+        </Card>
+
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning
             channel (reuses the DegradedBanner recipe), one card per reason. */}
         <Card label="ModelFallbackBanner — retired model">
@@ -3178,10 +3431,68 @@ function CouncilModeSection() {
         <Card label="ModelFallbackBanner — temporarily overloaded">
           <ModelFallbackBanner fromModel="Opus 4.8" toModel="Sonnet 4.6" reason="overloaded" />
         </Card>
+        <Card label="AutoResumeBanner — usage limit, auto-resume scheduled">
+          <AutoResumeBanner resetAt={Date.now() + 2 * 3_600_000} fireAt={Date.now() + 2 * 3_600_000 + 90_000} resetSource="rate_limit_event" onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — weekly limit (other day)">
+          <AutoResumeBanner resetAt={Date.now() + 3 * 86_400_000} fireAt={Date.now() + 3 * 86_400_000 + 75_000} resetSource="rate_limit_event" onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — paused (limit still active after two resumes)">
+          <AutoResumeBanner resetAt={Date.now() + 3_600_000} fireAt={Date.now() + 3_600_000} resetSource="fallback" paused onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — reset time unknown (fallback), cancelling">
+          <AutoResumeBanner resetAt={Date.now() + 5 * 3_600_000} fireAt={Date.now() + 5 * 3_600_000 + 60_000} resetSource="fallback" onCancel={() => {}} cancelling />
+        </Card>
+        {/* Task A.2 — server-recorded fallbacks (persistent across reloads). */}
+        <Card label="ModelFallbackBanner — overloaded, with Switch back">
+          <ModelFallbackBanner
+            fromModel="Opus 5"
+            toModel="Opus 4.8"
+            reason="overloaded"
+            onSwitchBack={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — silence rotation (unresponsive)">
+          <ModelFallbackBanner
+            fromModel="Opus 4.8"
+            toModel="Opus 4.7"
+            reason="unresponsive"
+            detail="The model went silent on repeated turns; Aura relaunched on the next model in the fallback chain."
+            onSwitchBack={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — Codex model rejected by account">
+          <ModelFallbackBanner
+            fromModel="gpt-6.1-sol"
+            toModel="gpt-5.3-codex"
+            reason="rejected"
+            detail="model gpt-6.1-sol is not available for this account"
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — CLI-incompatible (broken-model table)">
+          <ModelFallbackBanner
+            fromModel="Opus 5"
+            toModel="Opus 4.8"
+            reason="cli-incompatible"
+            detail="Claude CLI 2.1.266 does not emit opus-5 responses on stdout"
+            onDismiss={() => {}}
+          />
+        </Card>
 
-        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five
+        {/* PWA update prompt — info-tone toaster shown when a new Service
+            Worker version is waiting to activate after a frontend deploy. */}
+        <Card label="UpdateAvailableBanner — new version ready">
+          <UpdateAvailableBanner onUpdate={() => {}} onDismiss={() => {}} />
+        </Card>
+
+        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. The
             cards mirror the closed CliFailedReason union; each carries
-            human-readable copy + drainedCount + (when present) SHA. */}
+            human-readable copy + drainedCount + (when present) SHA.
+            relaunch_exhausted / backend_dead also get the in-place
+            Relaunch action (P4/FIX-RECONNECT-RELAUNCH). */}
         <Card label="CliFailedBanner — relaunch_exhausted (retry budget spent)">
           <CliFailedBanner
             failure={{
@@ -3192,6 +3503,7 @@ function CouncilModeSection() {
               lastErrorSha256: "d4f5e8a912c0f1234567890abcdef1234567890abcdef1234567890abcdef1234",
             }}
             onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
           />
         </Card>
         <Card label="CliFailedBanner — container_missing (Docker container deleted)">
@@ -3218,21 +3530,79 @@ function CouncilModeSection() {
             onStartNewSession={() => { /* noop */ }}
           />
         </Card>
+        <Card label="CliFailedBanner — backend_dead (agent down past grace, Relaunch primary)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch in flight)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunching
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch failed)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 2, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunchError="Session not found"
+          />
+        </Card>
 
         <Card label="FindingsLog — empty state">
           <FindingsLog findings={[]} />
         </Card>
-        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded)">
+        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence / dismissed)">
           <FindingsLog
-            // Append-ordered (index 0 = oldest), matching the council slice's
-            // push-onto-end convention; FindingsLog renders newest-first, so
-            // "e" (10s ago) surfaces at the top of the rail.
+            // FINDINGS-DEDUP: unresolved blockers first ("a" and the held
+            // "i"), then everything else newest first by receivedAt.
             findings={[
               mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 240_000 }),
               mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 180_000 }),
               mockFinding({ id: "c", severity: "NOTE", claim: "Consider renaming BackendProvider", receivedAt: Date.now() - 120_000 }),
               mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 60_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
               mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 10_000 }),
+              mockFinding({ id: "f", severity: "STOP", claim: "Cited lines untouched this phase — downgraded", receivedAt: Date.now() - 8_000, wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }),
+              mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
+              mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
+              mockFinding({ id: "i", severity: "NOTE", claim: "Unfrozen STOP re-checked as NOTE — still holds auto-proceed", receivedAt: Date.now() - 1_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
+              mockFinding({ id: "j", severity: "STOP", claim: "STOP dismissed before a reload — kept in the log, no banner", receivedAt: Date.now() - 500, dismissed: true }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+        <Card label="FindingsLog — observer + second opinion (model badges, near-duplicate folded, W15)">
+          <FindingsLog
+            findings={[
+              mockFinding({ id: "w15-obs", severity: "STOP", claim: "cancel() races the turn-done handler and drops the reply", receivedAt: Date.now() - 120_000, observerProvider: "codex", observerModel: "gpt-6.1-sol" }),
+              mockFinding({ id: "w15-dup", severity: "STOP", claim: "cancel races turn-done; the reply is dropped", receivedAt: Date.now() - 60_000, observerProvider: "claude", observerModel: "claude-sonnet-5", secondOpinion: true, duplicateOf: "w15-obs" }),
+              mockFinding({ id: "w15-sec", severity: "WARN", claim: "Crash-loop storm: relaunch has no backoff", receivedAt: Date.now() - 50_000, observerProvider: "claude", observerModel: "claude-sonnet-5", secondOpinion: true }),
+              mockFinding({ id: "w15-note", severity: "NOTE", claim: "Log line lacks sessionGroupId", receivedAt: Date.now() - 100_000, observerProvider: "codex", observerModel: "gpt-6.1-sol" }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+        <Card label="SecondReviewerSettings — Council second opinion picker (W15)">
+          <SecondReviewerPlaygroundDemo />
+        </Card>
+        <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">
+          <FindingsLog
+            // Arrival order mimics the pre-fix readdir-ordered bootstrap:
+            // 18d, 1m STOP, 103d, 39m STOP, 1d, and "old-18d" twice.
+            findings={[
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
+              mockFinding({ id: "stop-1m", severity: "STOP", claim: "Fresh STOP — surfaces on top", receivedAt: Date.now() - 60_000 }),
+              mockFinding({ id: "old-103d", severity: "WARN", claim: "A 103-day-old review", receivedAt: Date.now() - 103 * 86_400_000 }),
+              mockFinding({ id: "stop-39m", severity: "STOP", claim: "Second unresolved STOP", receivedAt: Date.now() - 39 * 60_000 }),
+              mockFinding({ id: "note-1d", severity: "NOTE", claim: "Yesterday's note", receivedAt: Date.now() - 86_400_000 }),
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}
@@ -3255,9 +3625,37 @@ function CouncilModeSection() {
             <CouncilCycleProgressPanelDemo />
           </div>
         </Card>
-        <Card label="ObserverPanel — converged ✅ (bidir Story 4.1.5)">
+        <Card label="ObserverPanel — streak reached ✅ N reviews without blockers (CONV-HONEST)">
           <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
             <CouncilConvergedPanelDemo />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: no files read (CONV-HONEST)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="no_files_read" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: downgraded STOP (CONV-DOWNGRADE)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="downgraded_stop" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: unverified clean review (observer rigor)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="unverified_clean" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: waiting for the second opinion (W15)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="awaiting_second_review" />
+          </div>
+        </Card>
+        {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
+            reviewing-stalled banner + first-run hint + dense findings; the panel
+            must clip internally (findings scroll), never overflow the column. */}
+        <Card label="ObserverPanel — worst-case overflow (stalled + first-run hint + dense findings)">
+          <div className="h-[300px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilWorstCasePanelDemo />
           </div>
         </Card>
       </div>
@@ -3328,6 +3726,47 @@ function CouncilConvergedPanelDemo() {
   return <ObserverPanel sessionId={COUNCIL_CONVERGED_SESSION} onRespawnHalf={async () => {}} />;
 }
 
+// P3/CONV-HONEST: a STOP-free review in which the observer read none of the
+// checkpoint's changed files does not advance the streak; the panel says so.
+// P3/CONV-DOWNGRADE: same for a review whose STOP grounding downgraded to NOTE
+// (not counted, but the streak is not reset either).
+function CouncilNotCountedPanelDemo({ reason }: { reason: ConvergenceNotCountedReason }) {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const applyConvergence = useStore((s) => s.applyConvergence);
+  const removeGroup = useStore((s) => s.removeGroup);
+  const session = `playground-council-not-counted-${reason}-orch`;
+  const group = `playground-council-not-counted-${reason}-grp`;
+
+  useEffect(() => {
+    upsertGroup({
+      sessionGroupId: group,
+      primarySessionId: session,
+      observerSessionId: `playground-council-not-counted-${reason}-obs`,
+      status: "active",
+      pairing: "claude+codex",
+      // Observer rigor: the unverified demo also shows the coverage list.
+      ...(reason === "unverified_clean"
+        ? {
+          checkpointCoverage: [
+            { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed" as const, reason: "degraded" as const },
+            { checkpointId: "council-review-148", phase: "council-review", sequence: 148, kind: "unverified" as const },
+          ],
+        }
+        : {}),
+    });
+    applyConvergence({
+      sessionGroupId: group,
+      cycleNumber: 1,
+      convergenceThreshold: 3,
+      convergenceState: "in-progress",
+      notCountedReason: reason,
+    });
+    return () => removeGroup(group);
+  }, [upsertGroup, applyConvergence, removeGroup, group, session, reason]);
+
+  return <ObserverPanel sessionId={session} onRespawnHalf={async () => {}} />;
+}
+
 const COUNCIL_DEGRADED_DEMO_SESSION = "playground-council-degraded-orch";
 const COUNCIL_DEGRADED_DEMO_GROUP = "playground-council-degraded-grp";
 
@@ -3351,6 +3790,82 @@ function CouncilDegradedPanelDemo() {
   }, [upsertGroup, setGroupStatus, removeGroup]);
 
   return <ObserverPanel sessionId={COUNCIL_DEGRADED_DEMO_SESSION} onRespawnHalf={async () => {}} />;
+}
+
+// ── Worst-case panel-overflow demo (layout-stability spec, rec 3) ───────────
+//
+// The spec's `council-pair-layout-stability.md` mandates a Playground scenario
+// that maximizes the panel's non-scrolling header stack so the panel-overflow
+// invariant (`aside.scrollHeight === aside.clientHeight` — findings scroll
+// INTERNALLY, the column itself never grows the document) is visually testable.
+//
+// The panel's state ladder makes `degraded` and `reviewing-stalled` mutually
+// exclusive in the status pill (degraded short-circuits at the top of
+// deriveObserverPanelState), so the literal "degraded + stalled simultaneously"
+// the spec sketches is not derivable. The genuine worst case for header height
+// is therefore: `reviewing-stalled` banner + the (undismissed) first-run hint +
+// a dense findings list — the tallest realistic non-scrolling stack that still
+// keeps the findings region present. Rendered in a deliberately SHORT column so
+// the internal scroll must engage.
+const COUNCIL_WORSTCASE_SESSION = "playground-council-worstcase-orch";
+const COUNCIL_WORSTCASE_GROUP = "playground-council-worstcase-grp";
+
+function CouncilWorstCasePanelDemo() {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const appendObserverReview = useStore((s) => s.appendObserverReview);
+  const recordCheckpoint = useStore((s) => s.recordCheckpoint);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  useEffect(() => {
+    // Force the first-run hint visible regardless of the operator's persisted
+    // dismissal; restore the prior value on unmount so the demo is side-effect
+    // free for the real panel.
+    const priorFirstRunDismissed = useStore.getState().firstRunHintDismissed;
+    useStore.setState({ firstRunHintDismissed: false });
+
+    upsertGroup({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      primarySessionId: COUNCIL_WORSTCASE_SESSION,
+      observerSessionId: "playground-council-worstcase-obs",
+      status: "active",
+      pairing: "claude+codex",
+    });
+    // Findings first (this sets observerReviewing=false); WARN/NOTE only so the
+    // deriver does NOT short-circuit into `blocker-found` — we want stalled.
+    appendObserverReview({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      checkpointId: "chk_worstcase_1",
+      phase: "council-implement",
+      findings: [
+        { id: "fnd_wc_1", severity: "WARN", claim: "Extracted helper `deriveSideEffects` has no negative-path test covering the degraded→archived transition.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
+        { id: "fnd_wc_2", severity: "WARN", claim: "Checkpoint watcher debounce window may coalesce two distinct phases if they land inside 50ms of each other.", evidence_path: "web/server/checkpoint-watcher.ts", evidence_lines: [120, 145] },
+        { id: "fnd_wc_3", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands — the seam name implies a binary.", evidence_path: "web/server/backend-provider.ts" },
+        { id: "fnd_wc_4", severity: "NOTE", claim: "Observer prompt bundle regeneration is enforced by a CI canary; worth a comment at the call site.", evidence_path: "web/server/observer-prompt.ts", evidence_lines: [12, 30] },
+        { id: "fnd_wc_5", severity: "INFO", claim: "Spec coverage matches phase A boundaries for the reconnection grace window.", evidence_path: "specs/council-mode-paired-sessions.md" },
+        { id: "fnd_wc_6", severity: "NOTE", claim: "Reconciliation sentinel-before-sweep helper is duplicated between init and restart paths; extract if a third caller appears.", evidence_path: "web/server/group-reconciliation.ts", evidence_lines: [88, 110] },
+      ],
+      downgrades: [],
+      observerModel: "gpt-5-codex",
+      observerProvider: "codex",
+      timestamp: Date.now() - 620_000,
+    });
+    // Then a checkpoint dated past the wake-timeout deadline (default 300s) so
+    // the deriver flips reviewing → reviewing-stalled.
+    recordCheckpoint({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      checkpointId: "chk_worstcase_1",
+      phase: "council-implement",
+      sequence: 1,
+      timestamp: Date.now() - 600_000,
+    });
+
+    return () => {
+      removeGroup(COUNCIL_WORSTCASE_GROUP);
+      useStore.setState({ firstRunHintDismissed: priorFirstRunDismissed });
+    };
+  }, [upsertGroup, appendObserverReview, recordCheckpoint, removeGroup]);
+
+  return <ObserverPanel sessionId={COUNCIL_WORSTCASE_SESSION} onRespawnHalf={async () => {}} />;
 }
 
 // ─── Session Item Playground ─────────────────────────────────────────────────
@@ -3613,6 +4128,116 @@ function PlaygroundSessionItems() {
             isRecentlyRenamed={false}
             councilPairing="claude+codex"
             councilUnreadStops={2}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Bidirectional pipeline Story 4.1.5 — convergence badge in the sidebar
+          row. Mid-cycle: 🔄 N/T. The badge sits in the meta-row chip cluster,
+          left of the backend badge, and is data-gated (only council pairs with
+          convergence progress or a degraded status carry it). */}
+      <Card label="Council pair — convergence mid-cycle (🔄 2/3)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Iterating toward convergence"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Streak reached — ✅ green badge. P3/CONV-HONEST: "N× no blockers",
+          tooltip disclaims readiness; never "ready to ship". */}
+      <Card label="Council pair — streak reached (✅ 3× no blockers)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Feature complete — 3 clean cycles"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "converged", cycleNumber: 3, threshold: 3, degraded: false }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* P3/CONV-HONEST: latest review read nothing → muted "not counted". */}
+      <Card label="Council pair — latest review not counted (no files read)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer reviewed the spawn checkpoint only"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* P3/CONV-DOWNGRADE: latest review carried a grounding-downgraded STOP → "not counted", streak kept. */}
+      <Card label="Council pair — latest review not counted (downgraded STOP), streak kept">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer STOP downgraded by grounding"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "downgraded_stop" }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Degraded — ⚠️ amber badge; counter frozen while a half is offline.
+          Degraded takes priority over any convergence progress (AC 193). */}
+      <Card label="Council pair — degraded (⚠️ counter frozen)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: false,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer half went offline"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: true }}
             {...noopSessionItemProps}
           />
         </div>
@@ -4068,6 +4693,8 @@ function CodexPlaygroundDemo() {
         reasoningOutputTokens: 8_900,
         modelContextWindow: 200_000,
       },
+      last_context_tokens: 118_000,
+      last_turn_completed_at: Date.now() - 95 * 60_000,
     });
 
     return () => {
@@ -4084,6 +4711,9 @@ function CodexPlaygroundDemo() {
     <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
       <CodexRateLimitsSection sessionId={CODEX_DEMO_SESSION} />
       <CodexTokenDetailsSection sessionId={CODEX_DEMO_SESSION} />
+      {/* Claude context-usage meter (parity with Codex) — reads the same
+          context_used_percent the store already carries for Claude sessions. */}
+      <ClaudeContextSection sessionId={CODEX_DEMO_SESSION} />
     </div>
   );
 }
@@ -4384,4 +5014,10 @@ function PlaygroundAiValidationToggle({ enabled }: { enabled: boolean }) {
       <span className="text-xs text-cc-muted">Click to toggle</span>
     </div>
   );
+}
+
+/** W15: interactive second-opinion picker (controlled, local state only). */
+function SecondReviewerPlaygroundDemo() {
+  const [value, setValue] = useState<SecondReviewerConfig>({ reviewer: "auto", scope: "review-implement" });
+  return <SecondReviewerSettings value={value} onChange={setValue} />;
 }

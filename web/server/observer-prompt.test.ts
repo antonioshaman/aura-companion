@@ -26,6 +26,7 @@ import {
 } from "./council-types.js";
 import { mkdirSync, symlinkSync } from "node:fs";
 import { readFileSync as _readFileSync } from "node:fs";
+import { realpathSync } from "node:fs";
 
 // The minimum bytes guard is in the source; padding lets us write tiny
 // fixtures and still pass the floor without copy-pasting the constant.
@@ -122,7 +123,7 @@ describe("loadObserverSystemPrompt", () => {
     expect(() => loadObserverSystemPrompt(promptPath)).toThrow(/exceeds OBSERVER_PROMPT_MAX_BYTES/);
   });
 
-  // Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 6:
+  // Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 6:
   // the loader still throws on missing file — that IS its contract at
   // this layer. The bundled fallback semantic lives in the higher-level
   // resolver tested below. Inverted from the prior "throws on missing"
@@ -506,8 +507,14 @@ describe("buildObserverWakePayload", () => {
     });
     expect(result.textBody.startsWith("# Council Checkpoint — council-implement")).toBe(true);
     expect(result.textBody).toContain("```json");
-    expect(result.textBody).toContain("You MUST use your `Write` tool to create the file");
-    expect(result.textBody).toContain(".council/reviews/council-implement-claude-observer.md");
+    // P3/B1: the terminator names the reply channel (a bare findings array as
+    // the final message) and forbids file writes — the HOST now names and
+    // writes the group-scoped review file (`observer-reply.ts`), so the
+    // observer is no longer told any review path.
+    expect(result.textBody).toContain("Reply with your findings as a JSON array, as your final message");
+    expect(result.textBody).toContain("Do not write or edit any file");
+    expect(result.textBody).not.toContain(".council/reviews/");
+    expect(result.textBody).not.toContain("observer.md");
     expect(result.droppedPaths).toEqual([]);
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -691,18 +698,158 @@ describe("assertWakeManifestPathAllowed (EC-7 wrapper)", () => {
 // handler body, regardless of the wrapper's name.
 
 describe("dispatchObserverWake call-site canary (Beck Council Rec 4)", () => {
-  it("session-orchestrator.handleCouncilCheckpoint invokes dispatchObserverWake in its body", () => {
-    const filePath = fileURLToPath(new URL("./session-orchestrator.ts", import.meta.url));
+  it("council-checkpoint-pipeline.handleCouncilCheckpoint invokes dispatchObserverWake in its body", () => {
+    // P4/C1a: the handler moved with the pipeline out of session-orchestrator.ts.
+    const filePath = fileURLToPath(new URL("./council-checkpoint-pipeline.ts", import.meta.url));
     const source = _readFileSync(filePath, "utf-8");
-    // Find the body of handleCouncilCheckpoint — anchored on the private
-    // method declaration, terminated by the next method declaration's
+    // Find the body of handleCouncilCheckpoint — anchored on the method
+    // declaration, terminated by the next method declaration's
     // signature OR the class brace. Using regex with `\w+` placeholders
     // per `feedback_static_grep_canary_regex_over_substring`.
-    const handlerStart = source.indexOf("private handleCouncilCheckpoint(");
+    const handlerStart = source.indexOf("  handleCouncilCheckpoint(sessionGroupId: string");
     expect(handlerStart).toBeGreaterThan(0);
     // Search the next 4000 characters of source — generous bound for the
     // handler body; if it grows beyond that, the canary is the canary.
     const handlerBody = source.slice(handlerStart, handlerStart + 4000);
     expect(handlerBody).toMatch(/this\.dispatchObserverWake\s*\(/);
+  });
+});
+
+// ── P3/B1: observer prompt = judgement only ─────────────────────────────────
+//
+// AC (specs/aura-meta-diet.md, Story B1): the observer system prompt is
+// ≤ 5 KB and carries no protocol — no review-file names, group ids, schema
+// versions or sequencing. The host owns all of that (`observer-reply.ts`).
+// Pinned against BOTH the workspace file and the bundled fallback, so a
+// protocol instruction cannot creep back in through either source.
+describe("observer system prompt budget (P3/B1)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+  const PROTOCOL_TERMS = [
+    "schema_version",
+    "observer_wake_payload_version",
+    "session_group_id",
+    "checkpoint_id",
+    "reviewed_at",
+    "observer_model",
+    "observer_cli_version",
+    ".council/reviews",
+    "observer.md",
+    "sequence",
+    "ObserverReviewPayload",
+    "Write` tool",
+  ];
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt is ≤ 5 KB and protocol-free", (_label, load) => {
+    const text = load();
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(5 * 1024);
+    for (const term of PROTOCOL_TERMS) {
+      expect(text, `prompt mentions protocol term ${term}`).not.toContain(term);
+    }
+    // The reply contract and the EC-13 observer-side Failsafe section stay.
+    expect(text).toContain("## Reply format");
+    expect(text).toContain("## Failsafe");
+  });
+});
+
+// Observed live (grp_879b81b6, 2026-10-15): a codex observer that could not
+// read checkpoint artifacts filed its OWN tooling failure as a NOTE finding
+// against the artifact, on every delivery — polluting reviews with
+// refusal loops instead of judging the work. The prompt must carry an
+// explicit rule: tooling failures are reported once, as INFO, with the
+// `OBSERVER-BLOCKED:` prefix, and never attributed to the work under
+// review. Both prompt sources must carry the rule or a relaunch can swap
+// it away.
+describe("observer prompt — tooling-failure ≠ finding rule", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt instructs OBSERVER-BLOCKED INFO reporting for tooling failures", (_label, load) => {
+    const text = load();
+    expect(text).toContain("OBSERVER-BLOCKED:");
+    // The rule must bind the failure mode to INFO severity, not NOTE/WARN/STOP.
+    expect(text).toMatch(/OBSERVER-BLOCKED[\s\S]{0,400}INFO|INFO[\s\S]{0,400}OBSERVER-BLOCKED/);
+  });
+});
+
+// Observer identity (handoff 2026-10-18 §4, council review 2026-10-18-1815
+// beck P2 / willison P2). The "Posture" / "What NOT to do" / "Closing rule"
+// sections moved into `.council/prompts/OBSERVER-SOUL.md`, which is spliced
+// into the system prompt at build time. Those rules were written after live
+// incidents (rubber stamp on checkpoint 148, the codex refusal loop) and the
+// SOUL is the highest-churn edit point for observer behaviour, so each
+// load-bearing rule gets a short, distinctive phrase canary on BOTH prompt
+// sources — a SOUL replaced by "You are a helpful reviewer." must go red.
+// The read-scope bound ("do not browse the tree beyond that") lives outside
+// the SOUL and is pinned here too: it is the only thing stopping the observer
+// from walking the repo on every wake.
+describe("observer prompt — identity rules carried by the SOUL (phrase canaries)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+  // Phrases are matched on whitespace-normalised text, so re-wrapping a line
+  // in the prompt does not break the canary — only losing the rule does.
+  const IDENTITY_PHRASES = [
+    "failure-mode independence", // reach your own conclusion from the same inputs
+    "STOP on evidence, never on suspicion",
+    "never invent a finding to earn a STOP",
+    "read-only, always",
+    "chat with the user or the other agent", // no chatting with the user OR the other agent
+    "never `dropped`", // cite only delta / carried
+    "No style bikeshedding",
+    "do not paraphrase the other agent",
+    "one finding = one defect",
+    "Do not browse the tree beyond that", // read scope, outside the SOUL
+  ];
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt carries every load-bearing identity rule", (_label, load) => {
+    const text = load().replace(/\s+/g, " ");
+    for (const phrase of IDENTITY_PHRASES) {
+      expect(text, `prompt lost the identity rule: ${JSON.stringify(phrase)}`).toContain(phrase);
+    }
+  });
+});
+
+// Observer rigor (2026-10-16). Rubber stamp: prod checkpoint 148 — the
+// observer read only the closure note and replied `[]`; the claims were
+// false. Language: Russian-speaking user, English-only claims. Both prompt
+// sources must carry the verify-before-pass and claim-language rules, and the
+// wake must permit (and ask for) opening the code an artifact cites.
+describe("observer prompt — verify-before-pass and claim language (observer rigor)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt requires opening every cited file:line before `[]` on closure checkpoints", (_label, load) => {
+    const text = load();
+    expect(text).toContain("## Verify before you pass");
+    expect(text).toMatch(/closure[\s\S]{0,200}already implemented/);
+    expect(text).toMatch(/EVERY `file:line`/);
+    expect(text).toContain("unverified");
+    expect(text).toMatch(/\*\*Language\.\*\*[\s\S]{0,200}`claim`[\s\S]{0,200}verbatim/);
+  });
+
+  it("the wake asks the observer to open cited code and allows it", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "wake-rigor-")));
+    try {
+      const result = buildObserverWakePayload({
+        checkpoint: { session_group_id: "grp_x", checkpoint_id: "c1", phase: "council-review", sequence: 1 },
+        manifest: { delta: [], carried: [], dropped: [] },
+        workspaceRoot: root,
+        observerProvider: "codex",
+        claimLanguage: "ru",
+      });
+      expect(result.textBody).not.toContain("Read only the workspace-relative paths");
+      expect(result.textBody).toMatch(/cites code \(`file:line`\), open that code and check it before you reply `\[\]`/);
+      expect(result.textBody).toContain("Write every `claim` in Russian (русский)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

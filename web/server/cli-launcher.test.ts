@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -128,13 +128,46 @@ vi.mock("./codex-home.js", async (importOriginal) => {
   };
 });
 
+vi.mock("./settings-manager.js", () => ({
+  getSettings: vi.fn(() => ({
+    anthropicApiKey: "",
+    anthropicModel: "claude-sonnet-4-6",
+    claudeCodeOAuthToken: "",
+    openaiApiKey: "",
+    onboardingCompleted: false,
+    linearApiKey: "",
+    linearAutoTransition: false,
+    linearAutoTransitionStateId: "",
+    linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+    linearOAuthClientId: "",
+    linearOAuthClientSecret: "",
+    linearOAuthWebhookSecret: "",
+    linearOAuthAccessToken: "",
+    linearOAuthRefreshToken: "",
+    aiValidationEnabled: false,
+    aiValidationAutoApprove: true,
+    aiValidationAutoDeny: false,
+    publicUrl: "",
+    updateChannel: "stable",
+    dockerAutoUpdate: false,
+    telemetryEnabled: false,
+    updatedAt: 0,
+  })),
+}));
+
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
-import { CliLauncher } from "./cli-launcher.js";
+import { CliLauncher, claudeTransportMode, shouldClearResumeAfterExit, resumeFailureThresholdFor, resumeTranscriptExists } from "./cli-launcher.js";
+import type { SdkSessionInfo } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import type { ClaudeAdapter } from "./claude-adapter.js";
+import * as settingsManager from "./settings-manager.js";
 import {
   writeRuntimeSidecar,
   sidecarPath,
@@ -156,8 +189,23 @@ function createMockProc(pid = 12345) {
     pid,
     kill: vi.fn(),
     exited: exitedPromise,
-    stdout: null,
-    stderr: null,
+    // The stdio transport writes frames to `stdin` (FileSink shape: write +
+    // flush + end) and pumps `stdout`. The WS transport ignores all three, so
+    // one mock shape serves both paths.
+    stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+    stdout: new ReadableStream<Uint8Array>({ start() {} }),
+    stderr: new ReadableStream<Uint8Array>({ start() {} }),
+  };
+}
+
+/**
+ * Minimal stand-in for the ClaudeAdapter the bridge would hand back. The
+ * launcher only ever calls these two members on it.
+ */
+function createStubClaudeAdapter() {
+  return {
+    handleRawMessage: vi.fn(),
+    handleTransportClose: vi.fn(),
   };
 }
 
@@ -219,6 +267,10 @@ beforeEach(() => {
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
   process.env.COMPANION_CODEX_TRANSPORT = "stdio";
+  // Claude defaults to stdio too (a current CLI rejects --sdk-url); the WS
+  // transport is still supported and is pinned explicitly by the tests that
+  // assert its argv shape.
+  delete process.env.COMPANION_CLAUDE_TRANSPORT;
   // CR-6 fix added `realpathSync(cwd)` inside resolveObserverPromptForSpawn —
   // canonicalise here so path-equality assertions don't diverge on macOS
   // (`/var/folders/...` vs `/private/var/folders/...`).
@@ -226,6 +278,9 @@ beforeEach(() => {
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
   launcher.setStore(store);
+  // index.ts wires this to WsBridge.handleCLIStdioOpen; the launcher refuses
+  // to spawn a stdio child it cannot hand to an adapter.
+  launcher.setStdioCliOpener(() => createStubClaudeAdapter() as unknown as ClaudeAdapter);
   mockSpawn.mockReturnValue(createMockProc());
   mockListen.mockImplementation(() => ({ stop: vi.fn() }));
   mockResolveBinary.mockReturnValue("/usr/bin/claude");
@@ -252,6 +307,9 @@ describe("launch", () => {
   });
 
   it("spawns CLI with correct --sdk-url and flags", () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     launcher.launch({ cwd: "/tmp/project" });
 
     expect(mockSpawn).toHaveBeenCalledOnce();
@@ -346,6 +404,9 @@ describe("launch", () => {
   });
 
   it("uses COMPANION_CONTAINER_SDK_HOST for containerized sdk-url when set", () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     process.env.COMPANION_CONTAINER_SDK_HOST = "172.17.0.1";
     launcher.launch({
       cwd: "/tmp/project",
@@ -452,6 +513,41 @@ describe("launch", () => {
     expect(info.containerCwd).toBe("/workspace/repo");
   });
 
+  it("codex observer spawns with a read-only sandbox (EC-1 enforcement at spawn)", () => {
+    // Codex sessions default to danger-full-access with approvalPolicy=never,
+    // so for the observer half of a council pair the system prompt used to be
+    // the ONLY thing standing between a prompt-injected observer and
+    // arbitrary writes. The observer's write surface is its final reply
+    // message (the server records the review), so a read-only sandbox loses
+    // nothing and turns the prompt rule into an enforced boundary.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({
+      // Real directory: observer prompt resolution lstats the cwd before
+      // falling back to the bundled prompt.
+      cwd: "/tmp",
+      backendType: "codex",
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_obs_sandbox",
+    });
+
+    expect(info.codexSandbox).toBe("read-only");
+  });
+
+  it("codex orchestrator keeps the caller's sandbox (no observer override)", () => {
+    // Negative control for the read-only override: the orchestrator half
+    // must not be silently downgraded.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({
+      cwd: "/tmp/project",
+      backendType: "codex",
+      sessionGroupRole: "orchestrator",
+      sessionGroupId: "grp_orch_sandbox",
+      codexSandbox: "workspace-write",
+    });
+
+    expect(info.codexSandbox).toBe("workspace-write");
+  });
+
   it("uses docker exec -i with bash -lc for containerized Claude sessions", () => {
     // bash -lc ensures ~/.bashrc is sourced so nvm-installed CLIs are on PATH
     launcher.launch({
@@ -512,7 +608,9 @@ describe("launch", () => {
     expect(cmdAndArgs).toContain("--enable");
     expect(cmdAndArgs).toContain("multi_agent");
     expect(cmdAndArgs).toContain("-c");
-    expect(cmdAndArgs).toContain("tools.webSearch=true");
+    // snake_case: codex 0.162 ignores camelCase `tools.webSearch` as an
+    // unrecognized setting (verified live) — web search silently stayed off.
+    expect(cmdAndArgs).toContain("tools.web_search=true");
     expect(options.cwd).toBe("/tmp/project");
   });
 
@@ -532,7 +630,7 @@ describe("launch", () => {
     expect(cmdAndArgs).toContain("--enable");
     expect(cmdAndArgs).toContain("multi_agent");
     expect(cmdAndArgs).toContain("-c");
-    expect(cmdAndArgs).toContain("tools.webSearch=false");
+    expect(cmdAndArgs).toContain("tools.web_search=false");
   });
 
   it("spawns codex via sibling node binary to bypass shebang issues", () => {
@@ -656,6 +754,66 @@ describe("state management", () => {
       // Should not throw
       launcher.markConnected("nonexistent");
     });
+
+    it("force-init-probe: emits session:cli-id-received when session already has cliSessionId (--resume respawn)", () => {
+      // 2026-09-10 fix: on respawn via --resume, the CLI may delay
+      // its `system.init` frame until first user input. Without
+      // this emit, post-grace council recovery (which listens on
+      // session:cli-id-received) never triggers, leaving groups
+      // stuck in `degraded` even though both halves are alive at
+      // PID level.
+      launcher.launch({ cwd: "/tmp" });
+      launcher.setCLISessionId("test-session-id", "cli-persisted-abc");
+
+      const events: Array<{ sessionId: string; cliSessionId: string }> = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(1);
+      expect(events[0]).toEqual({
+        sessionId: "test-session-id",
+        cliSessionId: "cli-persisted-abc",
+      });
+
+      off();
+    });
+
+    it("does NOT emit session:cli-id-received when session lacks cliSessionId (fresh spawn)", () => {
+      // On the very first spawn of a brand-new session, cliSessionId
+      // is not yet set — it will be populated by the CLI's system.init
+      // frame. The force-init-probe path must not fire an empty emit
+      // here; the natural init-driven emit is the source of truth.
+      launcher.launch({ cwd: "/tmp" });
+      // No setCLISessionId — this simulates fresh spawn.
+
+      const events: Array<{ sessionId: string; cliSessionId: string }> = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(0);
+      off();
+    });
+
+    it("markConnected called twice re-emits (idempotent downstream)", () => {
+      // The natural init-frame arrival can trigger session:cli-id-received
+      // AFTER markConnected already did. Both fires carry the same
+      // cliSessionId; downstream handlers (setCLISessionId, post-grace
+      // recovery) must be idempotent. This test asserts the emit-site
+      // behaviour: markConnected doesn't dedupe internally.
+      launcher.launch({ cwd: "/tmp" });
+      launcher.setCLISessionId("test-session-id", "cli-persisted-abc");
+
+      const events: unknown[] = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(2);
+      off();
+    });
   });
 
   describe("setCLISessionId", () => {
@@ -722,6 +880,27 @@ describe("state management", () => {
 
     it("returns undefined for unknown session", () => {
       expect(launcher.getSession("nonexistent")).toBeUndefined();
+    });
+  });
+
+  describe("markSweptTerminal", () => {
+    it("forces a swept session to a definitive terminal + archived state so it drops out of the sweep set", () => {
+      launcher.launch({ cwd: "/tmp" });
+      const before = launcher.getSession("test-session-id");
+      expect(before).toBeDefined();
+
+      launcher.markSweptTerminal("test-session-id");
+
+      const after = launcher.getSession("test-session-id");
+      // pid nulled + exited → boot recovery can never re-attach; archived → the
+      // stale-session / archived-leak classifiers no longer re-list it.
+      expect(after?.pid).toBeUndefined();
+      expect(after?.state).toBe("exited");
+      expect(after?.archived).toBe(true);
+    });
+
+    it("is a safe no-op for an unknown session", () => {
+      expect(() => launcher.markSweptTerminal("nonexistent")).not.toThrow();
     });
   });
 
@@ -834,6 +1013,265 @@ describe("kill", () => {
 // restart-reconcile reclaims an archived session). These assert kill() now
 // signals the inherited PID, gated by the same EC-45 identity check the
 // relaunch path uses (skip-on-mismatch favours a reclaimable leak over a
+// ─── stdio transport (default) ───────────────────────────────────────────────
+// Claude Code >= 2.1.121 rejects `--sdk-url` for non-Anthropic hosts, so the
+// WebSocket control channel is unusable with a current CLI. These cover the
+// stdio path that replaced it as the default.
+describe("stdio transport", () => {
+  afterEach(async () => {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.__resetProcReaderForTests();
+  });
+
+  it("spawns with stream-json over pipes and without --sdk-url or the headless -p prompt", () => {
+    launcher.launch({ cwd: "/tmp/project" });
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [cmdAndArgs, options] = mockSpawn.mock.calls[0];
+
+    expect(cmdAndArgs[0]).toBe("/usr/bin/claude");
+    // The rejected flag must not appear in any form.
+    expect(cmdAndArgs).not.toContain("--sdk-url");
+    expect(cmdAndArgs.join(" ")).not.toContain("ws://");
+    // `-p ""` would be consumed as the turn and the CLI would exit before
+    // reading stdin — the "spawns then immediately exits" shape.
+    expect(cmdAndArgs).not.toContain("-p");
+
+    // The protocol flags are identical to the WS shape.
+    expect(cmdAndArgs).toContain("--print");
+    expect(cmdAndArgs).toContain("--output-format");
+    expect(cmdAndArgs).toContain("stream-json");
+    expect(cmdAndArgs).toContain("--input-format");
+    expect(cmdAndArgs).toContain("--include-partial-messages");
+    expect(cmdAndArgs).toContain("--verbose");
+
+    // stdin must be piped — it carries every browser-originated frame.
+    expect(options.stdin).toBe("pipe");
+    expect(options.stdout).toBe("pipe");
+    expect(options.stderr).toBe("pipe");
+    expect(options.cwd).toBe("/tmp/project");
+  });
+
+  it("refuses to spawn when no stdio opener is wired", () => {
+    // A child whose stdout nobody pumps is an orphan that burns tokens and
+    // answers into the void, so the launcher must not create one.
+    const unwired = new CliLauncher(3456);
+    unwired.setStore(store);
+
+    const info = unwired.launch({ cwd: "/tmp/project" });
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(info.state).toBe("exited");
+    expect(info.exitCode).toBe(1);
+  });
+
+  it("stays 'starting' until the first frame arrives, then marks connected", async () => {
+    // Transport-open is not liveness: an open pipe only proves fork()
+    // succeeded. A CLI that dies on a rejected flag would otherwise read as
+    // connected forever.
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(c) { controller = c; },
+    });
+    const seen: string[] = [];
+    launcher.setStdioCliOpener(
+      () => ({
+        handleRawMessage: (chunk: string) => { seen.push(chunk); },
+        handleTransportClose: vi.fn(),
+      }) as unknown as ClaudeAdapter,
+    );
+    mockSpawn.mockReturnValue({
+      pid: 4242,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout,
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    const info = launcher.launch({ cwd: "/tmp/project" });
+    expect(info.state).toBe("starting");
+
+    const frame = JSON.stringify({ type: "system", subtype: "init" }) + "\n";
+    controller.enqueue(new TextEncoder().encode(frame));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+
+    expect(launcher.getSession(info.sessionId)?.state).toBe("connected");
+    expect(seen[0]).toContain('"subtype":"init"');
+  });
+
+  it("reassembles a frame split across two stdout chunks", async () => {
+    // A pipe can split a JSON frame at any byte; a WebSocket never could.
+    // Without line buffering the fragment is dropped silently by parseNDJSON.
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(c) { controller = c; },
+    });
+    const seen: string[] = [];
+    launcher.setStdioCliOpener(
+      () => ({
+        handleRawMessage: (chunk: string) => { seen.push(chunk); },
+        handleTransportClose: vi.fn(),
+      }) as unknown as ClaudeAdapter,
+    );
+    mockSpawn.mockReturnValue({
+      pid: 4243,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout,
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project" });
+
+    const enc = new TextEncoder();
+    controller.enqueue(enc.encode('{"type":"system","sub'));
+    // Nothing may be emitted yet — the line is incomplete.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toHaveLength(0);
+
+    controller.enqueue(enc.encode('type":"init"}\n'));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+    expect(seen.join("")).toContain('{"type":"system","subtype":"init"}');
+  });
+
+  // The adapter picks its init-frame canary deadline from whether the spawn is
+  // a resume (prod incident eb13fc90). Source of truth is the real argv, so the
+  // launcher must hand the opener `{ resume }` derived from `--resume` presence.
+  it("passes { resume: false } to the stdio opener for a COLD spawn", () => {
+    let capturedOpts: { resume?: boolean } | undefined = { resume: true }; // poison
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7001,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project" });
+
+    const cold = mockSpawn.mock.calls[0][0] as string[];
+    expect(cold).not.toContain("--resume");
+    expect(capturedOpts).toEqual({ resume: false });
+  });
+
+  it("passes { resume: true } to the stdio opener when spawning with --resume", () => {
+    let capturedOpts: { resume?: boolean } | undefined;
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7002,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project", resumeSessionId: "cli-resume-target" });
+
+    const argv = mockSpawn.mock.calls[0][0] as string[];
+    expect(argv).toContain("--resume");
+    expect(capturedOpts).toEqual({ resume: true });
+  });
+
+  // The bridge baselines model-switch persistence on the model the process
+  // ACTUALLY runs (Session.launcherModel). Source of truth is the real argv's
+  // --model, same as `resume` above — not a re-derived option value.
+  it("passes the argv --model to the stdio opener as spawnModel", () => {
+    let capturedOpts: { resume?: boolean; spawnModel?: string } | undefined;
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7003,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project", model: "claude-opus-4-8" });
+
+    const argv = mockSpawn.mock.calls[0][0] as string[];
+    expect(argv[argv.indexOf("--model") + 1]).toBe("claude-opus-4-8");
+    expect(capturedOpts?.spawnModel).toBe("claude-opus-4-8");
+  });
+
+  it("kills a restart-survived stdio process instead of waiting for a reconnect that cannot happen", async () => {
+    // stdio pipes die with the previous server process, so a surviving PID can
+    // never talk to us again. Leaving it "starting" strands a session that
+    // looks alive but is deaf — and leaks the process.
+    const sessionId = "stdio-survived-1";
+    store.saveLauncher([
+      {
+        sessionId,
+        pid: 55555,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-stdio-1",
+      },
+    ]);
+
+    // No --sdk-url token exists in stdio argv, so the sidecar hash is the
+    // identity anchor that makes the probe return `match`.
+    const stdioArgv = [
+      "/usr/bin/claude",
+      "--print",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+    ];
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 55555,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(stdioArgv),
+    });
+
+    const procStat = `1 (claude) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => stdioArgv.join("\0") + "\0",
+      readStat: () => procStat,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+
+      // Not "recovered": the identity matched, but the process is unreachable.
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(55555, "SIGTERM");
+
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+      // The conversation anchor survives, so the next message resumes it.
+      expect(restored?.cliSessionId).toBe("cli-stdio-1");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+});
+
 // collateral kill of a PID-reuse victim).
 describe("kill: restart-survived processes", () => {
   afterEach(async () => {
@@ -842,6 +1280,9 @@ describe("kill: restart-survived processes", () => {
   });
 
   it("kills a restart-survived Claude session by its inherited PID when identity verifies", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     store.saveLauncher([
       {
         sessionId: "survived-1",
@@ -890,6 +1331,9 @@ describe("kill: restart-survived processes", () => {
   });
 
   it("declines to signal a restart-survived PID when identity mismatches (leak-safe over wrong-kill)", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     store.saveLauncher([
       {
         sessionId: "survived-2",
@@ -938,10 +1382,14 @@ describe("kill: restart-survived processes", () => {
     killSpy.mockRestore();
   });
 
-  it("force-signals a restart-survived Codex session's inherited PID (best-effort, no argv factor)", async () => {
+  // P3-4: Codex boot recovery now runs the SAME identity probe as Claude
+  // before terminating the surviving app-server PID. `match` → SIGTERM (the
+  // proxy died with Bun, so the process is unreachable and must go).
+  it("terminates restart-survived Codex during restore when identity verifies (proxy died with Bun)", async () => {
+    const sessionId = "survived-codex";
     store.saveLauncher([
       {
-        sessionId: "survived-codex",
+        sessionId,
         pid: 99001,
         state: "connected" as const,
         cwd: "/tmp/project",
@@ -950,33 +1398,88 @@ describe("kill: restart-survived processes", () => {
         backendType: "codex" as const,
       },
     ]);
-    const newLauncher = new CliLauncher(3456);
-    newLauncher.setStore(store);
+    // Codex host spawns write the same argvSha256 + processStartMs sidecar as
+    // stdio Claude; that hash is the identity anchor (no --sdk-url token).
+    const codexArgv = ["/usr/local/bin/codex", "app-server", "--port", "45999"];
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99001,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(codexArgv),
+    });
+    const procStat = `1 (codex) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => codexArgv.join("\0") + "\0",
+      readStat: () => procStat,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
 
-    const origKill = process.kill;
-    let sigtermSent = false;
-    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
-      pid: number,
-      signal?: string | number,
-    ) => {
-      if (signal === 0) {
-        // Alive during the boot liveness probe; gone once SIGTERM landed.
-        if (sigtermSent) throw new Error("ESRCH");
-        return true;
-      }
-      if (signal === "SIGTERM") { sigtermSent = true; return true; }
-      return origKill.call(process, pid, signal as any);
-    }) as any);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+      expect(restored?.cliSessionId).toBe("cli-cx");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 
-    expect(newLauncher.restoreFromDisk()).toBe(1);
+  // P3-4 core: a reused PID whose argv no longer matches the spawn sidecar must
+  // NOT be SIGTERM'd (that was the collateral-kill hazard). The session still
+  // ends `exited` — our process is gone regardless — but the stranger lives.
+  it("does NOT SIGTERM a restart-survived Codex PID when identity mismatches (leak-safe over wrong-kill)", async () => {
+    const sessionId = "survived-codex-reuse";
+    store.saveLauncher([
+      {
+        sessionId,
+        pid: 99002,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-cx2",
+        backendType: "codex" as const,
+      },
+    ]);
+    // Sidecar records the argv we spawned…
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99002,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(["/usr/local/bin/codex", "app-server", "--port", "45999"]),
+    });
+    // …but the live PID is now an unrelated process (different argv) → mismatch.
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => ["/usr/bin/python3", "-m", "http.server"].join("\0") + "\0",
+      readStat: () => `1 (python3) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
 
-    const result = await newLauncher.kill("survived-codex");
-    expect(result).toBe(true);
-    // Codex has no argv identity factor → best-effort SIGTERM to the PID.
-    expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
-    expect(newLauncher.getSession("survived-codex")?.state).toBe("exited");
-
-    killSpy.mockRestore();
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      // The reused PID was NOT terminated.
+      expect(killSpy).not.toHaveBeenCalledWith(99002, "SIGTERM");
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 });
 
@@ -1021,7 +1524,11 @@ describe("relaunch", () => {
     expect(session?.state).toBe("starting");
   });
 
-  it("reuses launch env variables during relaunch", async () => {
+  // Non-auth launch env vars must survive relaunch untouched. (Claude AUTH
+  // vars are deliberately NOT reused — they are reconciled from global settings
+  // at relaunch, covered separately. We assert a neutral var here so this test
+  // exercises generic env reuse without colliding with the auth-var policy.)
+  it("reuses non-auth launch env variables during relaunch", async () => {
     let resolveFirst: (code: number) => void;
     const firstProc = {
       pid: 12345,
@@ -1036,7 +1543,7 @@ describe("relaunch", () => {
       cwd: "/tmp/project",
       containerId: "abc123def456",
       containerName: "companion-test",
-      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-test" },
+      env: { MY_CUSTOM_VAR: "custom-value" },
     });
 
     const secondProc = createMockProc(54321);
@@ -1047,7 +1554,74 @@ describe("relaunch", () => {
 
     const [relaunchCmd] = mockSpawn.mock.calls[1];
     expect(relaunchCmd).toContain("-e");
-    expect(relaunchCmd).toContain("CLAUDE_CODE_OAUTH_TOKEN=tok-test");
+    expect(relaunchCmd).toContain("MY_CUSTOM_VAR=custom-value");
+  });
+
+  it("injects Anthropic API key into claude relaunch when runtime env has no auth", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      ...vi.mocked(settingsManager.getSettings)(),
+      anthropicApiKey: "sk-ant-fallback",
+      claudeCodeOAuthToken: "",
+    });
+
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+
+    launcher.launch({
+      cwd: "/tmp/project",
+      env: {},
+    });
+
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result).toEqual({ ok: true });
+
+    const [, options] = mockSpawn.mock.calls[1];
+    expect(options.env.ANTHROPIC_API_KEY).toBe("sk-ant-fallback");
+  });
+
+  it("removes stale Claude auth env on relaunch when global Claude credentials are unset", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      ...vi.mocked(settingsManager.getSettings)(),
+      anthropicApiKey: "",
+      claudeCodeOAuthToken: "",
+    });
+
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+
+    launcher.launch({
+      cwd: "/tmp/project",
+      env: {
+        ANTHROPIC_API_KEY: "stale-api-key",
+      },
+    });
+
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result).toEqual({ ok: true });
+
+    const [, options] = mockSpawn.mock.calls[1];
+    expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(options.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
 
   it("returns error for unknown session", async () => {
@@ -1314,6 +1888,59 @@ describe("codex websocket launcher", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(4);
   });
 
+  // P4/FIX-AUTOHEAL-2 (b): spawnCodexWs awaits its port pick before
+  // Bun.spawn, and nobody awaits spawnCodexWs. A kill/archive/delete landing
+  // in that gap found no process in `processes` to signal, then the spawn went
+  // ahead — a live app-server for a session that should be down (orphan).
+  describe("a Codex WS spawn still picking its port (P4/FIX-AUTOHEAL-2)", () => {
+    function launchPendingCodexWs() {
+      process.env.COMPANION_CODEX_TRANSPORT = "ws";
+      mockResolveBinary.mockReturnValue("/opt/fake/codex");
+      mockSpawn.mockImplementation(() => createPendingCodexWsProxyProc(4100).proc);
+      // launch() runs spawnCodexWs synchronously up to the port-pick await.
+      return launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    }
+
+    it("kill in the gap cancels the spawn: no process starts and the session is exited", async () => {
+      const info = launchPendingCodexWs();
+      await expect(launcher.kill(info.sessionId)).resolves.toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+      // The port was never claimed, so it is free for the next spawn.
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("archive in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.setArchived(info.sessionId, true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+    });
+
+    it("delete in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.removeSession(info.sessionId);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("a relaunch in the gap supersedes the pending spawn: exactly one app-server + proxy pair starts", async () => {
+      const info = launchPendingCodexWs();
+      const relaunch = launcher.relaunch(info.sessionId);
+      await expect(relaunch).resolves.toEqual({ ok: true });
+      await new Promise((r) => setTimeout(r, 0));
+      // Two Bun.spawn calls = one codex app-server + its ws proxy (the
+      // relaunch's); the superseded launch spawned nothing.
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      // The superseded spawn did not flip the relaunch's session to exited.
+      expect(launcher.getSession(info.sessionId)?.state).not.toBe("exited");
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(1);
+    });
+  });
+
   it("relaunch with an unavailable codex model keeps the live session intact", async () => {
     // Council review P1 #2 — the requested model must be validated BEFORE the
     // running Codex process is killed. If resolution fails (model rejected /
@@ -1386,7 +2013,7 @@ describe("codex websocket launcher", () => {
     mockGetContainerById.mockReturnValue({
       containerId: "abc123def456",
       name: "companion-codex",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 4502, hostPort: 55021 }],
       hostCwd: "/tmp/project",
       containerCwd: "/workspace",
@@ -1449,8 +2076,28 @@ describe("codex onInitError model-rejection auto-respawn", () => {
   // retired), the launcher marks that model rejected for the session and
   // respawns on the next launchable fallback rather than surfacing a dead
   // session. The handler is registered on the CodexAdapter via onInitError; we
-  // capture the adapter off the bus and invoke its stored callback directly so
-  // the launcher branch is driven without standing up a full JSON-RPC init.
+  // capture the adapter off the bus and invoke its registered callbacks
+  // directly so the launcher branch is driven without standing up a full
+  // JSON-RPC init.
+  //
+  // `initErrorCbs` is a LIST, not a single slot (got-052): in production the
+  // launcher registers first and `WsBridge.attachAdapter` registers second,
+  // and while the adapter kept only the last callback the bridge silently
+  // disabled every recovery below — including this model-rejection respawn —
+  // for months.
+  //
+  // Council review 2026-09-08 #11 — honest scope: these tests only ever
+  // register ONE subscriber (the launcher's), so `fireInitError` over that
+  // one-element list does NOT exercise the multi-subscriber wiring; it drives
+  // the launcher's recovery branch in isolation. The proof that BOTH
+  // subscribers actually fire on a real init failure lives in
+  // `codex-adapter.test.ts` ("invokes EVERY onInitError subscriber…") and in
+  // the "two independent onInitError subscribers both run" test at the bottom
+  // of this describe, which registers a second subscriber through the public
+  // `onInitError` exactly as `ws-bridge.ts` does.
+  function fireInitError(adapter: any, error: string): void {
+    for (const cb of adapter.initErrorCbs as ((e: string) => void)[]) cb(error);
+  }
 
   it("WS: rejects the failing model and respawns with a launchable fallback", async () => {
     process.env.COMPANION_CODEX_TRANSPORT = "ws";
@@ -1483,9 +2130,13 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const info = launcher.getSession("test-session-id")!;
     expect(info.model).toBe("gpt-5.2-codex");
     const spawnCallsBefore = mockSpawn.mock.calls.length;
+    // Task A.2: the fallback must be announced (persistent notice), not silent.
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
 
     // Drive the init-error handler with a model-availability error.
-    capturedAdapter.initErrorCb(
+    fireInitError(
+      capturedAdapter,
       "Codex initialization failed: model gpt-5.2-codex is not available for this account",
     );
     await new Promise((r) => setTimeout(r, 0));
@@ -1497,6 +2148,9 @@ describe("codex onInitError model-rejection auto-respawn", () => {
       Array.from((launcher as any).rejectedCodexModels.get("test-session-id") ?? []),
     ).toContain("gpt-5.2-codex");
     expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ from: "gpt-5.2-codex", to: "gpt-5.1-codex-mini", reason: "rejected" }),
+    ]);
     // The respawn immediately re-enters spawnCodex, which marks the session
     // connected again — the meaningful guarantee is that it was NOT left exited.
     expect(info.state).not.toBe("exited");
@@ -1535,7 +2189,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const newer = createMockProc(9999);
     (launcher as any).processes.set("test-session-id", newer);
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.state).toBe(stateBefore);
@@ -1570,14 +2224,43 @@ describe("codex onInitError model-rejection auto-respawn", () => {
 
     const info = launcher.getSession("test-session-id")!;
     const spawnCallsBefore = mockSpawn.mock.calls.length;
+    // Task A.2: the stdio rejection fallback is announced too.
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available for this account");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available for this account");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ from: "gpt-5.2-codex", to: "gpt-5.1-codex-mini", reason: "rejected" }),
+    ]);
     expect(info.state).not.toBe("exited");
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("launch: a requested Codex slug that is not launchable announces the substitute (Task A.2)", async () => {
+    // selectLaunchableCodexModel returns `fallbackFrom` when the requested
+    // slug is not in the account's launchable list; the launcher used to
+    // swap silently. Now it emits session:model-fell-back (→ persistent banner).
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(8121) as any);
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-9-imaginary",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(launcher.getSession("test-session-id")!.model).toBe("gpt-5.2-codex");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ sessionId: "test-session-id", from: "gpt-9-imaginary", to: "gpt-5.2-codex", reason: "unavailable" }),
+    ]);
   });
 
   it("stdio: a non-availability init error marks the session exited without respawn", async () => {
@@ -1602,7 +2285,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const info = launcher.getSession("test-session-id")!;
     const spawnCallsBefore = mockSpawn.mock.calls.length;
 
-    capturedAdapter.initErrorCb("Codex initialization failed: ECONNREFUSED");
+    fireInitError(capturedAdapter, "Codex initialization failed: ECONNREFUSED");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.state).toBe("exited");
@@ -1637,12 +2320,58 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const newer = createMockCodexProc(9998);
     (launcher as any).processes.set("test-session-id", newer);
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(info.state).toBe(stateBefore);
     expect(info.model).toBe("gpt-5.2-codex");
+  });
+
+  // Council review 2026-09-08 #11: the additive-contract proof at the
+  // cli-launcher integration boundary. The launcher registers its handler at
+  // spawn (subscriber #1); production then registers a SECOND via
+  // `ws-bridge.ts`'s `adapter.onInitError?.(cb)`. This asserts the captured
+  // real adapter already carries the launcher's subscriber, that a second
+  // public registration is additive (not last-writer-wins, the got-052 bug),
+  // and that firing a real init error runs BOTH — the launcher's exit-marking
+  // AND the second subscriber. (The transport-level proof that a real codex
+  // init failure fans out to all subscribers lives in codex-adapter.test.ts.)
+  it("stdio: a second onInitError subscriber registered post-attach ALSO fires (additive contract)", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const codexProc1 = createMockCodexProc(8131);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    // The launcher's own subscriber is already registered from spawn.
+    expect(capturedAdapter.initErrorCbs.length).toBe(1);
+
+    // Register a second the way ws-bridge.ts does, via the public method.
+    let bridgeSawError: string | null = null;
+    capturedAdapter.onInitError?.((err: string) => { bridgeSawError = err; });
+    expect(capturedAdapter.initErrorCbs.length).toBe(2);
+
+    fireInitError(capturedAdapter, "Codex initialization failed: ECONNREFUSED");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Subscriber #1 (launcher): session marked exited.
+    expect(info.state).toBe("exited");
+    // Subscriber #2 (bridge-shaped): also ran — the got-052 regression would
+    // have silently dropped exactly one of these.
+    expect(bridgeSawError).toBe("Codex initialization failed: ECONNREFUSED");
   });
 });
 
@@ -1747,6 +2476,9 @@ describe("persistence", () => {
     });
 
     it("recovers sessions from the store", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [
         {
@@ -1804,6 +2536,9 @@ describe("persistence", () => {
     // mechanism was proven only in cli-runtime-sidecar.test.ts + the reaper.
     // This asserts a MATCHING sidecar drives a 3-factor `match` recovery.
     it("recovers via 3-factor probe when a matching runtime sidecar is present", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       const sessionId = "sidecar-match-1";
       store.saveLauncher([
         {
@@ -1857,6 +2592,9 @@ describe("persistence", () => {
     // probe (liveness + argv) AND surface the corruption via the structured
     // boot_probe.sidecar_corrupt WARN — not silently masquerade as absent.
     it("degrades to two-factor + WARNs boot_probe.sidecar_corrupt on a malformed sidecar", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       const sessionId = "sidecar-corrupt-1";
       store.saveLauncher([
         {
@@ -1981,55 +2719,59 @@ describe("persistence", () => {
 
       warnSpy.mockRestore();
     });
-
-    // Dual-backend contract (CLAUDE.md): host-mode Codex (`app-server`, no
-    // `--sdk-url`) must survive a server restart. The Claude-only argv factor
-    // would otherwise reap it on every restart. Codex backend routes to the
-    // liveness-only fallback, so an alive pid is recovered even though its
-    // argv would never satisfy the Claude identity probe.
-    it("recovers a host-mode Codex session whose argv lacks --sdk-url", async () => {
-      const savedSessions = [
+    it("terminates restart-survived host-mode Codex (+releases WS port) when identity verifies", async () => {
+      // Host-mode Codex is two processes: app-server plus Companion proxy/adapter.
+      // After Bun restarts only the app-server PID can survive, so PID liveness
+      // is not a usable connection signal — the session must end `exited` for a
+      // browser-triggered --resume, never stranded in `starting`. P3-4: the
+      // SIGTERM is now gated on the SAME identity probe Claude uses (a verifying
+      // Codex sidecar), so a reused PID isn't collateral-killed.
+      const sessionId = "codex-host-1";
+      store.saveLauncher([
         {
-          sessionId: "codex-host-1",
+          sessionId,
           pid: 33333,
           state: "connected" as const,
           cwd: "/tmp/project",
           createdAt: Date.now(),
           backendType: "codex" as const,
           cliSessionId: "codex-cli-xyz",
-          // host-mode: no containerId, no codexWsPort → falls to the pid branch.
+          codexWsPort: 4501,
         },
-      ];
-      store.saveLauncher(savedSessions);
-
-      // Liveness-only fallback uses the real process.kill(pid, 0); make it succeed.
-      const origKill = process.kill;
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
-        pid: number,
-        signal?: string | number,
-      ) => {
-        if (signal === 0) return true;
-        return origKill.call(process, pid, signal as any);
-      }) as any);
-      // Install a hostile identity reader that WOULD mismatch — proving the
-      // Codex path bypasses the identity probe entirely rather than passing it.
+      ]);
+      const codexArgv = ["codex", "app-server", "--listen", "127.0.0.1:0"];
+      writeRuntimeSidecar(store.directory, sessionId, {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        pid: 33333,
+        processStartMs: 1_700_000_000_000,
+        argvSha256: argvSha256(codexArgv),
+      });
+      const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
       const procIdentity = await import("./process-identity.js");
       procIdentity.setProcReaderForTests({
         platform: () => "linux",
-        killCheck: () => false, // would yield "gone" if the probe ran
-        readCmdline: () => ["codex", "app-server", "--listen", "127.0.0.1:0"].join("\0") + "\0",
+        killCheck: () => true,
+        readCmdline: () => codexArgv.join("\0") + "\0",
+        readStat: () => `1 (codex) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`,
+        readBootStat: () => `btime 1700000000\n`,
+        clkTck: 100,
       });
 
-      const newLauncher = new CliLauncher(3456);
-      newLauncher.setStore(store);
-      const recovered = newLauncher.restoreFromDisk();
-
-      expect(recovered).toBe(1);
-      const session = newLauncher.getSession("codex-host-1");
-      expect(session?.state).toBe("starting");
-      expect(session?.cliSessionId).toBe("codex-cli-xyz");
-
-      killSpy.mockRestore();
+      try {
+        const newLauncher = new CliLauncher(3456);
+        newLauncher.setStore(store);
+        const recovered = newLauncher.restoreFromDisk();
+        expect(recovered).toBe(0);
+        expect(killSpy).toHaveBeenCalledWith(33333, "SIGTERM");
+        const session = newLauncher.getSession(sessionId);
+        expect(session?.state).toBe("exited");
+        expect(session?.pid).toBeUndefined();
+        expect(session?.codexWsPort).toBeUndefined();
+        expect(session?.cliSessionId).toBe("codex-cli-xyz");
+      } finally {
+        killSpy.mockRestore();
+        procIdentity.__resetProcReaderForTests();
+      }
     });
 
     it("returns 0 when no store is set", () => {
@@ -2190,7 +2932,7 @@ describe("isCmdScript platform guard", () => {
   });
 });
 
-// Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
+// Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
 // integration test for `applyCouncilObserverSpawnConfig` through the
 // public `launch()` surface. Exercised on the Claude backend (the
 // codex variant lives in `codex websocket launcher` describe above
@@ -2535,6 +3277,129 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     expect(driftCalls).toHaveLength(0);
     warnSpy.mockRestore();
   });
+
+  // Codex observers RESUME their thread on relaunch (threadId =
+  // info.cliSessionId at spawnCodex), and codex re-sends the observer
+  // prompt as developerInstructions on thread/resume. Observed live
+  // (grp_879b81b6, 2026-10-15): the resumed thread's history still
+  // contains the OLD instructions plus the model's own replies made
+  // under them, and the model keeps following the old contract — the
+  // new prompt is delivered but has no effect. A same-source sha drift
+  // must therefore drop the thread and start fresh, so the only
+  // instructions the model has ever seen are the current ones.
+  it("codex observer starts a FRESH thread when the observer prompt sha drifts across relaunch (same source)", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    const promptPath = join(workspacePromptDir, "observer-system.md");
+    writeFileSync(promptPath, "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512));
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 7001,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(7002);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(7003);
+    const proxy2 = createPendingCodexWsProxyProc(7004);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    const info = launcher.launch({
+      backendType: "codex",
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_fresh_thread",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    // Simulate the established Codex thread from the first spawn.
+    launcher.setCLISessionId(info.sessionId, "thread-old-01");
+
+    // Edit the workspace prompt in place — same source, new sha.
+    writeFileSync(promptPath, "<!-- observer-system-prompt v1 -->\n\n" + "z".repeat(512));
+
+    const warnSpy = vi.spyOn(log, "warn");
+    const infoSpy = vi.spyOn(log, "info");
+    const result = await launcher.relaunch(info.sessionId);
+    expect(result.ok).toBe(true);
+
+    // The poisoned thread must not be resumed.
+    expect(info.cliSessionId).toBeUndefined();
+
+    // Same-source drift still logs WARN (forensic record, no refusal) …
+    const driftCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.source-drift",
+    );
+    expect(driftCalls).toHaveLength(1);
+    // … and the fresh-thread decision is a structured EC-9 log line.
+    const freshCalls = infoSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.fresh-thread",
+    );
+    expect(freshCalls).toHaveLength(1);
+    const payload = freshCalls[0][2] as Record<string, unknown>;
+    expect(payload.event).toBe("council.observer-prompt.fresh-thread");
+    expect(payload.sessionGroupId).toBe("grp_int_drift_fresh_thread");
+    expect(payload.sessionId).toBe(info.sessionId);
+    expect(payload.role).toBe("observer");
+    expect(payload.droppedThreadId).toBe("thread-old-01");
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  // Negative control: without prompt drift the codex observer keeps its
+  // thread across relaunch — dropping continuity on every restart would
+  // throw away the observer's review context for no reason.
+  it("codex observer keeps its thread across relaunch when the prompt is unchanged", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    writeFileSync(
+      join(workspacePromptDir, "observer-system.md"),
+      "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512),
+    );
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 7101,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(7102);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(7103);
+    const proxy2 = createPendingCodexWsProxyProc(7104);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    const info = launcher.launch({
+      backendType: "codex",
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_keep_thread",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    launcher.setCLISessionId(info.sessionId, "thread-keep-01");
+
+    const result = await launcher.relaunch(info.sessionId);
+    expect(result.ok).toBe(true);
+    expect(info.cliSessionId).toBe("thread-keep-01");
+  });
 });
 
 // Council Plan Bug B Cleanup Task 14: EC-19 static-grep canary anchoring
@@ -2637,7 +3502,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
   // Council Review 2026-05-15-1015 CR-8 (Backend P2): the typed
   // `session:relaunch-failed` channel contract is "relaunch-only" —
   // emit sites are confined to `cli-launcher.ts:relaunch()` and
-  // `session-orchestrator.ts:handleAutoRelaunch()`. Cold-start
+  // `session-recovery.ts:handleAutoRelaunch()`. Cold-start
   // (`cli-launcher.ts:launch()`) surfaces failures as REST 503 via
   // the orchestrator's spawn rollback; emitting from launch() would
   // race a listener that may not yet exist for the group. This canary
@@ -2646,7 +3511,9 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     const fs = await import("node:fs");
     const path = await import("node:path");
     const serverDir = path.join(__dirname);
-    const allowedFiles = new Set(["cli-launcher.ts", "session-orchestrator.ts"]);
+    // P4/C1d: `handleAutoRelaunch` moved verbatim from session-orchestrator.ts
+    // into session-recovery.ts; the contract (relaunch-only emit sites) is unchanged.
+    const allowedFiles = new Set(["cli-launcher.ts", "session-recovery.ts"]);
     const entries = fs.readdirSync(serverDir, { withFileTypes: true });
     const offending: Array<{ file: string; lineNum: number; line: string }> = [];
     const emitRegex = /companionBus\.emit\(\s*["']session:relaunch-failed["']/;
@@ -2665,7 +3532,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     }
     expect(
       offending,
-      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-orchestrator.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
+      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-recovery.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
     ).toEqual([]);
   });
 });
@@ -2829,27 +3696,68 @@ describe("prepareCodexHome auth.json seeding", () => {
     (launcher as unknown as { prepareCodexHome(home: string): void }).prepareCodexHome(codexHome);
   }
 
-  it("seeds auth.json into an empty session home", () => {
+  it("shares auth.json with the legacy home via symlink for a fresh session home", () => {
+    // A fresh home must SHARE the one canonical auth.json rather than copy it,
+    // so single-use OAuth refresh-token rotation done by any session stays
+    // consistent for all. The content is still readable through the link.
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"fresh"}');
   });
 
-  it("re-seeds auth.json when the legacy copy is newer than the session copy", () => {
+  it("propagates an IN-PLACE write through the shared symlink to the legacy file", () => {
+    // A write that follows the symlink (in-place, O_TRUNC) reaches the legacy
+    // file, so the NEXT new session seeds the live token. NOTE: this is NOT how
+    // codex actually refreshes — see the atomic-rename test below.
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"t0"}');
+    callPrepare();
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"rotated"}');
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"rotated"}');
+  });
+
+  it("does NOT propagate a token rotated via atomic rename (codex's real write path)", () => {
+    // Empirically confirmed via the codex binary string "failed to atomically
+    // replace secrets file at": codex refreshes by writing a tmp file and
+    // rename(2)-ing it over auth.json. rename does NOT follow the destination
+    // symlink — it replaces the symlink with an independent regular file in the
+    // session home, so the rotated token never reaches legacy. This is the known
+    // non-propagation limitation documented in prepareCodexHome.
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"t0"}');
+    callPrepare();
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    // Simulate codex's atomic replace: tmp + rename over the symlink path.
+    const tmp = join(codexHome, "auth.json.tmp");
+    writeFileSync(tmp, '{"token":"rotated"}');
+    renameSync(tmp, dest);
+    expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"t0"}');
+  });
+
+  it("reconverges a stale regular-file auth.json back to a symlink when legacy is same-or-newer", () => {
+    // After an atomic-rename refresh replaced the symlink with a regular file, a
+    // later `codex login` rewrites legacy (newer). The next spawn drops the stale
+    // copy and re-shares legacy so idle sessions read the live token again.
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "auth.json"), '{"token":"stale"}');
-    writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"relogin"}');
     // legacy newer by 1 hour
     const now = Date.now() / 1000;
     utimesSync(join(codexHome, "auth.json"), now - 3600, now - 3600);
     utimesSync(join(legacyDir, "auth.json"), now, now);
 
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"relogin"}');
   });
 
   it("does NOT clobber a session auth.json that is newer than the legacy file", () => {
-    // The live CLI refreshes its own copy; an older legacy file must not win.
+    // The live CLI refreshes its own copy via atomic rename (regular file newer
+    // than legacy). Clobbering it would strand the session, and the server must
+    // not write the shared legacy credential, so it is preserved untouched.
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "auth.json"), '{"token":"session-refreshed"}');
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"older-legacy"}');
@@ -2858,7 +3766,11 @@ describe("prepareCodexHome auth.json seeding", () => {
     utimesSync(join(legacyDir, "auth.json"), now - 3600, now - 3600);
 
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"session-refreshed"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"session-refreshed"}');
+    // legacy must remain untouched (no server-side write of the shared credential)
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"older-legacy"}');
   });
 
   it("does NOT re-seed non-auth files even when the legacy copy is newer", () => {
@@ -2878,5 +3790,553 @@ describe("prepareCodexHome auth.json seeding", () => {
     mockLegacyCodexHome.path = "/nonexistent-legacy-codex-home";
     callPrepare();
     expect(() => readFileSync(join(codexHome, "auth.json"), "utf-8")).toThrow();
+  });
+});
+
+// §7.1 hardening: a single fast resume-death must NOT destroy cliSessionId.
+// The pure decision helper is unit-tested directly so the threshold logic is
+// pinned without wrestling the spawn/relaunch harness. Regression guard for the
+// stdio-transport cutover, where a transient/version mismatch looks identical to
+// a genuinely dead --resume target.
+describe("shouldClearResumeAfterExit", () => {
+  function mkSession(overrides: Partial<SdkSessionInfo> = {}): SdkSessionInfo {
+    return {
+      sessionId: "s",
+      state: "exited",
+      cwd: "/tmp",
+      createdAt: Date.now(),
+      cliSessionId: "cli-abc",
+      ...overrides,
+    };
+  }
+
+  it("does NOT clear on the first fast resume-death (transient/version hiccup absorbed)", () => {
+    const session = mkSession();
+    // uptime under the window, resuming: suspicious but not conclusive.
+    expect(shouldClearResumeAfterExit(session, 1200, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(1);
+  });
+
+  it("clears only after a second consecutive fast resume-death", () => {
+    const session = mkSession();
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(false);
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(true);
+    expect(session.resumeImmediateFailures).toBe(2);
+  });
+
+  it("resets the counter when a spawn lives past the window (resume worked)", () => {
+    const session = mkSession({ resumeImmediateFailures: 1 });
+    // A healthy spawn that outlived the window clears the streak.
+    expect(shouldClearResumeAfterExit(session, 30_000, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(0);
+    // A subsequent fresh fast death starts counting from zero again.
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(1);
+  });
+
+  it("never counts a fast death that was not a resume", () => {
+    const session = mkSession({ cliSessionId: undefined });
+    // No --resume in play: a fast death is a normal fresh-spawn failure, and
+    // there is no conversation reference to protect.
+    expect(shouldClearResumeAfterExit(session, 200, false)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(0);
+  });
+
+  // P2-1: a caller-injected higher threshold (transcript present) tolerates more
+  // fast deaths before discarding the anchor, but still discards eventually.
+  it("honours a higher injected threshold before discarding (transcript-present path)", () => {
+    const session = mkSession();
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 1
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 2 — base would have discarded here
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 3
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(true);  // 4 — fresh-start fallback still fires
+    expect(session.resumeImmediateFailures).toBe(4);
+  });
+});
+
+// P2-1: pure threshold selector — a present transcript (Claude only) earns a
+// higher discard bar; Codex and absent transcripts keep the base threshold.
+describe("resumeFailureThresholdFor", () => {
+  it("gives Claude with a present transcript the elevated threshold (4)", () => {
+    expect(resumeFailureThresholdFor("claude", true)).toBe(4);
+  });
+  it("keeps the base threshold (2) for Claude without a transcript", () => {
+    expect(resumeFailureThresholdFor("claude", false)).toBe(2);
+  });
+  it("keeps the base threshold (2) for Codex even with a transcript (no jsonl resume model)", () => {
+    expect(resumeFailureThresholdFor("codex", true)).toBe(2);
+  });
+  it("treats an undefined backend as non-Codex (elevated when transcript present)", () => {
+    expect(resumeFailureThresholdFor(undefined, true)).toBe(4);
+  });
+});
+
+// P2-1: transcript-existence predicate with injected stat (EC-7).
+describe("resumeTranscriptExists", () => {
+  it("returns true when the transcript file exists with content", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => ({ size: 4096 }))).toBe(true);
+  });
+  it("returns false for an empty (0-byte) transcript", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => ({ size: 0 }))).toBe(false);
+  });
+  it("returns false when stat throws (missing/unreadable → cannot confirm)", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => { throw new Error("ENOENT"); })).toBe(false);
+  });
+});
+
+// aura-meta-diet P4/C3 — layer flags at spawn. Validates the launcher half of
+// the contract: default flags leave argv byte-identical (prod parity),
+// knowledge/council OFF add Claude permission deny rules + one appended
+// directive, the flags persist on SdkSessionInfo and survive relaunch, and
+// Codex (no per-tool deny flag) receives the directive as thread instructions.
+describe("layer flags at spawn (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+
+  function argvOf(call: number): string[] {
+    return mockSpawn.mock.calls[call][0] as string[];
+  }
+  function denyRules(argv: string[]): string[] {
+    return argv.flatMap((a, i) => (a === "--disallowedTools" ? [argv[i + 1]] : []));
+  }
+
+  it("default flags produce the same argv as a launch without flags", () => {
+    // Prod parity: a session created through the flag-aware route (which
+    // always passes resolved flags) must spawn exactly like before C3.
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6" });
+    const baseline = argvOf(0);
+    // Fresh proc: the default mock proc's stdout stream can only be read once.
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6", layers: ALL_ON });
+    expect(argvOf(1)).toEqual(baseline);
+    expect(baseline).not.toContain("--append-system-prompt");
+  });
+
+  it("knowledge=off denies KB file access + KB skills and appends one directive", () => {
+    const info = launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    const argv = argvOf(0);
+    const rules = denyRules(argv);
+    expect(rules).toEqual(expect.arrayContaining([
+      "Read(./.agents/knowledge/**)",
+      "Edit(./.agents/knowledge/**)",
+      "Write(./.agents/knowledge/**)",
+      "Skill(prime)",
+      "Skill(learn)",
+      "Skill(self-reflect)",
+    ]));
+    // council stays on → no council skill denied
+    expect(rules.some((r) => r.startsWith("Skill(council-"))).toBe(false);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("knowledge layer is disabled");
+    // persisted for relaunch
+    expect(info.layers).toEqual({ ...ALL_ON, knowledge: false });
+  });
+
+  // aura-meta-diet AP-WIRE: the validated auto-proceed opt-in is stored on the
+  // orchestrator-half's info (persisted with the launcher state, so it
+  // survives relaunch/restart) and dropped for every other session — a
+  // non-orchestrator session must never carry an arm-able opt-in.
+  it("stores autoProceedOnIdle only on a council orchestrator-half", () => {
+    const opt = { idleMs: 60_000, maxIterations: 3 };
+    const orch = launcher.launch({
+      cwd: "/tmp/project",
+      sessionGroupId: "grp_0123456789abcdef0123456789abcdef",
+      sessionGroupRole: "orchestrator",
+      autoProceedOnIdle: opt,
+    });
+    expect(orch.autoProceedOnIdle).toEqual(opt);
+    // (An observer-half launch needs real council prompt files; the solo case
+    // below exercises the same `role !== "orchestrator"` branch.)
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    const solo = launcher.launch({ cwd: "/tmp/project", autoProceedOnIdle: opt });
+    expect(solo.autoProceedOnIdle).toBeUndefined();
+  });
+
+  it("council=off denies every council skill", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, council: false } });
+    const rules = denyRules(argvOf(0));
+    expect(rules).toEqual(expect.arrayContaining([
+      "Skill(council-review)",
+      "Skill(council-review-aura)",
+      "Skill(council-plan-aura)",
+      "Skill(_council-experts)",
+    ]));
+    expect(rules).not.toContain("Skill(prime)");
+  });
+
+  it("observer role keeps its profile and gets the layer directive composed into the single append flag", () => {
+    // Observer overrides REPLACE disallowedTools; layer rules must be added
+    // on top (never dropped), and the prompt must stay one flag (a second
+    // --append-system-prompt would silently last-win on the CLI).
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_c3_obs",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    const argv = argvOf(0);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    const body = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(body).toContain("knowledge layer is disabled");
+    expect(body.length).toBeGreaterThan("# Aura layer flags".length + 200); // observer prompt still there
+    expect(denyRules(argv)).toContain("Skill(prime)");
+  });
+
+  it("relaunch re-applies the persisted deny rules (directive skipped on --resume)", async () => {
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    launcher.setCLISessionId("test-session-id", "cli-resume-id");
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    const argv = argvOf(1);
+    expect(argv).toContain("--resume");
+    expect(denyRules(argv)).toContain("Read(./.agents/knowledge/**)");
+    // CR-3 rule: the prompt is baked at the original spawn; not re-emitted on resume.
+    expect(argv).not.toContain("--append-system-prompt");
+  });
+
+  it("codex: knowledge=off reaches the adapter as thread instructions", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({
+      cwd: "/tmp/project",
+      backendType: "codex",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured).toBeDefined();
+    expect(captured.options.systemPrompt).toContain("knowledge layer is disabled");
+  });
+
+  it("codex: default flags leave instructions unset", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: ALL_ON });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.options.systemPrompt).toBeUndefined();
+  });
+
+  // aura-diet 2026-10: the KB is consulted on demand. The opt-in
+  // `kbAutoPrime` directive reaches the agent only when asked for, never the
+  // observer half, and is persisted for relaunch.
+  it("kbAutoPrime: absent → no directive; opted-in → one appended directive, persisted", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: ALL_ON });
+    expect(argvOf(0)).not.toContain("--append-system-prompt");
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    const info = launcher.launch({ cwd: "/tmp/project", layers: ALL_ON, kbAutoPrime: true });
+    const argv = argvOf(1);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("/prime");
+    expect(info.kbAutoPrime).toBe(true);
+  });
+
+  it("kbAutoPrime is ignored when the knowledge layer is off", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false }, kbAutoPrime: true });
+    const body = argvOf(0)[argvOf(0).indexOf("--append-system-prompt") + 1];
+    expect(body).toContain("knowledge layer is disabled");
+    expect(body).not.toContain("Before starting work in this session");
+  });
+
+  it("kbAutoPrime never reaches a council observer half", () => {
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_kb_obs",
+      layers: ALL_ON,
+      kbAutoPrime: true,
+    });
+    const body = argvOf(0)[argvOf(0).indexOf("--append-system-prompt") + 1];
+    expect(body).not.toContain("Before starting work in this session");
+  });
+
+  it("codex: kbAutoPrime reaches the adapter as thread instructions", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: ALL_ON, kbAutoPrime: true });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.options.systemPrompt).toContain("/prime");
+  });
+
+  it("codex: the directive survives a relaunch that resumes the thread (FIX-C3-1)", async () => {
+    // On stdio every server restart relaunches with the persisted thread id.
+    // The relaunched adapter must still carry the directive AND the thread
+    // id, so CodexAdapter re-sends it as developerInstructions on
+    // thread/resume (adapter half covered in codex-adapter.test.ts).
+    let resolveFirst!: (code: number) => void;
+    mockSpawn.mockReturnValueOnce({
+      ...createMockCodexProc(4001),
+      kill: vi.fn(() => resolveFirst(0)),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+    });
+    const adapters: any[] = [];
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { adapters.push(adapter); });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: { ...ALL_ON, council: false } });
+    await new Promise((r) => setTimeout(r, 0));
+    launcher.setCLISessionId("test-session-id", "thr_persisted");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(4002));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const relaunched = adapters[adapters.length - 1];
+    expect(adapters.length).toBeGreaterThanOrEqual(2);
+    expect(relaunched.options.threadId).toBe("thr_persisted");
+    expect(relaunched.options.systemPrompt).toContain("council layer is disabled");
+  });
+});
+
+// SEC-S3: index.ts closes the token-less `/ws/cli/:id` endpoint whenever this
+// returns "stdio", so the default must stay stdio and only an explicit
+// (case-insensitive) "ws" may reopen it — anything else fails closed.
+describe("claudeTransportMode", () => {
+  afterEach(() => { delete process.env.COMPANION_CLAUDE_TRANSPORT; });
+
+  it("defaults to stdio when unset", () => {
+    delete process.env.COMPANION_CLAUDE_TRANSPORT;
+    expect(claudeTransportMode()).toBe("stdio");
+  });
+
+  it("returns ws only for an explicit ws value", () => {
+    process.env.COMPANION_CLAUDE_TRANSPORT = "WS";
+    expect(claudeTransportMode()).toBe("ws");
+  });
+
+  it("falls back to stdio for unrecognised values", () => {
+    for (const v of ["websocket", "1", "true", " ws"]) {
+      process.env.COMPANION_CLAUDE_TRANSPORT = v;
+      expect(claudeTransportMode()).toBe("stdio");
+    }
+  });
+});
+
+// Prompt-cache prefix stability (audit-prompt-caching methodology, W8/CI).
+// Everything Aura puts on the Claude spawn argv — model, permission mode,
+// tool gates and, above all, the `--append-system-prompt` body — lands in the
+// CACHED prompt prefix. Any per-launch volatile byte (a timestamp, the session
+// id, a temp path, a random nonce) would make every spawn/relaunch a full
+// cache miss. These tests render the argv for fixed session configs and fail
+// if (a) it differs between two launches at different wall-clock times and
+// cwds, (b) it contains volatile-looking content, or (c) it drifts from the
+// pinned snapshot. A deliberate change to the appended directive updates the
+// snapshot (`vitest -u`) and is reviewed as a cache-prefix change.
+describe("prompt-cache prefix stability of the claude spawn argv", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+
+  /** Replace prompt bodies with a short content hash so the snapshot stays readable. */
+  async function render(argv: string[]): Promise<string[]> {
+    const { createHash } = await import("node:crypto");
+    return argv.map((a, i) =>
+      argv[i - 1] === "--append-system-prompt"
+        ? `<prompt sha256:${createHash("sha256").update(a, "utf8").digest("hex").slice(0, 16)} len:${a.length}>`
+        : a,
+    );
+  }
+
+  /** Launch the same config twice — different cwd, different wall-clock — and return both argvs. */
+  function launchTwice(opts: Record<string, unknown>): [string[], string[]] {
+    // Real directories: the observer path resolves (realpath) its cwd.
+    const cwdA = join(tempDir, "project-a");
+    const cwdB = join(tempDir, "project-b");
+    mkdirSync(cwdA, { recursive: true });
+    mkdirSync(cwdB, { recursive: true });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-01-01T00:00:00Z"));
+      launcher.launch({ cwd: cwdA, ...opts });
+      mockSpawn.mockReturnValueOnce(createMockProc(22346));
+      vi.setSystemTime(Date.parse("2026-10-16T13:37:42Z"));
+      launcher.launch({ cwd: cwdB, ...opts });
+    } finally {
+      vi.useRealTimers();
+    }
+    return [mockSpawn.mock.calls[0][0] as string[], mockSpawn.mock.calls[1][0] as string[]];
+  }
+
+  /** Patterns that must never appear in the cached prefix. */
+  const VOLATILE = [
+    /\b20\d\d-\d\d-\d\dT\d\d:\d\d/, // ISO timestamps
+    /\b1[6-9]\d{11}\b/, // epoch ms
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, // UUIDs
+    /test-session-id/, // the (mocked) Aura session id
+    /project-[ab]/, // the cwd
+    /launcher-test-/, // the per-run temp root
+  ];
+
+  function assertNoVolatile(argv: string[]): void {
+    for (const a of argv) {
+      for (const re of VOLATILE) expect(a, `volatile ${re} in argv element`).not.toMatch(re);
+    }
+  }
+
+  it("the volatile-content guard actually trips (self-test)", () => {
+    // Guards the guard: an appended prompt with a timestamp must fail.
+    expect(() => assertNoVolatile(["--append-system-prompt", "Now: 2026-10-16T13:37:42Z"])).toThrow();
+  });
+
+  it("solo session (defaults): argv is time/cwd-independent and pinned", async () => {
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", permissionMode: "acceptEdits", layers: ALL_ON });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchInlineSnapshot(`
+      [
+        "/usr/bin/claude",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--model",
+        "claude-opus-4-8",
+        "--permission-mode",
+        "acceptEdits",
+      ]
+    `);
+  });
+
+  it("knowledge layer off + KB auto-prime: the appended directive is static and pinned", async () => {
+    const [a, b] = launchTwice({
+      model: "claude-opus-4-8",
+      permissionMode: "acceptEdits",
+      layers: { ...ALL_ON, knowledge: false },
+      kbAutoPrime: true,
+    });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchSnapshot();
+  });
+
+  it("KB auto-prime opt-in (all layers on): the auto-prime directive is static and pinned", async () => {
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", permissionMode: "acceptEdits", layers: ALL_ON, kbAutoPrime: true });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchSnapshot();
+  });
+
+  it("council observer: the bundled observer prompt carries no volatile bytes", async () => {
+    // cwd without .council/ → bundled prompt. The body itself is pinned by its
+    // own sha in observer-prompt tests; here we only require determinism.
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", sessionGroupRole: "observer", sessionGroupId: "grp_prefix" });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(a.filter((x) => x === "--append-system-prompt")).toHaveLength(1);
+  });
+});
+
+// ─── W2: boot resume of sessions alive before a restart ─────────────────────
+// Prod 2026-10-15/16: after `systemctl restart aura-companion`, stdio Claude and
+// host Codex sessions came back `exited` (their pipes / proxy died with the old
+// server) and stayed down until a browser opened them — an orchestrator with no
+// tab open was dead for ~2 h and a CLI cron missed its 06:30 run. Council pairs
+// were worse: graceful shutdown KILLS both halves (shutdownAllGroups), which
+// persists them as `exited`, indistinguishable from a really-dead session.
+// These tests pin which sessions the launcher hands the orchestrator for a
+// proactive `--resume` at boot.
+describe("W2 boot resume candidates", () => {
+  afterEach(async () => {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.__resetProcReaderForTests();
+  });
+
+  /** Every inherited PID reads as gone (the CLI died with the old server). */
+  async function allPidsGone() {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({ platform: () => "linux", killCheck: () => false });
+  }
+
+  it("returns sessions that were alive before the restart and came back exited — Claude and Codex", async () => {
+    await allPidsGone();
+    store.saveLauncher([
+      // Alive at shutdown (crash / plain stdio session): persisted non-exited.
+      { sessionId: "claude-live", pid: 101, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      { sessionId: "codex-live", pid: 102, state: "running", cwd: "/tmp", createdAt: 1, cliSessionId: "t1", backendType: "codex" },
+      // Council half killed BY the graceful shutdown: exited + boot mark.
+      { sessionId: "observer-killed-by-shutdown", state: "exited", exitCode: 143, cwd: "/tmp", createdAt: 1, cliSessionId: "t2", backendType: "codex", resumeOnBoot: true },
+      // Really down before the restart (user stop, crash budget spent, idle-kill).
+      { sessionId: "was-down", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c3" },
+      // Archived sessions never come back, mark or not.
+      { sessionId: "archived", pid: 103, state: "connected", archived: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c4" },
+      { sessionId: "archived-marked", state: "exited", archived: true, resumeOnBoot: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c5" },
+      // Nothing to resume: never got a CLI session id.
+      { sessionId: "no-conversation", pid: 104, state: "connected", cwd: "/tmp", createdAt: 1 },
+    ]);
+    const fresh = new CliLauncher(3456);
+    fresh.setStore(store);
+    fresh.restoreFromDisk();
+
+    expect(fresh.takeBootResumeCandidates()).toEqual(["claude-live", "codex-live", "observer-killed-by-shutdown"]);
+    // One-shot: the orchestrator schedules the boot resume at most once.
+    expect(fresh.takeBootResumeCandidates()).toEqual([]);
+    // The mark is consumed so it cannot resurrect the session on a later boot.
+    expect(fresh.getSession("observer-killed-by-shutdown")?.resumeOnBoot).toBeUndefined();
+  });
+
+  it("leaves a session restored as `starting` (WS transport reconnect) to the reconnection watchdog", async () => {
+    // WS transport: a surviving CLI with a matching identity re-dials the new
+    // server; it must not ALSO be boot-resumed (double spawn).
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
+    // No /proc (identity `unavailable`) → legacy liveness probe says alive.
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({ platform: () => "darwin" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      store.saveLauncher([
+        { sessionId: "ws-live", pid: 201, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      ]);
+      const fresh = new CliLauncher(3456);
+      fresh.setStore(store);
+      fresh.restoreFromDisk();
+      expect(fresh.getSession("ws-live")?.state).toBe("starting");
+      expect(fresh.takeBootResumeCandidates()).toEqual([]);
+    } finally {
+      killSpy.mockRestore();
+      delete process.env.COMPANION_CLAUDE_TRANSPORT;
+    }
+  });
+
+  it("markLiveForBootResume persists a mark on live + keepalive-pending sessions only, before the shutdown kills them", async () => {
+    await allPidsGone();
+    store.saveLauncher([
+      { sessionId: "live", pid: 301, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      { sessionId: "crashed-keepalive-pending", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c2" },
+      { sessionId: "down", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c3" },
+      { sessionId: "user-stopped", pid: 302, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c4" },
+      { sessionId: "archived", pid: 303, state: "connected", archived: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c5" },
+    ]);
+    // Simulate the running server: load the records, then flip states the way
+    // the live process sees them (restore marks gone PIDs exited).
+    const running = new CliLauncher(3456);
+    running.setStore(store);
+    running.restoreFromDisk();
+    running.getSession("live")!.state = "connected";
+    // A user stop killed it (exited). Even listed as keepalive-pending, the
+    // exclude predicate wins: a user-stopped session stays down.
+    running.getSession("user-stopped")!.state = "exited";
+
+    const marked = running.markLiveForBootResume(
+      ["crashed-keepalive-pending", "user-stopped"],
+      (id) => id === "user-stopped",
+    );
+    expect(marked).toBe(2);
+
+    // Shutdown then kills the live session (council teardown): exited on disk.
+    running.getSession("live")!.state = "exited";
+    (running as unknown as { persistState(): void }).persistState();
+
+    const next = new CliLauncher(3456);
+    next.setStore(store);
+    next.restoreFromDisk();
+    expect(next.takeBootResumeCandidates()).toEqual(["live", "crashed-keepalive-pending"]);
   });
 });

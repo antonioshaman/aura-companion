@@ -1,5 +1,7 @@
 # Spec: Council Experts Catalog v2 — multi-stack expansion + chair-side panel selection
 
+> **Amended 2026-09-28 (aura-meta-diet A1):** `/self-improvement` was removed from the canonical orchestrator sequence — `/learn` is the single learning-capture path. The sequence is now 8 steps.
+
 **Date:** 2026-05-15
 **Status:** Draft
 
@@ -342,7 +344,7 @@ Each phase here can be extracted into its own Feature-tier spec when ready for i
 - **(confirmed)** Prompts get upgraded during consolidation — β AC-3.2 byte-identity floor is intentionally broken. New floor is semantic-coverage (every old concern present in merged new prompt).
 - **(confirmed)** v2 architecture (LangGraph Brahman, CrewAI runtime, AutoGen debates, OpenDevin executors, vector memory, MCP RUNTIME) is roadmap context only; out of v1 scope. MCP/pydantic-ai LENS becomes its own ID (`colvin`), separate from `willison` (LLM pipeline).
 - **(confirmed)** Rename picks: `a11y→watson` (Léonie Watson), `frontend-react→abramov` (Dan Abramov, absorbing generic frontend), `subprocess+persistence-fs→ritchie` (Dennis Ritchie), `deploy-docker-gha+deploy-vps→hashimoto` (Mitchell Hashimoto), `backend-ts+realtime-ndjson→dahl` (Ryan Dahl), `backend-python→vanrossum` (Guido van Rossum), `telegram-ux→durov` (Nikolay Durov).
-- **(confirmed)** Council Mode runs the canonical 9-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /self-improvement → /learn → /self-reflect`) with Orchestrator + Observer pair operating bidirectionally — Observer reviews task N's commit in parallel with Orchestrator's task N+1 plan. Convergence after 2-3 cycles + green CI.
+- **(confirmed)** Council Mode runs the canonical 8-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /learn → /self-reflect`) with Orchestrator + Observer pair operating bidirectionally — Observer reviews task N's commit in parallel with Orchestrator's task N+1 plan. Convergence after 2-3 cycles + green CI.
 - **(confirmed)** Stack detection uses BOTH anchor-file presence AND content inspection. Two-phase detector:
   - **Phase A (anchor):** file presence → first-pass tags (e.g. `package.json` exists → `js`).
   - **Phase B (content):** parse anchor files for richer signals — `react`/`vue`/`svelte` in `package.json` deps → `react`/`frontend-other`; `pydantic-ai` in `pyproject.toml` → `mcp`; `laravel/framework` in `composer.json` → `php-laravel`; `@modelcontextprotocol/sdk` → `mcp`.

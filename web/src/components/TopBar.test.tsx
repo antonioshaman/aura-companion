@@ -156,6 +156,17 @@ describe("TopBar", () => {
     expect(storeState.setActiveTab).toHaveBeenCalledWith("chat");
   });
 
+  it("exposes a stable data-testid='topbar' anchor for layout regression guards", () => {
+    // council-pair-layout-stability spec: the regression tests + agent-browser
+    // discovery script select the TopBar via [data-testid="topbar"] to assert
+    // getBoundingClientRect().top === 0. Renaming/removing this attribute would
+    // silently blind that guard, so it is pinned here.
+    const { container } = render(<TopBar />);
+    const header = container.querySelector('[data-testid="topbar"]');
+    expect(header).not.toBeNull();
+    expect(header?.tagName).toBe("HEADER");
+  });
+
   it("passes axe accessibility checks", async () => {
     const { axe } = await import("vitest-axe");
     resetStore();

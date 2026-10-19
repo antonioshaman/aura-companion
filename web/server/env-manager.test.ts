@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -264,5 +264,25 @@ describe("deleteEnv", () => {
   it("returns false when the env does not exist", () => {
     const result = envManager.deleteEnv("missing");
     expect(result).toBe(false);
+  });
+});
+
+// P7/SEC-S7: env profiles carry secret variables — files must be 0o600 on
+// create and on update (including a rename to a new slug).
+describe("env file permissions", () => {
+  it("creates the env file with mode 0o600", () => {
+    envManager.createEnv("Prod", { API_KEY: "secret" });
+    expect(statSync(join(envsDir(), "prod.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("tightens a pre-existing 0o644 env file on update and on rename", () => {
+    envManager.createEnv("Prod", { API_KEY: "secret" });
+    const file = join(envsDir(), "prod.json");
+    chmodSync(file, 0o644);
+    envManager.updateEnv("prod", { variables: { API_KEY: "rotated" } });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    envManager.updateEnv("prod", { name: "Staging" });
+    expect(statSync(join(envsDir(), "staging.json")).mode & 0o777).toBe(0o600);
   });
 });

@@ -146,6 +146,13 @@ export interface CLIResultMessage {
   api_error_status?: number;
   result?: string;
   errors?: string[];
+  /**
+   * Why the CLI ended the turn (Claude Code >= 2.1). Observed values include
+   * `api_error`, `blocking_limit`, and `aborted_streaming` — the last one is
+   * what `--resume` emits to close a turn the previous process was killed in
+   * (see `src/utils/resume-interrupted.ts`). Absent on Codex results.
+   */
+  terminal_reason?: string;
   duration_ms: number;
   duration_api_ms: number;
   num_turns: number;
@@ -168,6 +175,14 @@ export interface CLIResultMessage {
   }>;
   total_lines_added?: number;
   total_lines_removed?: number;
+  /**
+   * Codex only: `true` when this result closes a collab SUBAGENT thread's
+   * turn, not the main thread's (the adapter emits a result for both).
+   * Absent = main-thread turn (and always absent on Claude, whose CLI emits
+   * one result per main turn). Consumers judging the MAIN turn's outcome —
+   * e.g. the observed-working model store — must skip flagged results.
+   */
+  subagent_turn?: true;
   uuid: string;
   session_id: string;
 }
@@ -276,6 +291,21 @@ export interface CLIStreamlinedToolUseSummaryMessage {
   uuid: string;
 }
 
+/**
+ * Queue lifecycle of a uuid-stamped stdin command (CLI 2.1.278+). Emitted only
+ * for inbound messages that carried a client-supplied `uuid` — and for the
+ * CLI's own scheduled commands (durable cron prompts), which is how a host
+ * learns that a turn it did not send is running. `command_uuid` is the uuid
+ * of the inbound message; `uuid` is this frame's own id.
+ */
+export interface CLICommandLifecycleMessage {
+  type: "command_lifecycle";
+  command_uuid: string;
+  state: "queued" | "started" | "completed" | "cancelled" | "discarded" | "refused" | (string & {});
+  uuid?: string;
+  session_id?: string;
+}
+
 /** Predicted next user prompts (enabled via promptSuggestions in initialize). */
 export interface CLIPromptSuggestionMessage {
   type: "prompt_suggestion";
@@ -302,7 +332,8 @@ export type CLIMessage =
   | CLIControlCancelRequestMessage
   | CLIStreamlinedTextMessage
   | CLIStreamlinedToolUseSummaryMessage
-  | CLIPromptSuggestionMessage;
+  | CLIPromptSuggestionMessage
+  | CLICommandLifecycleMessage;
 
 // ─── Content Block Types ──────────────────────────────────────────────────────
 
@@ -327,6 +358,9 @@ export type BrowserOutgoingMessage =
   | { type: "mcp_toggle"; serverName: string; enabled: boolean; client_msg_id?: string }
   | { type: "mcp_reconnect"; serverName: string; client_msg_id?: string }
   | { type: "mcp_set_servers"; servers: Record<string, McpServerConfig>; client_msg_id?: string }
+  // Dismiss the server-recorded model fallback notice for EVERY device. `at`
+  // must match the current record so a stale dismiss never hides a newer one.
+  | { type: "dismiss_model_fallback"; at: number }
   | { type: "set_ai_validation"; aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null; client_msg_id?: string }
   | { type: "end_session"; reason?: string; client_msg_id?: string }
   | { type: "stop_task"; task_id: string; client_msg_id?: string }
@@ -382,7 +416,18 @@ export type BrowserIncomingMessageBase =
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
-  | { type: "error"; message: string }
+  | {
+    type: "error";
+    message: string;
+    /**
+     * Structured context-size advisory (context-overflow handoff). Optional
+     * and additive: an old browser ignores it and renders `message` as the
+     * plain system line it always did; a current browser renders a banner
+     * with a one-click action instead (`continue_in_new` → handoff + fresh
+     * session, `compact` → plain line suggesting /compact).
+     */
+    advisory?: ContextAdvisoryPayload;
+  }
   // Model Registry + Failover Task 5 — proactive pre-send gate decision.
   // The server is the sole substitution-decision owner: when an outgoing
   // `set_model` targets a registry-`retired`/`blocked` model, the server
@@ -414,7 +459,14 @@ export type BrowserIncomingMessageBase =
   // `CliFailedFrame` from `ws-bridge-types.ts` for the Phase G
   // frontend bridge.
   | import("./cli-failed-frame.js").CliFailedFrame
-  | { type: "user_message"; content: string; timestamp: number; id?: string }
+  | {
+      type: "user_message";
+      content: string;
+      timestamp: number;
+      id?: string;
+      /** Set when the server (not a person) sent this message — currently only the usage-limit auto-resume. */
+      origin?: "auto_resume";
+    }
   | { type: "message_history"; messages: BrowserIncomingMessage[] }
   | { type: "event_replay"; events: BufferedBrowserEvent[] }
   | { type: "session_name_update"; name: string }
@@ -465,7 +517,7 @@ export type BrowserIncomingMessageBase =
      * symmetrically with `degradedReason`.
      */
     deadRole?: "orchestrator" | "observer";
-    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
     /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
@@ -499,7 +551,7 @@ export type BrowserIncomingMessageBase =
      * "observer exited"). Omitted field defaults to "observer_exited"
      * for back-compat with v1 clients.
      */
-    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   }
   | {
     /**
@@ -550,6 +602,15 @@ export type BrowserIncomingMessageBase =
      * were dropped — keeps the on-wire payload minimal in the happy path.
      */
     supersededCheckpointIds?: string[];
+    /**
+     * Observer rigor (2026-10-16): "unverified" = the observer returned no
+     * findings but the host saw it read nothing beyond the prose artifact.
+     * The panel shows "не проверено", never a clean review. Omitted = no claim.
+     */
+    verification?: "unverified";
+    /** W15: "second" = the host-run second-opinion review; the panel does not
+     *  treat it as the observer's answer (coverage, reviewing state). */
+    reviewerRole?: "second";
   }
   | {
     /**
@@ -560,6 +621,10 @@ export type BrowserIncomingMessageBase =
      *   - `cycle-progress`  counter changed (may be increment or reset)
      *   - `converged`       threshold reached; UI flips ☼ row to ✅ badge
      *   - `revoked`         STOP arrived post-convergence; back to in-progress
+     *   - `not-counted`     P3/CONV-HONEST: a clean review that reviewed
+     *                       nothing (no changed files / no host-observed
+     *                       reads) or carried a grounding-downgraded STOP
+     *                       (CONV-DOWNGRADE); counter unchanged, `notCountedReason` set
      *
      * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
      * the full server-side state so the frontend can render without
@@ -567,10 +632,11 @@ export type BrowserIncomingMessageBase =
      */
     type: "group_convergence";
     sessionGroupId: string;
-    transition: "cycle-progress" | "converged" | "revoked";
+    transition: "cycle-progress" | "converged" | "revoked" | "not-counted";
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean" | "awaiting_second_review" | "second_review_blocked" | "second_review_missing";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };
@@ -581,8 +647,41 @@ export type BrowserIncomingMessageBase =
  * envelope the browser consumes — adds `id` (server-assigned, stable for
  * React reconciliation) and grounding-related fields.
  */
+/**
+ * Observer rigor (2026-10-16): a checkpoint NOT covered by a real review —
+ * `unreviewed` (no review at all: superseded, degraded, probe reply…) or
+ * `unverified` (an empty review whose observer read nothing beyond the prose
+ * artifact). Rendered in the observer panel as "без ревью" / "не проверено".
+ * Built server-side by `checkpoint-coverage.ts` (REST bootstrap) and
+ * browser-side from live frames (`src/utils/checkpoint-coverage.ts`).
+ */
+export interface BrowserCheckpointCoverageGap {
+  checkpointId: string;
+  /** Phase name; empty when only the id is known (a superseded queue entry). */
+  phase: string;
+  sequence?: number;
+  kind: "unreviewed" | "unverified";
+  reason?: "superseded" | "degraded" | "no_review" | "probe_reply";
+  /** When the orchestrator emitted the checkpoint (epoch ms), when known. */
+  emittedAt?: number;
+}
+
 export interface BrowserObserverFinding {
   id: string;
+  /**
+   * W15 multi-model review: set on findings of the host-run SECOND-OPINION
+   * reviewer (`second-reviewer.ts`). Carries that reviewer's provider/model
+   * per finding, so attribution survives the REST bootstrap (which reports a
+   * single observer provider/model for the whole backlog).
+   */
+  reviewer?: { role: "second"; provider: string; model: string };
+  /**
+   * W15: id of an earlier finding (from the OTHER reviewer, same checkpoint)
+   * that this one near-duplicates (same evidence file, overlapping lines,
+   * near-identical claim) at no higher severity. The browser folds it into
+   * that finding ("also flagged by …") and never raises it as its own blocker.
+   */
+  duplicateOf?: string;
   severity: "STOP" | "WARN" | "NOTE" | "INFO";
   claim: string;
   evidence_path: string;
@@ -591,7 +690,36 @@ export interface BrowserObserverFinding {
   /** True when grounding validation downgraded this from STOP → NOTE. */
   wasDowngraded?: boolean;
   /** Why grounding downgraded this finding. Set iff wasDowngraded. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?: BrowserObserverDowngradeReason;
+  /**
+   * B2 (meta-diet): set on a STOP that survived every grounding downgrade but
+   * is only weakly grounded (no cited lines / claim names nothing on them /
+   * lines unreadable). Severity stays STOP; the browser keeps it out of the
+   * blocker banner and shows it in the findings log with a chip.
+   */
+  weakEvidence?: BrowserObserverWeakEvidenceReason;
+  /**
+   * B2b (meta-diet): set on a live STOP whose claim matches one a human already
+   * dismissed in this group (see `observer-disputes.ts`). Severity stays STOP;
+   * the browser keeps it out of the blocker banner and marks it in the log.
+   */
+  disputed?: BrowserObserverDisputeMatch;
+  /**
+   * FIX-AP-3 (meta-diet): set (REST bootstrap only) on a finding that holds the
+   * group's auto-proceed although the banner predicate alone would hide it —
+   * a raw STOP whose grounding verdict was never frozen and that re-grounding
+   * now shows as NOTE / weak. The browser shows it as a blocker so no hold is
+   * invisible; "Dismiss for now" / "Dispute" release it.
+   */
+  holdsAutoProceed?: true;
+  /**
+   * BANNER-RESOLVED (meta-diet): set (REST bootstrap only) on a finding a
+   * human released with "Dismiss for now" (`<group>-resolved-stops.json`).
+   * The browser keeps it out of the blocker banner, the title count and the
+   * Sidebar unread count, and marks it "dismissed" in the findings log.
+   * Never set together with `holdsAutoProceed`.
+   */
+  dismissed?: true;
   /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
@@ -608,8 +736,23 @@ export interface BrowserObserverFinding {
 export interface BrowserObserverDowngrade {
   /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
   id: string;
-  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  reason: BrowserObserverDowngradeReason;
 }
+
+export type BrowserObserverDowngradeReason =
+  | "evidence_not_in_modified_set"
+  | "evidence_missing_on_disk"
+  | "evidence_lines_out_of_range"
+  | "evidence_lines_unchanged"
+  | "wake_version_mismatch";
+
+/** How a re-raised STOP matched an earlier dispute (`observer-disputes.ts`). */
+export type BrowserObserverDisputeMatch = "same_claim" | "shared_anchor";
+
+export type BrowserObserverWeakEvidenceReason =
+  | "no_cited_lines"
+  | "claim_symbols_not_on_cited_lines"
+  | "cited_lines_unreadable";
 
 /**
  * Council Mode group — browser wire shape. The subset of the coordinator's
@@ -644,7 +787,7 @@ export interface BrowserGroupRecord {
   /** Optional: which half died (populated only when status === "degraded"). */
   deadRole?: SessionGroupRole;
   /** Optional: why the group degraded (populated only when status === "degraded"). */
-  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   /** Task 9 — server-published wake-to-review bound; see `group_created`. */
   wakeTimeoutMs?: number;
 }
@@ -677,6 +820,13 @@ export interface SessionState {
   total_cost_usd: number;
   num_turns: number;
   context_used_percent: number;
+  /**
+   * Codex only: how many times the app-server compacted the MAIN thread's
+   * context on the current thread (`thread/compacted`). Monotonic per thread,
+   * reset to 0 on a fresh thread. Drives the Codex context-size advisory —
+   * see `CODEX_COMPACTION_LADDER` in context-size-suggester.ts.
+   */
+  codex_compactions?: number;
   is_compacting: boolean;
   git_branch: string;
   is_worktree: boolean;
@@ -694,11 +844,38 @@ export interface SessionState {
     reasoningOutputTokens: number;
     modelContextWindow: number;
   };
+  /**
+   * Prompt-cache telemetry (W7). Full prompt size (cached + uncached + cache
+   * write) of the session's most recent main-thread model request — what a
+   * cold cache would have to write again. Claude: from the main assistant
+   * frame's usage; Codex: `tokenUsage.last.inputTokens`.
+   */
+  last_context_tokens?: number;
+  /** Epoch ms of the last turn whose result carried real (non-zero) usage. */
+  last_turn_completed_at?: number;
   // Codex-specific rate limits (forwarded from account/rateLimits/updated)
   codex_rate_limits?: {
     primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
     secondary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
   };
+  /**
+   * Pending auto-resume after a usage limit (see `auto-resume-scheduler.ts`).
+   * Present while a one-shot resume is scheduled; `null`/absent otherwise.
+   * Drives the in-session "Лимит до HH:MM — автопродолжение в HH:MM" banner.
+   */
+  auto_resume?: {
+    /** Epoch ms when the usage limit resets. */
+    resetAt: number;
+    /** Epoch ms when the continuation prompt will be sent. */
+    fireAt: number;
+    resetSource: "rate_limit_event" | "codex_rate_limits" | "resets_in_seconds" | "text" | "text_no_zone" | "fallback";
+    /**
+     * Auto-resume paused: the last two resumes immediately re-hit a limit, so
+     * Aura stopped injecting until the user acts (banner: "лимит всё ещё
+     * активен — автопродолжение приостановлено").
+     */
+    paused?: boolean;
+  } | null;
   /** If this session was spawned by a cron job */
   cronJobId?: string;
   /** Human-readable name of the cron job that spawned this session */
@@ -719,6 +896,99 @@ export interface SessionState {
   sessionGroupId?: string;
   /** Council Mode pairing — the role this session plays within {@link sessionGroupId}. */
   sessionGroupRole?: SessionGroupRole;
+  /**
+   * The most recent time the SERVER moved this session off the model the
+   * user chose (spawn substitution, Codex account rejection, chain fallback,
+   * silence rotation). Persisted with the session state and replayed in the
+   * `session_init` snapshot, so the browser shows a persistent "running on a
+   * fallback model" notice — even after a reload — instead of an ephemeral
+   * toast. Absent = the session runs on the model the user picked.
+   */
+  model_fallback?: ModelFallbackRecord | null;
+  /**
+   * The highest context-size advisory that offered "Continue in a new
+   * session" (>= 5 MB transcript). Persisted with the session state and
+   * replayed in `session_init`, so the handoff banner is still there after a
+   * reload — exactly when the user needs it most (the CLI may already be
+   * unresponsive). Absent/null = no handoff advisory fired.
+   */
+  context_advisory?: ContextAdvisoryRecord | null;
+}
+
+/**
+ * What a context-size advisory measured. Claude sessions are measured by the
+ * CLI transcript size on disk (`transcript_bytes`, milestones in bytes);
+ * Codex sessions by how many times the app-server has compacted the main
+ * thread's context (`codex_compactions`, milestones in compactions) — Codex
+ * rollouts on disk are tiny, so a byte ladder would never fire, and the
+ * context-window percent falls after every compaction, so it cannot drive a
+ * fire-once-per-milestone latch (council review 2026-10-17, dahl D-1 /
+ * ritchie B-1).
+ */
+export type ContextAdvisorySignal = "transcript_bytes" | "codex_compactions";
+
+/** Wire payload attached to the `error` frame for a context-size advisory. */
+export interface ContextAdvisoryPayload {
+  kind: "context_advisory";
+  /** Which ladder fired; absent on frames from servers before 2026-10-17 = `transcript_bytes`. */
+  signal?: ContextAdvisorySignal;
+  /** The milestone crossed, in the signal's unit (bytes or compactions). */
+  milestone?: number;
+  /** Bytes-only alias of `milestone`; absent for the compactions signal. Kept for older browsers. */
+  milestoneBytes?: number;
+  /** What the browser should offer. */
+  action: "compact" | "continue_in_new";
+}
+
+/** Session-state record of the latest `continue_in_new` advisory. */
+export interface ContextAdvisoryRecord {
+  /** Which ladder fired. Absent on records persisted before 2026-10-17 → read as `transcript_bytes`. */
+  signal?: ContextAdvisorySignal;
+  /** The milestone crossed, in the signal's unit. Absent on legacy records → use `milestoneBytes`. */
+  milestone?: number;
+  /**
+   * Bytes-only: populated for `transcript_bytes`, never for `codex_compactions`
+   * (a count must never travel in a field named bytes — the handoff route
+   * quotes this value as "> N MB").
+   */
+  milestoneBytes?: number;
+  /** User-visible advisory copy (English, same text as the legacy line). */
+  message: string;
+  action: "continue_in_new";
+  /** Epoch ms when the advisory fired. */
+  at: number;
+}
+
+/**
+ * Why the session is running on a different model than the one chosen.
+ * Shared by the server-recorded {@link ModelFallbackRecord} and the
+ * browser-side substitution/revert notices so all paths render one copy.
+ * - `retired` / `blocked` — registry status (or a 404/403 at runtime).
+ * - `overloaded`          — 429/5xx at runtime.
+ * - `cli-incompatible`    — `broken-model-substitution.ts` rewrote it at spawn.
+ * - `rejected`            — the Codex account/app-server refused the model.
+ * - `unavailable`         — the API reported the model unknown/not available.
+ * - `unresponsive`        — recurring silent turns triggered a chain rotation.
+ */
+export type ModelFallbackReason =
+  | "retired"
+  | "blocked"
+  | "overloaded"
+  | "cli-incompatible"
+  | "rejected"
+  | "unavailable"
+  | "unresponsive";
+
+export interface ModelFallbackRecord {
+  /** The model the user chose / the session was running. */
+  from: string;
+  /** The model the session runs on now. */
+  to: string;
+  reason: ModelFallbackReason;
+  /** Optional operator detail (e.g. the substitution table's reason). */
+  detail?: string;
+  /** Epoch ms when the fallback happened — the browser's dismissal key. */
+  at: number;
 }
 
 /** Roles a session can play inside a Council Mode pair. */

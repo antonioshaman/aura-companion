@@ -1,8 +1,10 @@
+import { trackSync } from "./event-loop-lag-monitor.js";
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { ARCHIVED_SESSIONS_SUBDIR } from "./cleanup/cleanup-paths.js";
 import { writeAtomicJson } from "./atomic-write.js";
+import { redactStructured } from "./secret-redaction.js";
 import type {
   SessionState,
   BrowserIncomingMessage,
@@ -256,22 +258,37 @@ export class SessionStore {
   /** Immediate write — use for critical state changes. */
   saveSync(session: PersistedSession): void {
     try {
-      // PLAN Task 12 (i) — always stamp the current schema version on writes
-      // so load-side discriminator is uniform across all on-disk records.
-      const stamped: PersistedSession = {
-        ...session,
-        schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-      };
-      // EC-46 — primary state writes are crash-atomic (tmp+fsync+rename),
-      // symmetric with moveToArchive. A raw writeFileSync mid-crash leaves
-      // a truncated JSON the next boot cannot parse, stranding the very
-      // session this write meant to preserve. Uncapped (Infinity) because
-      // session JSON carries full message history and a size cap would
-      // newly throw + drop the write — a regression over writeFileSync.
-      writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
+      // The whole save — redaction walk included — is one tracked operation:
+      // redaction used to run OUTSIDE `trackSync`, so its multi-second cost
+      // on large histories surfaced as `untrackedMs` in event-loop lag logs.
+      trackSync("session-store.save", () => this.writeRedacted(session));
     } catch (err) {
       console.error(`[session-store] Failed to save session ${session.id}:`, err);
     }
+  }
+
+  private writeRedacted(session: PersistedSession): void {
+    // PLAN Task 12 (i) — always stamp the current schema version on writes
+    // so load-side discriminator is uniform across all on-disk records.
+    const stamped: PersistedSession = {
+      ...session,
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+      // Chat content (user prompts, tool inputs/results, assistant text)
+      // is redacted on its way to disk with the same policy as protocol
+      // recordings. Copies only — the in-memory session keeps the
+      // original. `pendingMessages` is deliberately NOT redacted: it is
+      // the queue of raw frames still to be delivered to the CLI after a
+      // restart, and masking it would change what the model receives.
+      messageHistory: redactStructured(session.messageHistory),
+      ...(session.eventBuffer ? { eventBuffer: redactStructured(session.eventBuffer) } : {}),
+    };
+    // EC-46 — primary state writes are crash-atomic (tmp+fsync+rename),
+    // symmetric with moveToArchive. A raw writeFileSync mid-crash leaves
+    // a truncated JSON the next boot cannot parse, stranding the very
+    // session this write meant to preserve. Uncapped (Infinity) because
+    // session JSON carries full message history and a size cap would
+    // newly throw + drop the write — a regression over writeFileSync.
+    writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
   }
 
   /** Load a single session from disk. */

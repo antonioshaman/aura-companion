@@ -94,14 +94,17 @@ describe("scorePrecisionCorpus on the committed fixtures", () => {
 
   it("shows grounding IMPROVING precision without hurting recall (the corpus narrative)", () => {
     const { summary } = scorePrecisionCorpus(CORPUS_DIR);
-    // raw precision 0.5 → grounded 0.667: grounding silenced a false STOP.
-    expect(summary.raw.precision).toBe(0.5);
-    expect(summary.grounded.precision).toBeGreaterThan(0.5);
+    // Corpus = grp-pre01/02 (path-only era) + grp-pre03 (B2 line facts).
+    // raw 0.4 → path-only 0.444 → path+lines 0.571: each gate stage silences
+    // false STOPs only.
+    expect(summary.raw.precision).toBe(0.4);
+    expect(summary.grounded_path_only.precision).toBeGreaterThan(0.4);
+    expect(summary.grounded.precision).toBeGreaterThan(summary.grounded_path_only.precision as number);
     // recall unchanged: no real blocker was downgraded.
     expect(summary.grounded.recall).toBe(summary.raw.recall);
-    // delta attributes the single downgrade as a true false-positive catch.
-    expect(summary.delta.downgraded).toBe(1);
-    expect(summary.delta.downgraded_false_positive).toBe(1);
+    // delta attributes all three downgrades (1 path, 2 line) as false-positive catches.
+    expect(summary.delta.downgraded).toBe(3);
+    expect(summary.delta.downgraded_false_positive).toBe(3);
     expect(summary.delta.downgraded_true_positive).toBe(0);
     // expected_blocker_missed row keeps the recall denominator honest.
     expect(summary.missed_blockers).toBe(1);

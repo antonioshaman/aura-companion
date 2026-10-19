@@ -1,5 +1,5 @@
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
-import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -80,6 +80,22 @@ async function post<T = unknown>(path: string, body?: object): Promise<T> {
     }
     throw error;
   }
+}
+
+/**
+ * POST that resolves with `{ status, body }` for any HTTP status (it throws
+ * only on a network failure). Used where a 409 / 202 is an expected outcome
+ * carrying data, not an error (Diagnostics run + decisions).
+ */
+async function postWithStatus<T>(path: string, body?: object): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  handle401(res.status);
+  const json = (await res.json().catch(() => ({}))) as T;
+  return { status: res.status, body: json };
 }
 
 async function get<T = unknown>(path: string): Promise<T> {
@@ -221,6 +237,8 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
+  /** Worktree isolation: `auto` (server default) isolates only when another live session uses the tree. */
+  isolation?: "auto" | "isolate" | "shared";
   backend?: "claude" | "codex";
   sandboxEnabled?: boolean;
   sandboxSlug?: string;
@@ -243,10 +261,17 @@ export interface CreateSessionOpts {
   councilPairing?: "claude+claude" | "claude+codex";
 }
 
+/** Local (no-network) sign-in state for a coding CLI; see server host-auth-status.ts. */
+export type BackendAuthState = "authorized" | "expired" | "unauthorized";
+export type BackendAuthMethod = "env" | "oauth" | "api_key" | "settings_token";
+
 export interface BackendInfo {
   id: string;
   name: string;
   available: boolean;
+  /** Sign-in status, present only when the binary is available. */
+  authState?: BackendAuthState;
+  authMethod?: BackendAuthMethod;
   /** Council-mode mixed pairing capability for a Codex observer, if published by the server. */
   councilObserverReviewAvailable?: boolean;
   councilObserverReviewReason?: string;
@@ -264,6 +289,62 @@ export interface BackendModelInfo {
    */
   status?: "active" | "degraded" | "retired" | "blocked";
   replacement?: string | null;
+  /** Not in the registry — offered by the catalogue but never verified here. */
+  untested?: true;
+  /** Not in the registry, but a session on this install ran a successful turn on it. */
+  verifiedBy?: "observed";
+}
+
+/**
+ * Config + model-cache diagnostics for the Settings panel. `companionHome`
+ * is the resolved directory the running server reads settings/caches from —
+ * surfaced so a key saved under a diverging home is diagnosable. Cache
+ * timestamps differ by source: `anthropic.cacheFetchedAt` is epoch ms
+ * (server clock), `codex.fetchedAt` is the ISO string the Codex CLI wrote.
+ */
+export interface ModelDiagnostics {
+  companionHome: string;
+  anthropic: {
+    keyConfigured: boolean;
+    cachePresent: boolean;
+    cacheFetchedAt: number | null;
+    cacheModelCount: number | null;
+  };
+  codex:
+    | { present: false }
+    | {
+        present: true;
+        fetchedAt: string | null;
+        clientVersion: string | null;
+        listedModelCount: number | null;
+      };
+}
+
+/**
+ * Reply-delivery reliability snapshot from `GET /api/metrics/delivery`
+ * (server/delivery-metrics.ts). Counters are in-memory since server start.
+ */
+export interface DeliveryCountersSnapshot {
+  userMessages: number;
+  firstOutputs: number;
+  stalledMessages: number;
+  noResponseRequestedReplies: number;
+  driftRecoveries: number;
+  nudges: number;
+  backgroundTasksKilled: number;
+}
+
+export interface DeliveryMetricsSnapshot {
+  stallThresholdMs: number;
+  global: DeliveryCountersSnapshot & { awaitingReply: number };
+  timeToFirstOutputMs: {
+    count: number;
+    avg: number;
+    p50Bucket: number;
+    p95Bucket: number;
+    max: number;
+  };
+  sessions: Record<string, DeliveryCountersSnapshot & { backend: string | null; runningTasks: number; awaitingSince: number | null; lastEventAt: number }>;
 }
 
 export interface RelaunchSessionOpts {
@@ -312,6 +393,16 @@ export interface GitBranchInfo {
   worktreePath: string | null;
   ahead: number;
   behind: number;
+}
+
+export interface IsolationPreview {
+  isGitRepo: boolean;
+  repoRoot: string | null;
+  liveSessions: Array<{ sessionId: string; name?: string; backendType?: string }>;
+  recommended: "isolate" | "shared";
+  worktreesBaseDir: string;
+  warnings: string[];
+  repoServiceUnits: string[];
 }
 
 export interface GitWorktreeInfo {
@@ -380,6 +471,7 @@ export interface UsageLimits {
     monthly_limit: number;
     used_credits: number;
     utilization: number | null;
+    disabled_reason?: string | null;
   } | null;
 }
 
@@ -432,6 +524,19 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
+  telemetryEnabled: boolean;
+  /** UI default for new sessions. "solo" unless the user changed it. */
+  defaultSessionMode?: "solo" | "council";
+  /** Opt-in: ask new sessions to load the knowledge base at start. Default off. */
+  kbAutoPrime?: boolean;
+  /** Auto-continue a session after its usage limit resets. Default on. */
+  autoResumeAfterLimit?: boolean;
+  /** W15: global default for the Council second-opinion reviewer. */
+  councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
+  /** Diagnostics: KB-analysis accumulation thresholds. */
+  kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
+  /** Diagnostics: report-only memory analysis switch (default off). */
+  diagnosticsMemoryReport?: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -842,6 +947,7 @@ export async function autoAuth(): Promise<string | null> {
 
 export interface GlobalUsageStats {
   activeInstances30d: number | null;
+  onlineNow: number | null;
   totalInstances: number | null;
   generatedAt: number;
 }
@@ -859,6 +965,7 @@ export async function fetchGlobalStats(): Promise<GlobalUsageStats | null> {
     return {
       activeInstances30d:
         typeof data.activeInstances30d === "number" ? data.activeInstances30d : null,
+      onlineNow: typeof data.onlineNow === "number" ? data.onlineNow : null,
       totalInstances: typeof data.totalInstances === "number" ? data.totalInstances : null,
       generatedAt: typeof data.generatedAt === "number" ? data.generatedAt : Date.now(),
     };
@@ -882,6 +989,66 @@ export async function verifyAuthToken(token: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ── Sweep orphans (manual cleanup of server-owned lost resources) ──────────
+export type SweepReason = "orphan" | "archived-leak" | "stale-session" | "orphan-timer";
+
+// ─── Diagnostics (shared with the server, type-only) ──────────────────────────
+export type {
+  AccumulationProgress,
+  CardSource,
+  ContextAdvisoryView,
+  Decision,
+  DiagnosticsOverview,
+  DriftEventView,
+  KbAnalysisReport,
+  KbAnalysisStatus,
+  KbFinding,
+  MemoryFinding,
+  PairView,
+  RuntimeSnapshotView,
+  UpstreamStatus,
+} from "../server/diagnostics/diagnostics-types.js";
+import type { Decision, DiagnosticsOverview, KbAnalysisStatus } from "../server/diagnostics/diagnostics-types.js";
+
+export interface KbAnalysisRunResponse {
+  runId?: string;
+  startedAt?: number;
+  error?: string;
+  message?: string;
+  retryAfterMs?: number;
+}
+
+export interface KbDecisionsResponse {
+  applied?: { entryId: string; decision: Decision; archive?: string; archivedTo?: string }[];
+  recorded?: boolean;
+  error?: string;
+  message?: string;
+}
+
+/** One reap candidate as returned by `GET /sweep/preview` — decision-justifying
+ *  fields ONLY (the server withholds argv/internal anchors from the wire). */
+export interface SweepCandidate {
+  id: string;
+  reason: SweepReason;
+  pid?: number;
+  sessionId?: string;
+  evidence: string;
+  ageMs: number;
+}
+
+export interface SweepPreview {
+  candidates: SweepCandidate[];
+  /** Opaque token binding this exact candidate set; echoed back on execute. */
+  token: string;
+}
+
+export interface SweepResult {
+  requested: number;
+  swept: number;
+  skipped: number;
+  perReason: Record<SweepReason, number>;
 }
 
 export const api = {
@@ -913,10 +1080,42 @@ export const api = {
       reviewCount: number;
       observerProvider?: string;
       observerModel?: string;
+      /** FIX-AP-4: set only when an incomplete restore pauses auto-proceed. */
+      autoProceedRestoreGaps?: AutoProceedRestoreGap[];
+      /** Observer rigor: checkpoints without a (verified) review. */
+      checkpointCoverage?: BrowserCheckpointCoverageGap[];
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
 
+  // Council Mode (meta-diet B2b) — persist a human dismissal of an observer
+  // STOP so a re-raised copy of the claim no longer raises the blocker banner.
+  /** W15: the pair's second-opinion reviewer setting (own, else the global default). */
+  getGroupSecondReviewer: (groupId: string) =>
+    get<import("../server/second-reviewer-config.js").SecondReviewerConfig & { source: "group" | "global" }>(
+      `/groups/${encodeURIComponent(groupId)}/second-reviewer`,
+    ),
+  setGroupSecondReviewer: (groupId: string, config: import("../server/second-reviewer-config.js").SecondReviewerConfig) =>
+    put<import("../server/second-reviewer-config.js").SecondReviewerConfig & { source: "group" | "global" }>(
+      `/groups/${encodeURIComponent(groupId)}/second-reviewer`,
+      config,
+    ),
+  disputeObserverFinding: (groupId: string, finding: { finding_id: string; claim: string; evidence_path: string }) =>
+    post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/disputes`, finding),
+
+  // Council Mode (FIX-AP-1) — "Dismiss for now": release the STOP's hold on
+  // auto-proceed. Not a dispute; the claim is not recorded as wrong.
+  resolveObserverStop: (groupId: string, findingId: string) =>
+    post<{ ok: true; released: boolean; persisted: boolean }>(
+      `/groups/${encodeURIComponent(groupId)}/stops/resolve`,
+      { finding_id: findingId },
+    ),
+
+  // Council Mode (FIX-AP-4) — "Ignore this file": a review file that keeps
+  // the auto-proceed hold restore incomplete stops blocking (this content only).
+  ignoreAutoProceedRestoreGap: (groupId: string, gap: { file: string; fingerprint: string }) =>
+    post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/restore-gaps/ignore`, gap),
+
   // Council Mode — REST bootstrap of group records on app mount. Closes
-  // `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
+  // `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
   // `groupBySessionId` map was previously populated EXCLUSIVELY by the
   // live `group:created` push; a tab reloading after pair creation landed
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
@@ -948,6 +1147,10 @@ export const api = {
 
   deleteSession: (sessionId: string) =>
     del(`/sessions/${encodeURIComponent(sessionId)}`),
+
+  /** Cancel the pending usage-limit auto-resume of a session. */
+  cancelAutoResume: (sessionId: string) =>
+    del<{ ok: boolean; cancelled: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/auto-resume`),
 
   relaunchSession: (sessionId: string, opts?: RelaunchSessionOpts) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/relaunch`, opts),
@@ -1010,6 +1213,18 @@ export const api = {
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
 
+  // Sweep orphans — preview is read-only; execute must echo the preview token.
+  sweepPreview: () => get<SweepPreview>("/sweep/preview"),
+  // Diagnostics page (plan Tasks 13–15). Run / decisions return status + body
+  // without throwing on 4xx: 409 / 202 carry data the page acts on.
+  diagnosticsOverview: () => get<DiagnosticsOverview>("/diagnostics/overview"),
+  kbAnalysisLatest: () => get<KbAnalysisStatus>("/diagnostics/kb-analysis/latest"),
+  kbAnalysisRun: (includeMemory: boolean) =>
+    postWithStatus<KbAnalysisRunResponse>("/diagnostics/kb-analysis/run", { includeMemory }),
+  kbAnalysisDecide: (runId: string, decisions: { entryId: string; decision: Decision; mergeInto?: string }[]) =>
+    postWithStatus<KbDecisionsResponse>("/diagnostics/kb-analysis/decisions", { runId, decisions }),
+  sweepExecute: (token: string) => post<SweepResult>("/sweep/execute", { token }),
+
   // Sandboxes
   listSandboxes: () => get<CompanionSandbox[]>("/sandboxes"),
   getSandbox: (slug: string) =>
@@ -1056,9 +1271,22 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
+    telemetryEnabled?: boolean;
+    defaultSessionMode?: "solo" | "council";
+    kbAutoPrime?: boolean;
+    autoResumeAfterLimit?: boolean;
+    councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
+    kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
+    diagnosticsMemoryReport?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
+  refreshModels: () =>
+    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "ok" | "absent" }>(
+      "/settings/models/refresh",
+    ),
+  getModelDiagnostics: () => get<ModelDiagnostics>("/settings/diagnostics"),
+  getDeliveryMetrics: () => get<DeliveryMetricsSnapshot>("/metrics/delivery"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),
@@ -1150,6 +1378,10 @@ export const api = {
       git_ahead: number;
       git_behind: number;
     }>("/git/pull", { cwd }),
+
+  // Worktree isolation preview for the New Session form
+  getIsolationPreview: (cwd: string) =>
+    get<IsolationPreview>(`/sessions/isolation-preview?cwd=${encodeURIComponent(cwd)}`),
 
   // Git worktrees
   listWorktrees: (repoRoot: string) =>

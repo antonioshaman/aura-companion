@@ -59,7 +59,9 @@ export const SECTION_DEFINITIONS: TaskPanelSectionDef[] = [
     id: "tasks",
     label: "Tasks",
     description: "Agent task list and progress",
-    backends: ["claude"],
+    // Backend-agnostic: Claude emits TodoWrite; Codex plan updates are re-emitted
+    // as synthetic TodoWrite frames (codex-adapter `handleTurnPlanUpdated`).
+    backends: null,
   },
 ];
 

@@ -9,6 +9,7 @@ import {
   selectDynamicBackendModels,
   selectDynamicBackendModelsStatus,
   __resetBackendModelInflightForTests,
+  MODEL_LIST_RETRY_DELAYS_MS,
 } from "./settings-slice.js";
 
 // PLAN-aura-dynamic-model-list Task 15 — mock the REST client surface
@@ -333,5 +334,97 @@ describe("settings-slice — loadBackendModels reject-after-success protection (
     const s = useStore.getState();
     expect(s.dynamicBackendModels.claude).toBeUndefined();
     expect(s.dynamicBackendModelsStatus.claude).toBe("rejected");
+  });
+});
+
+// ── Owner bug 2026-10-16: one failed Claude fetch pinned the New Session
+// dropdown to the static fallback for the whole tab lifetime (no retry). ──
+
+describe("settings-slice — loadBackendModels automatic retry after hard reject", () => {
+  // Rejected → scheduled retry → the dynamic list replaces the fallback
+  // without any user action.
+  it("retries a rejected Claude fetch after the first backoff and shows the dynamic list", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetBackendModels
+        .mockRejectedValueOnce(new Error("upstream_unavailable"))
+        .mockResolvedValueOnce([
+          { value: "claude-opus-5-5", label: "Opus 5.5", description: "" },
+        ]);
+      await useStore.getState().loadBackendModels("claude");
+      expect(useStore.getState().dynamicBackendModelsStatus.claude).toBe("rejected");
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(MODEL_LIST_RETRY_DELAYS_MS[0]!);
+
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(2);
+      const s = useStore.getState();
+      expect(s.dynamicBackendModelsStatus.claude).toBe("resolved");
+      expect(s.dynamicBackendModels.claude?.[0]?.value).toBe("claude-opus-5-5");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Bounded: exactly MODEL_LIST_RETRY_DELAYS_MS.length automatic retries,
+  // then it stops (focus / the Refresh button take over).
+  it("stops after the configured number of retries", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetBackendModels.mockRejectedValue(new Error("upstream_unavailable"));
+      await useStore.getState().loadBackendModels("claude");
+      const total = MODEL_LIST_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+      await vi.advanceTimersByTimeAsync(total + 60_000);
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(1 + MODEL_LIST_RETRY_DELAYS_MS.length);
+      expect(useStore.getState().dynamicBackendModelsStatus.claude).toBe("rejected");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // No API key → the static list is the intended list: distinct status,
+  // no retry storm.
+  it("marks no_key_configured as 'unconfigured' and does not retry", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetBackendModels.mockRejectedValue(new Error("no_key_configured"));
+      await useStore.getState().loadBackendModels("claude");
+      expect(useStore.getState().dynamicBackendModelsStatus.claude).toBe("unconfigured");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Codex's 404 ("run codex once") is not transient — no timer retries.
+  it("does not auto-retry the codex backend", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetBackendModels.mockRejectedValue(new Error("Codex models cache not found"));
+      await useStore.getState().loadBackendModels("codex");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A manual/external call cancels the pending retry and restarts the
+  // chain — no duplicate timer chains.
+  it("an external call cancels the pending retry timer", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetBackendModels
+        .mockRejectedValueOnce(new Error("upstream_unavailable"))
+        .mockResolvedValueOnce([{ value: "claude-opus-4-8", label: "Opus 4.8", description: "" }]);
+      await useStore.getState().loadBackendModels("claude");
+      await useStore.getState().loadBackendModels("claude");
+      expect(useStore.getState().dynamicBackendModelsStatus.claude).toBe("resolved");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockGetBackendModels).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

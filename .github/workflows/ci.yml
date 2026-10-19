@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: these jobs only read the repo (P7/CI-HARDEN).
+permissions:
+  contents: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -22,6 +26,10 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
+      # Guards hook pack (packs/guards): pure-stdlib Python, no install step.
+      - name: Guards hook pack tests
+        run: python3 -m unittest discover -s packs/guards/tests
+
       - name: Dead code guard (unused locals/params)
         working-directory: web
         run: bun run deadcode:check
@@ -36,9 +44,28 @@ jobs:
       # calls, no network, no secrets. A scorer change that drifts from the
       # baseline (or a stale baseline) fails here rather than shipping.
       # Regenerate intentionally with `bun run eval:replay --ci --update-baseline`.
+      # Dependency advisories (P7/CI-HARDEN). Non-blocking for now: the tree
+      # carries known advisories in transitive dev/build deps, so this step
+      # surfaces them as a warning without failing the job. Drop
+      # `continue-on-error` once the high/critical backlog is cleared.
+      - name: Dependency audit (non-blocking)
+        working-directory: web
+        continue-on-error: true
+        run: bun audit --audit-level=high
+
       - name: Eval replay L1 gate (no regression vs baseline)
         working-directory: web
         run: bun run eval:replay --ci
+
+      # Council PRO Economy quality-floor guardrail (spec Story 4). Runs the
+      # hermetic guardrail against the checked-in fixture
+      # (web/scripts/__fixtures__/council-economy/) with a load-bearing exit code
+      # — proves the data-derived tier policy + depth thresholds never tier-down a
+      # seat that has produced a P1, never tier-down the fail-closed security/LLM
+      # lens, and never let reduced depth cover a P1 size bucket. Zero LLM calls.
+      - name: Council economy guardrail (zero P1 regression)
+        working-directory: web
+        run: bun run guardrail:ci
 
   test:
     strategy:
@@ -58,18 +85,16 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
-      # Council Plan PLAN-aura-observer-prompt-bundled-fallback.md P1 #1:
-      # regenerate the bundled observer-prompt and fail if it drifts from
-      # `web/server/observer-prompt-bundled.ts`. Catches edits to the
-      # canonical `.council/prompts/observer-system.md` that didn't re-run
-      # the build script. Without this gate, the bundled artifact (consumed
-      # at runtime as the fresh-workspace fallback) silently diverges from
-      # canonical and ships to npm consumers in that state.
+      # Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md P1 #1:
+      # rebuild the observer prompt (SOUL spliced into observer-system.md) and
+      # the bundled fallback, then fail if either committed output differs.
+      # Catches an edited `.council/prompts/OBSERVER-SOUL.md` that was not
+      # spliced, or an edited `observer-system.md` that was not re-bundled.
+      # The same `check-observer-prompt-drift` script runs in the pre-commit
+      # hook and in `prepublishOnly`, so the three gates cannot diverge.
       - name: Observer-prompt bundle drift gate
         working-directory: web
-        run: |
-          bun run build-observer-prompt-bundle
-          git diff --exit-code -- server/observer-prompt-bundled.ts
+        run: bun run check-observer-prompt-drift
 
       - name: Typecheck
         working-directory: web
@@ -119,3 +144,24 @@ jobs:
       - name: Build
         working-directory: platform
         run: bun run build
+
+  experience-packs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: aura-check unit tests
+        working-directory: packs/checks
+        run: python3 -m unittest discover -s tests -t .
+
+      # Errors (secrets, tracked .env, inline systemd secrets, bad Alembic ids)
+      # fail the job; warnings are printed for the reviewer.
+      - name: aura-check on this change
+        if: github.event_name == 'pull_request'
+        run: packs/checks/bin/aura-check --changed --base "origin/${{ github.base_ref }}"

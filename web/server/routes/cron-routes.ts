@@ -37,7 +37,9 @@ export function registerCronRoutes(
         cwd: body.cwd || "",
         envSlug: body.envSlug,
         enabled: body.enabled ?? true,
-        permissionMode: body.permissionMode || "bypassPermissions",
+        // Safe by default: a job without an explicit mode asks for permission
+        // like a normal session. bypassPermissions must be requested explicitly.
+        permissionMode: body.permissionMode || "default",
         codexInternetAccess: body.codexInternetAccess,
       });
       if (job.enabled) cronScheduler?.scheduleJob(job);

@@ -359,7 +359,50 @@ describe("POST /api/cron/jobs", () => {
     expect(passedInput.backendType).toBe("claude");
     expect(passedInput.model).toBe("");
     expect(passedInput.enabled).toBe(true);
+    // SEC-S5: an omitted permissionMode must NOT grant full autonomy — the
+    // job runs in the normal "default" mode that asks before tool use.
+    expect(passedInput.permissionMode).toBe("default");
+  });
+
+  it("keeps an explicitly requested bypassPermissions mode", async () => {
+    // SEC-S5: full autonomy is still allowed, but only as an explicit choice.
+    vi.mocked(cronStore.createJob).mockReturnValue(makeJob());
+
+    await app.request("/api/cron/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Autonomous Job",
+        prompt: "Do something",
+        schedule: "0 * * * *",
+        cwd: "/tmp",
+        permissionMode: "bypassPermissions",
+      }),
+    });
+
+    const passedInput = vi.mocked(cronStore.createJob).mock.calls[0][0];
     expect(passedInput.permissionMode).toBe("bypassPermissions");
+  });
+
+  it("falls back to default when permissionMode is an empty string", async () => {
+    // Edge case: an empty string is treated like a missing field, not as
+    // an opt-in to bypass.
+    vi.mocked(cronStore.createJob).mockReturnValue(makeJob());
+
+    await app.request("/api/cron/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Empty Mode Job",
+        prompt: "Do something",
+        schedule: "0 * * * *",
+        cwd: "/tmp",
+        permissionMode: "",
+      }),
+    });
+
+    const passedInput = vi.mocked(cronStore.createJob).mock.calls[0][0];
+    expect(passedInput.permissionMode).toBe("default");
   });
 
   it("converts non-Error thrown values to string in the 400 response", async () => {

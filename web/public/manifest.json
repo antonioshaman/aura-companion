@@ -1,6 +1,6 @@
 {
   "name": "Aura Companion",
-  "short_name": "Companion",
+  "short_name": "Aura",
   "description": "Web UI for Claude Code and Codex",
   "start_url": "/",
   "scope": "/",

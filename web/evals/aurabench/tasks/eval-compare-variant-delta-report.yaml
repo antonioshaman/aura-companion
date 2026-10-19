@@ -1,0 +1,58 @@
+# AuraBench task mined from PR #134 ("feat(evals): add eval:compare cross-variant delta report").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: eval-compare-variant-delta-report
+title: "Maintainers can compare observer precision between two variants in one report"
+start_commit: 8768aa7036d230bb3bf45a538e5065c3aa9de912
+prompt: |
+  The eval harness scores observer precision into a `PrecisionSummary`
+  (`web/evals/scorers/precision-corpus.ts`), but comparing two variants (e.g.
+  claude+claude vs claude+codex) means diffing numbers by hand.
+
+  Add a pure module `web/evals/reports/compare.ts` (it must respect the eval
+  import firewall — no `server/` imports):
+  - `compareSummaries(baseline, candidate): MetricDelta[]` over the grounded
+    tier, one row per metric with `name` `stop_precision` and `stop_recall`
+    (higher is better) and `false_stop_rate` (lower is better); each row carries both
+    values, `delta` (candidate − baseline) and `verdict`
+    `"better" | "worse" | "same" | "n/a"`. If either side is `"unavailable"`,
+    delta and verdict are `"n/a"` — never treated as 0;
+  - `renderComparisonText(rows)` — plain text listing every metric with an
+    upper-case verdict (e.g. `BETTER`, and `n/a`);
+  - `renderComparisonMarkdown(rows)` — a table with header
+    `| Metric | Baseline | Candidate | Δ | Verdict |`, one row per metric,
+    verdicts rendered as `🟢 better`, `🔴 worse`, `➖ same`/`➖ n/a`.
+  Also expose it as `bun run eval:compare --baseline <p> --candidate <p>
+  [--markdown]` (a path is a precision-corpus dir or a summary `.json`); it is
+  advisory and always exits 0.
+expected_files:
+  - web/evals/compare-runner.ts
+  - web/evals/reports/compare.ts
+expected_tests:
+  - web/evals/reports/compare.test.ts
+failure_modes:
+  - "an unavailable metric is reported as a regression or improvement"
+  - "the report module imports server code"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 134
+  merge_commit: c18b5ca8e68cf1f07249ea5e3482d7348151258f
+  class: feature
+  hidden_tests:
+    - web/evals/reports/compare.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:32:29.168Z"

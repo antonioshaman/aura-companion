@@ -15,7 +15,7 @@
 // not inherit the prior failure state.
 
 import type { StateCreator } from "zustand";
-import type { CliFailedReason } from "../types.js";
+import type { CliFailedReason, ModelFallbackReason } from "../types.js";
 import type { AppState } from "./index.js";
 
 /**
@@ -66,7 +66,7 @@ export interface PendingClaudeModelSwitch {
 export interface ModelSubstitutionNotice {
   requested: string;
   applied: string;
-  reason: "retired" | "blocked" | "overloaded";
+  reason: ModelFallbackReason;
   firedAt: number;
 }
 

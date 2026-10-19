@@ -34,7 +34,11 @@
   --color-cc-active: rgba(31,30,29,0.09);
   --color-cc-success: #2d7d46;
   --color-cc-error: #c53030;
-  --color-cc-warning: #b7791f;
+  /* Darkened from #b7791f: as small (10-11px) text on the light --color-cc-bg
+     the lighter amber missed WCAG AA (4.5:1); #8a5a00 clears it. jsdom's axe
+     cannot compute contrast, so this was contrast-blind in tests (Council
+     Review 2026-07-05 #9). */
+  --color-cc-warning: #8a5a00;
   --color-cc-sidebar-footer: #edece5;
   --color-cc-separator: rgba(31,30,29,0.10);
   --color-cc-info: #2b6cb0;

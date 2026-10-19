@@ -132,6 +132,44 @@ describe("parseSidecarArtifact", () => {
   });
 });
 
+// B2: optional frozen line facts — parsed when present, absent stays absent,
+// malformed shapes rejected with the offending path named.
+describe("parseSidecarArtifact — line_facts_by_path", () => {
+  const withFacts = (facts: unknown) => {
+    const s = goodSidecar() as unknown as { grounding_inputs: Record<string, unknown> };
+    s.grounding_inputs.line_facts_by_path = facts;
+    return JSON.stringify(s);
+  };
+
+  it("round-trips line facts (including a null path) and omits them when absent", () => {
+    const facts = {
+      "a.ts": { line_count: 10, changed_ranges: [[2, 4]], cited_lines: { "3": "x();" } },
+      "b.ts": null,
+      "c.ts": { line_count: 1, changed_ranges: null, cited_lines: {} },
+    };
+    const r = parseSidecarArtifact(withFacts(facts));
+    expect(r.ok && r.value.grounding_inputs.line_facts_by_path).toEqual(facts);
+    const plain = parseSidecarArtifact(JSON.stringify(goodSidecar()));
+    expect(plain.ok && "line_facts_by_path" in plain.value.grounding_inputs).toBe(false);
+  });
+
+  it.each([
+    ["non-object map", 5],
+    ["negative line_count", { "a.ts": { line_count: -1, changed_ranges: null, cited_lines: {} } }],
+    ["inverted range", { "a.ts": { line_count: 3, changed_ranges: [[3, 2]], cited_lines: {} } }],
+    ["non-numeric cited line key", { "a.ts": { line_count: 3, changed_ranges: null, cited_lines: { x: "y" } } }],
+  ])("rejects %s", (_label, facts) => {
+    const r = parseSidecarArtifact(withFacts(facts));
+    expect(r.ok).toBe(false);
+  });
+
+  it("accepts the B2 downgrade reasons", () => {
+    const s = goodSidecar();
+    s.grounding_downgrades = [{ index: 0, original_severity: "STOP", reason: "evidence_lines_unchanged" }];
+    expect(parseSidecarArtifact(JSON.stringify(s)).ok).toBe(true);
+  });
+});
+
 describe("parseLabelRecord", () => {
   it("round-trips a well-formed label", () => {
     const r = parseLabelRecord(goodLabel());

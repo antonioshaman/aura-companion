@@ -1,0 +1,135 @@
+{
+  "eval_artifact_version": 1,
+  "session_group_id": "grp_pre03",
+  "checkpoint_id": "council-implement-1",
+  "phase": "council-implement",
+  "observer_provider": "codex",
+  "observer_model": "gpt-5.5",
+  "observer_cli_version": "1.0.0-synthetic",
+  "observer_prompt_sha256": "sha256:synthetic-prompt-grp-pre03",
+  "emitted_at": "2026-09-28T00:00:00Z",
+  "manifest_partition": {
+    "delta": [
+      ".council/diet-review/A2.diff",
+      "CLAUDE.md",
+      "web/scripts/kb-health.ts"
+    ],
+    "carried": [],
+    "dropped": []
+  },
+  "raw_findings": [
+    {
+      "severity": "STOP",
+      "claim": "recordUsage rewrites the tracked jsonl stores on every /prime, dirtying the checkout",
+      "evidence_path": "web/scripts/kb-health.ts",
+      "evidence_lines": [
+        40,
+        42
+      ],
+      "confidence": "high"
+    },
+    {
+      "severity": "STOP",
+      "claim": "pruneIdle archives promoted entries",
+      "evidence_path": "web/scripts/kb-health.ts",
+      "evidence_lines": [
+        480,
+        490
+      ],
+      "confidence": "medium"
+    },
+    {
+      "severity": "STOP",
+      "claim": "parseUsageLog silently drops the last log line",
+      "evidence_path": "web/scripts/kb-health.ts",
+      "evidence_lines": [
+        5,
+        8
+      ],
+      "confidence": "medium"
+    },
+    {
+      "severity": "STOP",
+      "claim": "`bun run --cwd web kb:record` fails at runtime; the mandatory /prime step must use `bun --cwd web run` instead",
+      "evidence_path": ".council/diet-review/A2.diff",
+      "confidence": "high"
+    },
+    {
+      "severity": "STOP",
+      "claim": "the pointer uses a shorthand that will not run from the repo root",
+      "evidence_path": "CLAUDE.md",
+      "evidence_lines": [
+        106,
+        106
+      ],
+      "confidence": "medium"
+    },
+    {
+      "severity": "STOP",
+      "claim": "the session clock never advances between concurrent primes",
+      "evidence_path": "web/scripts/kb-health.ts",
+      "evidence_lines": [
+        44,
+        44
+      ],
+      "confidence": "low"
+    }
+  ],
+  "grounding_downgrades": [
+    {
+      "index": 1,
+      "original_severity": "STOP",
+      "reason": "evidence_lines_out_of_range"
+    },
+    {
+      "index": 2,
+      "original_severity": "STOP",
+      "reason": "evidence_lines_unchanged"
+    }
+  ],
+  "grounding_inputs": {
+    "existence_by_path": {
+      ".council/diet-review/A2.diff": true,
+      "CLAUDE.md": true,
+      "web/scripts/kb-health.ts": true
+    },
+    "line_facts_by_path": {
+      ".council/diet-review/A2.diff": {
+        "line_count": 312,
+        "changed_ranges": null,
+        "cited_lines": {}
+      },
+      "CLAUDE.md": {
+        "line_count": 112,
+        "changed_ranges": [
+          [
+            104,
+            108
+          ]
+        ],
+        "cited_lines": {
+          "106": "- `/prime [focus]` at session start (loads relevant entries, records usage via `bun run kb:record`)."
+        }
+      },
+      "web/scripts/kb-health.ts": {
+        "line_count": 210,
+        "changed_ranges": [
+          [
+            30,
+            60
+          ]
+        ],
+        "cited_lines": {
+          "5": "import { readFileSync } from \"node:fs\";",
+          "6": "import { join } from \"node:path\";",
+          "7": "",
+          "8": "const STORES = [\"patterns\", \"gotchas\"];",
+          "40": "export function recordUsage(root: string, ids: string[]): void {",
+          "41": "  for (const store of STORES) {",
+          "42": "    writeTextAtomic(storePath(root, store), bumpUsage(readStore(root, store), ids));",
+          "44": "  const at = new Date().toISOString();"
+        }
+      }
+    }
+  }
+}

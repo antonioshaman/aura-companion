@@ -4,6 +4,13 @@ import { join } from "node:path";
 import type { BackendType } from "./session-types.js";
 import { COMPANION_HOME } from "./paths.js";
 import { countFileLines } from "./fs-utils.js";
+import {
+  REDACTED_PLACEHOLDER,
+  REDACTION_POLICY_VERSION,
+  mayContainSecret,
+  redactSecretsInText,
+  redactStructured,
+} from "./secret-redaction.js";
 
 const DEFAULT_MAX_LINES = 1_000_000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -19,7 +26,8 @@ const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
  *   server-internal-origin sends (council auto-wake) from
  *   browser-relayed user input. Omitted field defaults to "browser"
  *   for back-compat with historical recordings.
- * - v3: adds `redactionApplied: true` on the header — frames that
+ * - v3: adds `redactionApplied: true` on the header (+ optional
+ *   `redactionVersion` since policy v2 — additive, no version bump) — frames that
  *   carried a secret marker (sk-..., Bearer, openai_api_key, ...) are
  *   redacted at write time per Task 11. Inert frames pass through
  *   byte-identical; the flag signals the writer applied the policy
@@ -52,6 +60,12 @@ export interface RecordingHeader {
    *  (secret-marker frames parsed + sensitive values replaced with
    *  {@link REDACTED_PLACEHOLDER}). Omitted on v1/v2 historical files. */
   redactionApplied?: true;
+  /** Redaction policy version the writer applied (see
+   *  `REDACTION_POLICY_VERSION` in secret-redaction.ts). Absent on files
+   *  written by policy v1, which is known to have leaked npm/Gonka/Telegram
+   *  tokens, KEY=value assignments and escape-adjacent sk-/gh tokens — treat
+   *  such files as NOT safely redacted. */
+  redactionVersion?: number;
 }
 
 export type RecordingDirection = "in" | "out";
@@ -120,161 +134,38 @@ export interface RecordingFileMeta {
   lines: number;
 }
 
-// ─── Redaction (Task 11) ─────────────────────────────────────────────────────
+// ─── Redaction (Task 11, policy v2) ──────────────────────────────────────────
+//
+// The rule set lives in `secret-redaction.ts` (shared with the session store
+// and the logger). See that module's header for why policy v1 leaked.
 
-/** Placeholder substituted for any value that matched the redaction policy. */
-export const REDACTED_PLACEHOLDER = "[REDACTED]" as const;
-
-/**
- * Object keys whose VALUE is treated as a secret regardless of value shape.
- * Matched case-insensitively against the literal key string. Patterns that
- * look secret-shaped in any value (sk-..., Bearer ...) are caught by
- * {@link SECRET_VALUE_PATTERNS} separately, so this list only needs to cover
- * names the project deliberately surfaces (env vars + JSON config keys).
- */
-const SENSITIVE_KEY_PATTERNS: readonly RegExp[] = [
-  /^openai_api_key$/i,
-  /^anthropic_api_key$/i,
-  /^claude_code_oauth_token$/i,
-  /^claudeCodeOauthToken$/i,
-  /^claude_code_token$/i,
-  /^companion_auth_token$/i,
-  /^companionAuthToken$/i,
-  /^oauth[_-]?token$/i,
-  /^access[_-]?token$/i,
-  /^refresh[_-]?token$/i,
-];
+export { REDACTED_PLACEHOLDER, REDACTION_POLICY_VERSION };
 
 /**
- * Patterns that mark a string as secret-shaped regardless of which key it
- * lives under. Applied to every string value walked + to whole raw frames
- * that fail JSON.parse. Each pattern is anchored to a recognisable prefix
- * + bounded entropy class so it doesn't false-positive on regular text.
- */
-const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
-  // OpenAI / generic `sk-...` keys (incl. project & user variants).
-  /\bsk-(?:proj-|user-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g,
-  // Anthropic API keys.
-  /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g,
-  // HTTP-style Bearer tokens.
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/g,
-  // GitHub personal access + OAuth tokens.
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
-  // GitHub fine-grained PATs (github_pat_*).
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  // Hunt finding #7 — Companion auth token travelling in a WS URL query
-  // string (`?token=<hex>` / `&access_token=<hex>`). Lookbehind keeps the
-  // param NAME in the recording (useful for debugging which URL leaked) and
-  // redacts only the value. Covers any URL-shaped value, not just keys under
-  // SENSITIVE_KEY_PATTERNS.
-  /(?<=[?&](?:token|access_token)=)[A-Za-z0-9._~+/=-]{16,}/g,
-  // Hunt finding #7 — the Companion auth token is a bare 32-byte hex value
-  // (`randomBytes(32).toString("hex")` → exactly 64 lowercase hex chars) with
-  // no prefix, so prefix-anchored patterns above never catch it when it
-  // appears outside a `token=` query string (e.g. echoed in a ws_close reason
-  // or an error string). Over-redaction of incidental 64-hex hashes (sha256)
-  // in recordings is an accepted trade vs. leaking a long-lived, un-rotated
-  // session credential.
-  /\b[0-9a-f]{64}\b/g,
-];
-
-/**
- * Cheap presence check. If none of these markers appear in the raw bytes,
- * the frame is provably inert wrt every secret pattern + key allowlist and
- * passes through {@link redactRaw} byte-identical — preserving the
- * "exact-bytes invariance" the replay test corpus relies on for fixtures
- * that don't contain credentials. Keep aligned with the structural
- * matchers above.
- */
-const SECRET_PRESCREEN_REGEX = new RegExp(
-  [
-    // value-shape markers
-    "\\bsk-",
-    "\\bBearer\\b",
-    "\\bgh[pousr]_",
-    "\\bgithub_pat_",
-    // Hunt finding #7 — `?token=`/`&access_token=` query-string credential
-    // and the bare 64-hex Companion auth-token shape. The hex marker forces
-    // any frame carrying a 64-char hex run through the parse-redact path.
-    "[?&](?:token|access_token)=",
-    "[0-9a-f]{64}",
-    // sensitive key-name markers (subset — narrow enough to avoid frequent
-    // false-prescreens but broad enough to catch every key in
-    // SENSITIVE_KEY_PATTERNS in any common casing).
-    "openai_api_key",
-    "anthropic_api_key",
-    "claude_code_oauth_token",
-    "claudeCodeOauthToken",
-    "claude_code_token",
-    "companion_auth_token",
-    "companionAuthToken",
-    "oauth_token",
-    "oauthToken",
-    "access_token",
-    "accessToken",
-    "refresh_token",
-    "refreshToken",
-  ].join("|"),
-  "i",
-);
-
-function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_KEY_PATTERNS.some((re) => re.test(key));
-}
-
-function redactPatternsInString(value: string): string {
-  let out = value;
-  for (const re of SECRET_VALUE_PATTERNS) {
-    out = out.replace(re, REDACTED_PLACEHOLDER);
-  }
-  return out;
-}
-
-function redactStructured(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactStructured);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (isSensitiveKey(k) && typeof v === "string" && v.length > 0) {
-        out[k] = REDACTED_PLACEHOLDER;
-      } else if (typeof v === "string") {
-        out[k] = redactPatternsInString(v);
-      } else {
-        out[k] = redactStructured(v);
-      }
-    }
-    return out;
-  }
-  if (typeof value === "string") return redactPatternsInString(value);
-  return value;
-}
-
-/**
- * Redact secrets from a raw protocol frame before it lands on disk.
+ * Redact secrets from a raw protocol frame before it lands on disk. Applied
+ * to EVERY recorded frame: both directions, both channels (CLI stdout/stdin,
+ * Codex JSON-RPC, browser-in `user_message`), plus lifecycle meta.
  *
- * Strategy (Task 11 — approach (i) parse-then-mutate-then-restringify):
- * 1. Fast pre-screen: if no secret marker appears in the bytes at all,
- *    return the input unchanged. This preserves byte-identical output
- *    for the overwhelming majority of frames (assistant deltas, tool
- *    results, ping/keepalive) and keeps replay fixtures stable.
- * 2. Parseable JSON: walk the object, replace values under sensitive
- *    keys with {@link REDACTED_PLACEHOLDER} and replace secret-shaped
- *    substrings inside every string value. Re-stringify. The output is
- *    guaranteed to be valid JSON — no "streaming regex over escape
- *    sequences produces unparseable line" hazard.
- * 3. Non-JSON raw (rare — `control_response` strings, lifecycle "" raw):
- *    apply the value patterns directly to the input string.
+ * 1. Pre-screen: a frame with no secret-shaped substring and no secret-ish
+ *    key word is returned unchanged (byte-identical replay fixtures).
+ * 2. Parseable JSON: deep-walk every string value (nested / double-encoded
+ *    JSON text included — rules are escape-aware) and every secret-named key,
+ *    re-stringify. If nothing was redacted, the ORIGINAL bytes are returned.
+ * 3. Non-JSON (multi-line chunks, plain text): apply the text rules directly;
+ *    they never touch `"` or `\` so a JSON-ish line stays parseable.
  *
  * Pure + side-effect free; exported for direct unit testing.
  */
 export function redactRaw(raw: string): string {
-  if (!raw || !SECRET_PRESCREEN_REGEX.test(raw)) return raw;
+  if (!raw || !mayContainSecret(raw)) return raw;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(redactStructured(parsed));
+    parsed = JSON.parse(raw);
   } catch {
-    return redactPatternsInString(raw);
+    return redactSecretsInText(raw);
   }
+  const redacted = JSON.stringify(redactStructured(parsed));
+  return redacted === JSON.stringify(parsed) ? raw : redacted;
 }
 
 // ─── SessionRecorder ─────────────────────────────────────────────────────────
@@ -310,6 +201,7 @@ export class SessionRecorder {
       started_at: Date.now(),
       cwd,
       redactionApplied: true,
+      redactionVersion: REDACTION_POLICY_VERSION,
     };
     // mode 0o600 honoured on file creation only (subsequent appends inherit
     // existing perms). Per Hunt security.md Principle 3: recordings carry
@@ -355,7 +247,7 @@ export class SessionRecorder {
     // Lifecycle meta can carry error.message / close.reason payloads that
     // occasionally echo the request URL with a token query — redact via the
     // same structured walker. raw is intentionally empty for events.
-    const redactedMeta = meta ? (redactStructured(meta) as Record<string, unknown>) : undefined;
+    const redactedMeta = meta ? redactStructured(meta) : undefined;
     const entry: RecordingEntry = {
       ts: Date.now(),
       dir: "in",

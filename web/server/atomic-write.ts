@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
@@ -24,7 +24,7 @@ import { log } from "./logger.js";
 export function writeAtomicJson(
   target: string,
   payload: unknown,
-  opts?: { maxBytes?: number },
+  opts?: { maxBytes?: number; space?: number },
 ): void {
   // Default cap is the council-artifact limit. Callers persisting
   // unbounded state (session JSON carries full message history) pass
@@ -70,7 +70,9 @@ export function writeAtomicJson(
     });
   }
 
-  const json = JSON.stringify(payload);
+  // `space` keeps hand-editable stores (settings.json, env profiles)
+  // pretty-printed as they were under the old writeFileSync path.
+  const json = JSON.stringify(payload, null, opts?.space);
   // Byte-count via Buffer — JS string `.length` is UTF-16 code units and
   // undercounts multibyte content by up to 3×. Hunt #6.
   const byteLen = Buffer.byteLength(json, "utf8");
@@ -80,17 +82,51 @@ export function writeAtomicJson(
     );
   }
 
+  writeFileDurably(dir, target, json, 0o600);
+}
+
+/**
+ * Atomic replace for arbitrary text — JSONL stores, mostly — with the same
+ * tmp(O_EXCL) → fsync → rename → fsync(dir) discipline as `writeAtomicJson`.
+ *
+ * Unlike the JSON writer it does NOT create or re-mode the parent directory to
+ * 0o700: in-repo dirs (`.agents/knowledge/`) keep their existing perms, and
+ * the file lands 0o644 unless `mode` says otherwise.
+ *
+ * `beforeRename` runs after the tmp is durable and immediately before the
+ * rename; throwing from it aborts the replace (tmp unlinked, target
+ * untouched). Callers use it as a compare-and-swap guard against a concurrent
+ * writer that changed the target since it was read.
+ */
+export function writeAtomicText(
+  target: string,
+  text: string,
+  opts?: { mode?: number; beforeRename?: () => void },
+): void {
+  const dir = dirname(target);
+  mkdirSync(dir, { recursive: true });
+  writeFileDurably(dir, target, text, opts?.mode ?? 0o644, opts?.beforeRename);
+}
+
+function writeFileDurably(
+  dir: string,
+  target: string,
+  text: string,
+  mode: number,
+  beforeRename?: () => void,
+): void {
   const tmp = join(dir, `.${randomBytes(8).toString("hex")}.tmp`);
   let fd = -1;
   let renamed = false;
   try {
     // O_EXCL fails loudly on collision (rather than silently truncating);
     // mode 0o600 keeps council artifacts unreadable by other UIDs on shared hosts.
-    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
-    writeSync(fd, json);
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, mode);
+    writeSync(fd, text);
     fsyncSync(fd);
     closeSync(fd);
     fd = -1;
+    beforeRename?.();
     renameSync(tmp, target);
     renamed = true;
   } finally {
@@ -128,5 +164,21 @@ export function writeAtomicJson(
         /* ignore */
       }
     }
+  }
+}
+
+/**
+ * Re-tighten a secret store that already exists on disk to 0o600.
+ * `writeFileSync(..., { mode })` applies the mode only when it creates the
+ * file, and a store that is read but never rewritten (auth.json) would keep
+ * whatever mode it was born with. Call on load. Best-effort: a missing file
+ * or a chmod we are not allowed to do never breaks the read.
+ */
+export function tightenFileMode(path: string): void {
+  try {
+    if ((statSync(path).mode & 0o077) === 0) return;
+    chmodSync(path, 0o600);
+  } catch {
+    /* missing file / not owner — the read path decides what to do */
   }
 }

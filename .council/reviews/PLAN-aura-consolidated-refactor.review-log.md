@@ -1,4 +1,4 @@
-# Spec Review Log — `PLAN-aura-consolidated-refactor.md`
+# Spec Review Log — `docs/history/PLAN-aura-consolidated-refactor.md`
 
 External review history for the consolidated refactor meta-spec. Kept here (not inside the spec) so the spec itself stays a stable artifact rather than a negotiation transcript across cycles.
 

@@ -61,6 +61,14 @@ export interface CleanupSchedulerOptions {
    * captures `Date.now()` at construction.
    */
   readonly bootTimeMsForTests?: number;
+  /**
+   * Log label for a non-cleanup instance (diagnostics plan Task 7/11): the log
+   * scope becomes `<label>-scheduler` and events `<label>.sweep.*` /
+   * `<label>.scheduler.*`, so an hourly KB-analysis check does not emit
+   * `cleanup.sweep.started` every hour and pollute the cleanup alert greps.
+   * Default "cleanup" — the existing instance is byte-identical.
+   */
+  readonly label?: string;
 }
 
 export class CleanupScheduler {
@@ -97,7 +105,14 @@ export class CleanupScheduler {
   private lastSweepCompletedAt: number | null = null;
   private lastSweepDurationMs: number | null = null;
 
+  private readonly scope: string;
+  private readonly ev: string;
+
   constructor(opts: CleanupSchedulerOptions = {}) {
+    const label = opts.label ?? "cleanup";
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(label)) throw new Error("CleanupScheduler: invalid label");
+    this.scope = `${label}-scheduler`;
+    this.ev = label;
     this.intervalMs = clampInterval(opts.intervalMs ?? DEFAULT_INTERVAL_MS);
     this.bootTimeMs = opts.bootTimeMsForTests ?? Date.now();
   }
@@ -146,8 +161,8 @@ export class CleanupScheduler {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       const code = (err as NodeJS.ErrnoException | undefined)?.code;
-      log.error("cleanup-scheduler", "Reconcile callback threw", {
-        event: "cleanup.reconcile.error",
+      log.error(this.scope, "Reconcile callback threw", {
+        event: `${this.ev}.reconcile.error`,
         reconcile: name,
         error_message: message,
         error_code: code ?? "unknown",
@@ -219,8 +234,8 @@ export class CleanupScheduler {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    log.info("cleanup-scheduler", "Scheduler started", {
-      event: "cleanup.scheduler.started",
+    log.info(this.scope, "Scheduler started", {
+      event: `${this.ev}.scheduler.started`,
       intervalMs: this.getEffectiveIntervalMs(),
       sweepCount: this.sweeps.size,
       reconcileCount: this.reconciles.size,
@@ -273,8 +288,8 @@ export class CleanupScheduler {
     if (this.inFlight !== null) {
       try { await this.inFlight; } catch { /* logged in runSweep */ }
     }
-    log.info("cleanup-scheduler", "Scheduler disposed", {
-      event: "cleanup.scheduler.disposed",
+    log.info(this.scope, "Scheduler disposed", {
+      event: `${this.ev}.scheduler.disposed`,
     });
   }
 
@@ -335,8 +350,8 @@ export class CleanupScheduler {
    */
   private async runSweep(): Promise<void> {
     const sweepStartedAt = Date.now();
-    log.info("cleanup-scheduler", "Sweep tick starting", {
-      event: "cleanup.sweep.started",
+    log.info(this.scope, "Sweep tick starting", {
+      event: `${this.ev}.sweep.started`,
       sweepCount: this.sweeps.size,
     });
     for (const [name, run] of this.sweeps) {
@@ -345,8 +360,8 @@ export class CleanupScheduler {
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         const code = (err as NodeJS.ErrnoException | undefined)?.code;
-        log.error("cleanup-scheduler", "Sweep callback threw", {
-          event: "cleanup.sweep.error",
+        log.error(this.scope, "Sweep callback threw", {
+          event: `${this.ev}.sweep.error`,
           sweep: name,
           error_message: message,
           error_code: code ?? "unknown",
@@ -362,8 +377,8 @@ export class CleanupScheduler {
     // `.finally` in `scheduleNext`.
     this.lastSweepCompletedAt = sweepCompletedAt;
     this.lastSweepDurationMs = durationMs;
-    log.info("cleanup-scheduler", "Sweep tick complete", {
-      event: "cleanup.sweep.completed",
+    log.info(this.scope, "Sweep tick complete", {
+      event: `${this.ev}.sweep.completed`,
       sweepCount: this.sweeps.size,
       durationMs,
     });

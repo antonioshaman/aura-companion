@@ -1,8 +1,14 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
+import type { SessionWorktreeInfo } from "../types.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } from "./council/index.js";
 import { cliFailedCopy } from "../cli-failed-copy.js";
-import type { CliFailedReason } from "../types.js";
+import {
+  CONVERGENCE_DISCLAIMER,
+  convergenceNotCountedInline,
+  type CliFailedReason,
+  type ConvergenceNotCountedReason,
+} from "../types.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -21,6 +27,13 @@ interface SessionItemProps {
    * Undefined when the session isn't part of a council pair. (2026-05-15 Item 17)
    */
   councilRole?: "orchestrator" | "observer";
+  /**
+   * Bidirectional pipeline Story 4.1.5 — convergence badge data for the
+   * council pair this session belongs to. Undefined for solo sessions (and
+   * for council pairs that have neither convergence progress nor a degraded
+   * status). Drives the `🔄 N/T` / `✅ Converged` / `⚠️ Degraded` badge.
+   */
+  councilConvergence?: CouncilConvergenceInfo;
   /**
    * PLAN T12 (Phase G) — when present, this session has a terminal
    * CLI failure (cli_failed wire frame landed). Renders a destructive
@@ -87,6 +100,103 @@ function StatusDot({ status }: { status: DerivedStatus }) {
   }
 }
 
+/**
+ * Bidirectional pipeline Story 4.1.5 — convergence badge in the sidebar row,
+ * attached to the SAME location as the existing ☼/☽ role decoration (spec's
+ * "convergence info attaches to the same location, not a new banner surface").
+ *
+ * Data-gated, NOT feature-flag-gated: it reads the server-authoritative
+ * convergence fields already on `GroupRecord` (populated by the live
+ * convergence-tracker → `group_convergence` pipeline) and only renders for
+ * council pairs — solo sessions never carry this prop. This matches the
+ * already-shipped, unconditional convergence rendering in `ObserverPanel`.
+ *
+ * Priority ladder mirrors AC 191-193:
+ *   degraded            →  ⚠️ Degraded   (amber-500, counter frozen)
+ *   converged           →  ✅ N× no blockers (emerald-500) — a streak, never
+ *                          "ready to ship" (P3/CONV-HONEST)
+ *   cycleNumber > 0     →  🔄 N/T        (mid-cycle progress)
+ *   notCounted, cycle 0 →  ∅ not counted (muted; latest review read nothing)
+ *   otherwise           →  nothing (cycle 0, no progress yet — no clutter)
+ *
+ * Whenever the latest review was not counted, the tooltip says why.
+ *
+ * The click-to-open popover (View final review / Reset counter / Dismiss) from
+ * AC 194 needs server endpoints that do not exist yet and is a documented
+ * follow-up; this badge is display-only and complete on its own.
+ */
+export interface CouncilConvergenceInfo {
+  state?: "in-progress" | "converged" | "revoked";
+  cycleNumber?: number;
+  threshold?: number;
+  degraded: boolean;
+  /** P3/CONV-HONEST: latest review was not counted, and why. */
+  notCounted?: ConvergenceNotCountedReason;
+}
+
+function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
+  if (info.degraded) {
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="degraded"
+        aria-label="Convergence frozen — pair degraded"
+        title="Convergence frozen — pair degraded"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 leading-none shrink-0"
+      >
+        <span aria-hidden="true">⚠️</span>
+        <span>Degraded</span>
+      </span>
+    );
+  }
+  const notCountedNote = info.notCounted ? ` Last review — ${convergenceNotCountedInline(info.notCounted)}.` : "";
+  if (info.state === "converged") {
+    const n = info.cycleNumber ?? info.threshold ?? 0;
+    const label = `${n} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`;
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="converged"
+        aria-label={label}
+        title={label}
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 leading-none shrink-0"
+      >
+        <span aria-hidden="true">✅</span>
+        <span>{n}× no blockers</span>
+      </span>
+    );
+  }
+  if (typeof info.cycleNumber === "number" && info.cycleNumber > 0 && typeof info.threshold === "number") {
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="cycle-progress"
+        aria-label={`Convergence cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
+        title={`${info.cycleNumber} of ${info.threshold} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`}
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 leading-none shrink-0"
+      >
+        <span aria-hidden="true">🔄</span>
+        <span>{info.cycleNumber}/{info.threshold}</span>
+      </span>
+    );
+  }
+  if (info.notCounted) {
+    const copy = convergenceNotCountedInline(info.notCounted);
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="not-counted"
+        aria-label={`Last review ${copy}. ${CONVERGENCE_DISCLAIMER}`}
+        title={`Last review ${copy}. ${CONVERGENCE_DISCLAIMER}`}
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-hover text-cc-muted leading-none shrink-0"
+      >
+        <span>not counted</span>
+      </span>
+    );
+  }
+  return null;
+}
+
 function BackendBadge({ type }: { type: "claude" | "codex" }) {
   if (type === "codex") {
     return (
@@ -112,6 +222,7 @@ export function SessionItem({
   councilPairing,
   councilUnreadStops,
   councilRole,
+  councilConvergence,
   cliFailedReason,
   onSelect,
   onStartRename,
@@ -323,11 +434,15 @@ export function SessionItem({
                 </span>
               )}
               <span className="flex items-center gap-1 shrink-0">
+                {councilConvergence && <CouncilConvergenceBadge info={councilConvergence} />}
                 <BackendBadge type={s.backendType} />
                 {s.isContainerized && (
                   <span className="flex items-center px-1 py-0.5 rounded bg-blue-400/10" title="Docker">
                     <img src="/logo-docker.svg" alt="Docker logo" className="w-3 h-3" />
                   </span>
+                )}
+                {s.worktree && (
+                  <WorktreeChip worktree={s.worktree} />
                 )}
                 {s.cronJobId && (
                   <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
@@ -501,5 +616,36 @@ export function SessionItem({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Worktree chip: the session runs in its own git worktree. Hover shows the
+ * path + branch. `kept` (amber) = archived but the worktree was retained
+ * because it still has uncommitted changes — nothing was deleted.
+ */
+function WorktreeChip({ worktree }: { worktree: SessionWorktreeInfo }) {
+  const kept = worktree.retained !== undefined;
+  const label = [
+    `${worktree.isolated ? "Isolated worktree" : "Worktree"}: ${worktree.path}`,
+    `branch ${worktree.branch}`,
+    kept
+      ? worktree.retained === "dirty"
+        ? "kept: has uncommitted changes"
+        : "kept: removal failed"
+      : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <span
+      data-testid="session-worktree-chip"
+      role="img"
+      aria-label={label}
+      title={label}
+      className={`font-mono-code uppercase tracking-wide leading-none text-[10px] px-1.5 py-0.5 rounded-md ${
+        kept ? "bg-amber-500/15 text-amber-500" : "bg-emerald-500/10 text-emerald-500"
+      }`}
+    >
+      {kept ? "wt kept" : "wt"}
+    </span>
   );
 }

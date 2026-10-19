@@ -48,7 +48,9 @@ export type EvalFindingSeverity = "STOP" | "WARN" | "NOTE" | "INFO";
 /** Grounding downgrade reasons, mirrored from observer-grounding. */
 export type EvalGroundingFailReason =
   | "evidence_not_in_modified_set"
-  | "evidence_missing_on_disk";
+  | "evidence_missing_on_disk"
+  | "evidence_lines_out_of_range"
+  | "evidence_lines_unchanged";
 
 /**
  * The manifest partition the observer reviewed, captured as SORTED arrays so
@@ -93,6 +95,22 @@ export interface EvalGroundingDowngrade {
 export interface EvalGroundingInputs {
   /** Workspace-relative evidence_path → existed-within-bounds at review time. */
   existence_by_path: Record<string, boolean>;
+  /**
+   * B2 line facts per evidence_path (additive, optional). Absent → the rerun
+   * skips line checks, exactly as the gate did when this sidecar was written
+   * without them. A path mapped to `null` had no readable content at review
+   * time (line-citing STOPs on it are weak evidence).
+   */
+  line_facts_by_path?: Record<string, EvalLineFacts | null>;
+}
+
+/** Frozen line facts for one evidence file — only what the line checks read. */
+export interface EvalLineFacts {
+  line_count: number;
+  /** 1-indexed inclusive ranges changed by the checkpoint; null = no baseline. */
+  changed_ranges: [number, number][] | null;
+  /** Text of every line some finding cited on this path, keyed by line number. */
+  cited_lines: Record<string, string>;
 }
 
 export interface EvalSidecarArtifact {

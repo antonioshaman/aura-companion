@@ -3,6 +3,8 @@ import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { api } from "../api.js";
 import { getModelsForBackend } from "../utils/backends.js";
+import { CacheRewriteHint } from "./CacheRewriteHint.js";
+import { ModelListFallbackHint, useModelListAutoRefresh } from "./ModelListFallbackHint.js";
 import type { ModelOption } from "../utils/backends.js";
 
 interface ModelSwitcherProps {
@@ -99,6 +101,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   useEffect(() => {
     void loadBackendModels(backendType);
   }, [backendType, loadBackendModels]);
+  useModelListAutoRefresh(backendType);
 
   // Friedman R3: per-key-status. Distinguish "no key configured" (show
   // footnote nudging Settings) from "key set but fetch failed" (silent —
@@ -437,12 +440,24 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                 ? `${model.label} is ${model.status} — use ${model.replacement} instead`
                 : `${model.label} is ${model.status} and can't be selected`
               : null;
+            // Honest status for catalogue models the registry never verified
+            // (most of the API-key /v1/models list). Subtle muted text, not a
+            // warning tag — the model stays selectable — and it coexists with
+            // "Latest". A registry status (e.g. Blocked) already says more.
+            const showUntested = model.untested === true && !statusLabel;
             return (
               <div
                 key={model.value}
                 id={`${idPrefix}-option-${index}`}
                 onClick={() => handleSelect(model.value)}
-                title={unavailableReason ?? model.label}
+                title={
+                  unavailableReason ??
+                  (showUntested
+                    ? `${model.label} — no session has run on this model on this Aura install yet; it may fail on your plan`
+                    : model.verifiedBy === "observed"
+                      ? `${model.label} — verified: a session on this install ran it successfully`
+                      : model.label)
+                }
                 // Task 10 (a11y P5): fold the suppression reason into the
                 // accessible NAME of the disabled option — `title` alone is only
                 // an accessible *description* and many SRs skip it. `aria-label`
@@ -468,6 +483,9 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                   </span>
                 )}
                 <span className="flex-1 text-left truncate">{model.label}</span>
+                {showUntested && (
+                  <span className="shrink-0 text-[10px] italic text-cc-muted">Untested</span>
+                )}
                 {statusLabel ? (
                   <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted px-1.5 py-0.5 rounded border border-cc-separator">
                     {statusLabel}
@@ -491,6 +509,13 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
             );
           })}
         </div>
+        {/* W7(b): a switch rebuilds the prompt cache — say how much, right
+           before the choice. Sibling of the listbox (not an option). */}
+        <CacheRewriteHint
+          sessionId={sessionId}
+          reason="model-switch"
+          className="px-3 py-2 border-t border-cc-separator"
+        />
         {/* PLAN Task 14 / Friedman R3 — discoverability footnote when
            the rendered list IS the static fallback AND the user has no
            API key. Connects the gated capability ("more models") to the
@@ -502,6 +527,12 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
            the dropdown. `onClick` closes the dropdown so the navigation
            is clean. Sits as a SIBLING of the listbox div (not a child) so
            SR doesn't iterate it as a phantom option. */}
+        {/* Key configured but the fetch failed → the list above is the
+           static fallback; say so and offer a manual retry. */}
+        <ModelListFallbackHint
+          backend={backendType}
+          className="px-3 py-2 border-t-2 border-cc-separator"
+        />
         {showNoKeyHint && (
           // PR #91 burndown Task 9 + Task 13 (Council Review 2026-06-04-1826
           // P2 #8 + P3 #14):

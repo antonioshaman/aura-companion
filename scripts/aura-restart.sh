@@ -20,6 +20,7 @@
 #   AURA_PIDFILE   (default /root/aura-companion/.aura-server.pid)
 #   AURA_LOGFILE   (default /root/aura-companion/web/bun.log)
 #   AURA_READY_TIMEOUT_S  (default 30)
+#   AURA_BUN_BIN   (default /home/auracomp/.bun/bin/bun)
 
 set -u
 
@@ -28,6 +29,11 @@ PORT="${AURA_PORT:-3456}"
 PIDFILE="${AURA_PIDFILE:-$REPO_ROOT/.aura-server.pid}"
 LOGFILE="${AURA_LOGFILE:-$REPO_ROOT/web/bun.log}"
 READY_TIMEOUT="${AURA_READY_TIMEOUT_S:-30}"
+# Resolve bun by absolute path — `sudo -u auracomp` inherits systemd's default
+# PATH (no `/home/auracomp/.bun/bin`), so a bare `bun` in the spawn line fails
+# with `env: 'bun': No such file or directory` even though the systemd unit's
+# ExecStart works (it hard-codes the same absolute path).
+AURA_BUN_BIN="${AURA_BUN_BIN:-/home/auracomp/.bun/bin/bun}"
 
 err()  { echo "[aura-restart] ERR: $*" >&2; }
 info() { echo "[aura-restart] $*"; }
@@ -77,8 +83,8 @@ start_detached() {
 
   # `setsid` detaches us from the controlling terminal so the child survives
   # this shell exiting. NODE_ENV=production matches the user's existing
-  # invocation pattern.
-  setsid env NODE_ENV=production bun server/index.ts >> "$LOGFILE" 2>&1 < /dev/null &
+  # invocation pattern. `$AURA_BUN_BIN` is absolute — see top-of-file rationale.
+  setsid env NODE_ENV=production "$AURA_BUN_BIN" server/index.ts >> "$LOGFILE" 2>&1 < /dev/null &
   local new_pid=$!
   disown "$new_pid" 2>/dev/null || true
   echo "$new_pid" > "$PIDFILE"
@@ -125,6 +131,14 @@ case "${1:-}" in
     exit $?
     ;;
   "")
+    # Validate replacement before destroying the working resource:
+    # if bun isn't reachable, exit BEFORE we SIGTERM the live server
+    # (would otherwise strand the user with nothing running).
+    if [[ ! -x "$AURA_BUN_BIN" ]]; then
+      err "bun binary not found or not executable at $AURA_BUN_BIN"
+      err "override with AURA_BUN_BIN=/path/to/bun; live server left untouched"
+      exit 1
+    fi
     stop_running
     start_detached
     if ! poll_ready; then

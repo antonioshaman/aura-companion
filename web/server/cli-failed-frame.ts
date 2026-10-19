@@ -47,13 +47,21 @@
  *                                  queue+notify only, NEVER
  *                                  calls `proc.kill()` in this
  *                                  branch.
+ *   - `backend_dead`               same drain-grace expiry, but the
+ *                                  backend was NOT connected at fire
+ *                                  time (process exited, or alive but
+ *                                  deaf — no attached adapter), so the
+ *                                  messages were never deliverable.
+ *                                  Recovery is a relaunch, not "your
+ *                                  tab" (P4/FIX-RECONNECT-RELAUNCH).
  */
 export type CliFailedReason =
   | "relaunch_exhausted"
   | "container_missing"
   | "container_stopped"
   | "binary_missing"
-  | "browser_closed_no_reconnect";
+  | "browser_closed_no_reconnect"
+  | "backend_dead";
 
 /**
  * Wire shape of the `cli_failed` browser frame.
@@ -138,6 +146,9 @@ export function buildCliFailedFrame(
     case "container_missing":
     case "container_stopped":
     case "binary_missing":
+    // backend_dead: the process may still exist, but it is unusable —
+    // false is what the frontend needs to phrase the recovery.
+    case "backend_dead":
       subprocessAlive = false;
       break;
     case "browser_closed_no_reconnect":

@@ -7,8 +7,11 @@ import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
+import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
-import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { AutoResumeBanner } from "./AutoResumeBanner.js";
+import { ModelFallbackNotice } from "./ModelFallbackNotice.js";
+import { ContextAdvisoryNotice } from "./ContextAdvisoryBanner.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
 import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
 import { navigateHome } from "../utils/routing.js";
@@ -57,6 +60,22 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     }
   }, [sessionId, setCliReconnecting]);
 
+  // Usage-limit auto-resume: server publishes the pending one-shot resume on
+  // session state (`auto_resume`); "Отменить" cancels it server-side, which
+  // clears the field via session_update.
+  const autoResume = useStore((s) => s.sessions.get(sessionId)?.auto_resume);
+  const [cancellingAutoResume, setCancellingAutoResume] = useState(false);
+  useEffect(() => setCancellingAutoResume(false), [sessionId, autoResume?.fireAt]);
+  const handleCancelAutoResume = useCallback(async () => {
+    setCancellingAutoResume(true);
+    try {
+      await api.cancelAutoResume(sessionId);
+    } catch (err) {
+      captureException(err);
+      setCancellingAutoResume(false);
+    }
+  }, [sessionId]);
+
   const perms = useMemo(
     () => (sessionPerms ? Array.from(sessionPerms.values()) : []),
     [sessionPerms]
@@ -71,6 +90,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   const findings = useStore((s) => (groupId ? s.findings.get(groupId) : undefined));
   const dismissedStopIds = useStore((s) => s.dismissedStopIds);
   const dismissStop = useStore((s) => s.dismissStop);
+  const disputeStop = useStore((s) => s.disputeStop);
   const topBlocker = useMemo(() => {
     if (!findings || findings.length === 0) return null;
     const live = findUnresolvedStops(findings, dismissedStopIds);
@@ -112,9 +132,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   // dismissible notice (same-tier auto-swap) or a pending cross-tier proposal
   // (never silent). Resolve model ids → human labels via the same catalog the
   // ModelSwitcher reads (dynamic list, falling back to the static set).
-  const substitutionNotice = useStore((s) => s.modelSubstitutionNotices.get(sessionId));
   const crossTierSwitch = useStore((s) => s.pendingCrossTierSwitches.get(sessionId));
-  const clearModelSubstitutionNotice = useStore((s) => s.clearModelSubstitutionNotice);
   const clearPendingCrossTierSwitch = useStore((s) => s.clearPendingCrossTierSwitch);
   const setPendingClaudeModelSwitch = useStore((s) => s.setPendingClaudeModelSwitch);
   const updateSession = useStore((s) => s.updateSession);
@@ -161,10 +179,6 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     clearPendingCrossTierSwitch(sessionId);
   }, [clearPendingCrossTierSwitch, sessionId]);
 
-  const handleSubstitutionDismiss = useCallback(() => {
-    clearModelSubstitutionNotice(sessionId);
-  }, [clearModelSubstitutionNotice, sessionId]);
-
   // Council Mode: observer half has its permission-mode locked at spawn
   // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
   // observer would expose a toggle that the server-side gate (ws-bridge)
@@ -174,7 +188,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     useStore((s) => s.sessions.get(sessionId)?.sessionGroupRole) === "observer";
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div data-testid="chatview" className="flex flex-col h-full min-h-0">
       {/* CLI disconnected / reconnecting / error banner */}
       {showCliBanner && (
         <div className="px-4 py-2 bg-cc-warning/10 border-b border-cc-warning/20 text-center flex items-center justify-center gap-3">
@@ -258,28 +272,53 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : cliFailure ? (
         <div id={`cli-failed-banner-${sessionId}`} className="shrink-0 border-t border-cc-border bg-cc-card">
-          <CliFailedBanner failure={cliFailure} onStartNewSession={handleCliFailedStartNew} />
+          <CliFailedBanner
+            failure={cliFailure}
+            onStartNewSession={handleCliFailedStartNew}
+            onRelaunch={handleReconnect}
+            relaunching={cliReconnecting}
+            relaunchError={reconnectError}
+          />
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
-          <BlockerBanner finding={topBlocker} onDismiss={dismissStop} />
+          {/* Contain a render throw in the observer-driven blocker banner to
+              this slot — a bad finding payload must not blank the whole app
+              via the root AppErrorBoundary (RC-1 T13 / RC-5). */}
+          <SectionErrorBoundary label="Blocker">
+            <BlockerBanner finding={topBlocker} onDismiss={dismissStop} onDispute={disputeStop} />
+          </SectionErrorBoundary>
         </div>
       ) : null}
 
-      {/* Model Registry Task 9 — proactive same-tier substitution notice. A
-          calm, additive warning banner (NOT priority-gated like the slot above):
-          a model fallback is infrastructure info, never a blocker, so it sits in
-          its own slot and coexists with the chat. */}
-      {substitutionNotice && (
+      {/* Usage-limit auto-resume notice — additive info banner (own slot,
+          like the model-fallback notice below): the session will continue by
+          itself after the reset unless the user cancels. */}
+      {autoResume && (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
-          <ModelFallbackBanner
-            fromModel={modelLabel(substitutionNotice.requested)}
-            toModel={modelLabel(substitutionNotice.applied)}
-            reason={substitutionNotice.reason}
-            onDismiss={handleSubstitutionDismiss}
+          <AutoResumeBanner
+            resetAt={autoResume.resetAt}
+            fireAt={autoResume.fireAt}
+            resetSource={autoResume.resetSource}
+            paused={autoResume.paused === true}
+            onCancel={handleCancelAutoResume}
+            cancelling={cancellingAutoResume}
           />
         </div>
       )}
+
+      {/* Model fallback notice (Task 9 + Task A.2) — one persistent banner for
+          every "running on a different model than you chose" path: client
+          gate/revert notices AND server-recorded fallbacks (spawn substitution,
+          Codex rejection, chain fallback, silence rotation). Additive, NOT
+          priority-gated like the slot above: infrastructure info, never a
+          blocker, so it coexists with the chat. */}
+      <ModelFallbackNotice sessionId={sessionId} />
+
+      {/* Context-overflow handoff (>= 5 MB transcript): one-click "Continue
+          in a new session". Server-recorded on the session state, so it
+          survives a reload; works even when the CLI no longer answers. */}
+      <ContextAdvisoryNotice sessionId={sessionId} />
 
       {/* Composer — suppressed for the observer half of a Council pair.
           The toggle's set_permission_mode would be rejected server-side

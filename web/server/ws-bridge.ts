@@ -1,3 +1,4 @@
+import { getVerifiedModelStore } from "./verified-models.js";
 import type { ServerWebSocket } from "bun";
 import type {
   BrowserOutgoingMessage,
@@ -6,10 +7,15 @@ import type {
   PermissionRequest,
   BackendType,
   McpServerConfig,
+  ModelFallbackRecord,
+  ContextAdvisoryRecord,
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, INIT_PROBE_LEGACY_GRACE_MS } from "./claude-adapter.js";
+import { assistantDeliveryKey } from "./ws-bridge-cli-ingest.js";
+import type { CliTransport } from "./cli-transport.js";
+import { WebSocketCliTransport } from "./cli-transport.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
@@ -36,6 +42,7 @@ import {
   persistSession as persistSessionFn,
   serializeForStore,
   trimArchivedSessionState,
+  clearStaleModelFallback,
 } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
@@ -56,18 +63,22 @@ import {
 import { validatePermission } from "./ai-validator.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
+import { isObserverProbeText } from "./observer-probe.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import { log } from "./logger.js";
 
 // AURA-LOCAL — PLAN T10/T11 (Phase F). Drain dispatch wiring.
 import {
   selectDrainTargets,
   shouldSuppressDrain,
+  countUserQueuedMessages,
 } from "./cleanup/drain-selector.js";
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -119,6 +130,31 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
   "mcp_reconnect",
   "mcp_set_servers",
 ]);
+
+/**
+ * Marker text sent as the content of the init-probe `user` frame at
+ * kickoff time. See {@link WsBridge.sendInitProbeAndInterrupt} for the
+ * rationale. The interrupt that follows aborts the probe's own turn.
+ *
+ * The marker must NOT tell the model to stay silent. The probe and its
+ * "[Request interrupted by user]" stay in the transcript, and the CLI
+ * folds the next real prompt into the same human turn. The old wording
+ * ("…not from a user; do not respond") then applied to the user's real
+ * message: prod transcripts show "No response requested." replies to
+ * "продолжаем" / "Continue from where you left off.", and users had to
+ * repeat themselves after every reconnect. So the marker only scopes
+ * itself to its own line and asks for a normal answer to what follows.
+ */
+export const AURA_INIT_PROBE_MARKER =
+  "[Aura Companion init probe: technical reconnect marker, not a request. Ignore only this line; answer any user message that follows normally.]";
+
+/**
+ * Upper bound on the delay between the CLI's `system.init` and the probe
+ * interrupt on CLIs without `command_lifecycle` frames (the legacy trigger).
+ * On current CLIs the interrupt is sent the moment the CLI reports the probe
+ * turn as started. Kept as the exported name the replay tests pin against.
+ */
+export const AURA_INIT_PROBE_INTERRUPT_DELAY_MS = INIT_PROBE_LEGACY_GRACE_MS;
 
 export class WsBridge {
   private static readonly PROCESSED_CLIENT_MSG_ID_LIMIT = 1000;
@@ -291,6 +327,45 @@ export class WsBridge {
     if (!session) return;
     session.state.linearSessionId = linearSessionId;
     this.persistSession(session);
+  }
+
+  /**
+   * Record that the server moved this session off the user's model (Task A.2).
+   * Lives on `session.state` so it is persisted AND replayed in every
+   * `session_init` snapshot — a reloaded tab still shows the notice — and is
+   * pushed to live tabs as a `session_update`. `backendType` is only used
+   * when the bridge session does not exist yet (spawn-time fallback before
+   * any browser/CLI attached), so a Codex session is never created as Claude.
+   */
+  recordModelFallback(
+    sessionId: string,
+    fallback: Omit<ModelFallbackRecord, "at">,
+    backendType?: BackendType,
+  ): void {
+    const session = this.getOrCreateSession(sessionId, backendType);
+    const record: ModelFallbackRecord = { ...fallback, at: Date.now() };
+    session.state.model_fallback = record;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: record } });
+  }
+
+  /**
+   * Record a context-size advisory that offers "Continue in a new session"
+   * (context-overflow handoff). Same shape as {@link recordModelFallback}:
+   * lives on `session.state` so it is persisted and replayed in every
+   * `session_init` (a reloaded tab still shows the banner), and is pushed to
+   * live tabs as a `session_update`. Never creates a bridge session — an
+   * advisory for a session the bridge doesn't know has nothing to render on.
+   * Returns false when the session is unknown.
+   */
+  recordContextAdvisory(sessionId: string, advisory: Omit<ContextAdvisoryRecord, "at">): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const record: ContextAdvisoryRecord = { ...advisory, at: Date.now() };
+    session.state.context_advisory = record;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { context_advisory: record } });
+    return true;
   }
 
   /** Return all sessions that have a linearSessionId set (for map restoration on startup). */
@@ -604,6 +679,10 @@ export class WsBridge {
     return Array.from(this.sessions.values()).map((s) => s.state);
   }
 
+  hasConnectedBackend(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.backendAdapter?.isConnected() === true;
+  }
+
   /**
    * PLAN Task 11: synchronously flush every pending debounced session-store
    * write to disk. Used by `gracefulShutdown` so a state mutation that
@@ -684,11 +763,15 @@ export class WsBridge {
       return { fired: false, drainedCount: 0 };
     }
     const pendingCount = session.pendingMessages.length;
-    if (shouldSuppressDrain(reason, pendingCount)) {
+    // P4/FIX-RECONNECT-RELAUNCH: suppression counts only what the user sent —
+    // browser status polls (`mcp_get_status`) stay queued for the next backend.
+    const userCount = countUserQueuedMessages(session.pendingMessages);
+    if (shouldSuppressDrain(reason, userCount)) {
       log.info("ws-bridge", "cli_failed drain suppressed (zero queued)", {
         event: "ws_bridge.cli_failed.suppressed",
         sessionId,
         reason,
+        serviceQueued: pendingCount,
       });
       return { fired: false, drainedCount: 0 };
     }
@@ -717,6 +800,7 @@ export class WsBridge {
       sessionId,
       reason,
       drainedCount: pendingCount,
+      userMessages: userCount,
       browserCount: selection.browserIds.length,
       subprocessAlive: selection.frame.subprocessAlive,
     });
@@ -743,7 +827,12 @@ export class WsBridge {
       const session = this.sessions.get(sessionId);
       if (!session) return;
       if (session.browserSockets.size > 0) return;
-      this.dispatchCliFailedDrain(sessionId, "browser_closed_no_reconnect");
+      // P4/FIX-RECONNECT-RELAUNCH: the queue never drained because the backend
+      // is down — say that, not "you closed this tab".
+      this.dispatchCliFailedDrain(
+        sessionId,
+        this.isCliConnected(sessionId) ? "browser_closed_no_reconnect" : "backend_dead",
+      );
     }, WsBridge.BROWSER_DRAIN_GRACE_MS);
     this.browserDrainTimers.set(sessionId, timer);
   }
@@ -774,6 +863,49 @@ export class WsBridge {
       // class of bug where a new re-attach site forgets to update it.
       reachable: s.backendAdapter?.isConnected() ?? false,
     }));
+  }
+
+  /** Return the number of pending (queued) user messages for a session. */
+  getSessionPendingMessageCount(sessionId: string): number {
+    return this.sessions.get(sessionId)?.pendingMessages.length ?? 0;
+  }
+
+  /**
+   * Total number of browser WebSockets connected across all sessions right now.
+   * Used by the presence-ping loop to decide whether a human currently has the
+   * UI open — zero means the install is up but nobody is looking, so it should
+   * NOT count toward the global "online now" figure.
+   */
+  countConnectedBrowsers(): number {
+    let total = 0;
+    for (const session of this.sessions.values()) {
+      total += session.browserSockets.size;
+    }
+    return total;
+  }
+
+  /**
+   * Approximate number of DISTINCT humans with the UI open right now, deduped by
+   * the anonymous per-browser `clientId`. A single person viewing N sessions
+   * holds N browser sockets (one per session) but sends the same clientId on
+   * each, so they collapse to 1 here — unlike `countConnectedBrowsers`, which
+   * sums raw sockets. Feeds the global "online now" headcount.
+   *
+   * Sockets WITHOUT a clientId are excluded, not counted. Only real browsers
+   * mint a clientId (localStorage, appended to the WS URL); clientId-less
+   * connections are non-human server-side consumers of the browser WS surface
+   * (Council orchestrator/observer halves, agent sessions), and counting them
+   * as people inflated the headcount above the real number of humans.
+   */
+  countDistinctBrowsers(): number {
+    const ids = new Set<string>();
+    for (const session of this.sessions.values()) {
+      for (const ws of session.browserSockets) {
+        const clientId = (ws.data as { clientId?: string }).clientId;
+        if (clientId) ids.add(clientId);
+      }
+    }
+    return ids.size;
   }
 
   /** Return current phase for each session (for metrics gauges). */
@@ -816,6 +948,7 @@ export class WsBridge {
       session.browserSockets.clear();
     }
     this.sessions.delete(sessionId);
+    this.recoveredDeliveries.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
   }
@@ -891,6 +1024,7 @@ export class WsBridge {
     session.browserSockets.clear();
 
     this.sessions.delete(sessionId);
+    this.recoveredDeliveries.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
   }
@@ -931,10 +1065,31 @@ export class WsBridge {
 
     // ── onBrowserMessage — messages from backend → browsers ──────────────
     adapter.onBrowserMessage((msg) => {
+      // Drift recovery (W1) may already have delivered this exact frame from
+      // the CLI's jsonl; a late stdout flush of the killed CLI (or a replay)
+      // must not deliver it a second time. One-shot per recovered record.
+      if (msg.type === "assistant" && this.consumeRecoveredDelivery(session.id, msg.message as unknown as Record<string, unknown>)) {
+        log.info("ws-bridge", "dropped a live assistant frame the drift recovery already delivered", {
+          event: "silent_stdio_drift.late_frame_deduped",
+          sessionId: session.id,
+        });
+        return;
+      }
       // Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns
       // do NOT advance the clock; only user-driven CLI activity does.
       this.noteCliActivity(session);
       metricsCollector.recordMessageProcessed(msg.type);
+      // Reply-delivery metrics (time to first output, "No response
+      // requested." after a real user message). Backend-agnostic.
+      deliveryMetrics.recordBackendFrame(session.id, msg);
+      // Prompt-cache telemetry: the first model-output frame after a result
+      // opens the turn when no routed user_message did (council wakes,
+      // auto-proceed, adapter-injected observer turns) — otherwise the idle
+      // gap in llm.turn_usage would be measured up to the RESULT instead of
+      // the request that hit (or missed) the cache.
+      if (session.turnStartedAt === undefined && (msg.type === "stream_event" || msg.type === "assistant")) {
+        session.turnStartedAt = Date.now();
+      }
 
       // -- session_init: merge into session state, broadcast, persist -----
       if (msg.type === "session_init") {
@@ -975,6 +1130,7 @@ export class WsBridge {
         };
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: session.state });
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {
           this.flushQueuedBrowserMessages(session, adapter, "backend_session_update");
         }
@@ -1008,18 +1164,7 @@ export class WsBridge {
 
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
-        // PLAN Task 12 — stamp `streamStatus: "complete"` on the persisted
-        // form. The consolidated assistant frame IS the completion signal:
-        // by reaching this branch we have a whole turn from the CLI. If a
-        // streaming tracker is still set for this id, clear it so the
-        // disconnect-time interrupted flush doesn't emit a duplicate.
-        if (session.streamingAssistant?.id === msg.message.id) {
-          session.streamingAssistant = null;
-        }
-        const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
-        this.appendHistory(session, assistantMsg);
-        this.persistSession(session);
-        companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+        this.ingestAssistantFrame(session, msg);
       }
 
       if (msg.type === "stream_event") {
@@ -1035,6 +1180,20 @@ export class WsBridge {
       // -- result: update session cost/turns, refresh git, notify listeners
       if (msg.type === "result") {
         const resultData = msg.data;
+        // Observed-working models: a successful turn whose MAIN thread
+        // answered on a real model is runtime proof the model works on this
+        // install → the dropdown stops flagging it "Untested". Failed turns,
+        // `<synthetic>` (model-unavailable) frames and subagent-only turns
+        // never set `turnObservedModel`, so they record nothing. A Codex
+        // SUBAGENT thread's result (`subagent_turn`) is not the main turn's
+        // outcome: it neither records nor clears the pending observation.
+        if (!resultData.subagent_turn) {
+          const observed = session.turnObservedModel;
+          session.turnObservedModel = undefined;
+          if (observed && resultData.subtype === "success" && !resultData.is_error) {
+            getVerifiedModelStore()?.recordSuccess(session.backendType, observed);
+          }
+        }
         session.state.total_cost_usd = resultData.total_cost_usd;
         session.state.num_turns = resultData.num_turns;
         if (typeof resultData.total_lines_added === "number") {
@@ -1044,6 +1203,12 @@ export class WsBridge {
           session.state.total_lines_removed = resultData.total_lines_removed;
         }
         if (resultData.modelUsage) {
+          // Context-window usage only. NOTE: the session's MODEL is NOT derived
+          // here — modelUsage aggregates every model the turn touched (including
+          // a Task subagent on a different model), so token-dominance could pick
+          // a subagent's model. The authoritative "model the session is on" is
+          // the main assistant frame (parent_tool_use_id === null), handled in
+          // the `assistant` branch above.
           for (const usage of Object.values(resultData.modelUsage)) {
             if (usage.contextWindow > 0) {
               const pct = Math.round(
@@ -1053,9 +1218,50 @@ export class WsBridge {
             }
           }
         }
+        // WS-3 A-2 (prompt-cache audit C-6) + W6/W7: per-turn cache telemetry
+        // as a structured line. Counters only, никакого контента. Error and
+        // zero-usage frames are logged but flagged `countable: false` so they
+        // don't drag hit-rate aggregates; only a frame that actually reached
+        // the model (prompt tokens > 0) advances the idle clock.
+        let cacheClockAdvanced = false;
+        {
+          const now = Date.now();
+          const line = buildTurnUsageLogLine({
+            sessionId: session.id,
+            backend: session.backendType,
+            model: session.state.model,
+            result: resultData,
+            turnStartedAt: session.turnStartedAt ?? now,
+            previousTurnCompletedAt: session.state.last_turn_completed_at,
+            prefixChanges: session.pendingCachePrefixChanges ?? [],
+          });
+          console.log(JSON.stringify(line));
+          session.turnStartedAt = undefined;
+          if (line.prompt_tokens !== null && line.prompt_tokens > 0) {
+            session.pendingCachePrefixChanges = [];
+            session.state.last_turn_completed_at = now;
+            cacheClockAdvanced = true;
+          }
+        }
         this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
+        if (cacheClockAdvanced) {
+          // After the git refresh so its (conditional) session_update keeps
+          // its place; carries only the two cache-hint fields.
+          this.broadcastToBrowsers(session, {
+            type: "session_update",
+            session: {
+              last_turn_completed_at: session.state.last_turn_completed_at,
+              ...(session.state.last_context_tokens !== undefined
+                ? { last_context_tokens: session.state.last_context_tokens }
+                : {}),
+            },
+          });
+        }
         this.appendHistory(session, msg);
         session.stateMachine.transition("ready", "turn_completed");
+        if (session.pendingMessages.length > 0 && adapter.isConnected()) {
+          this.flushQueuedBrowserMessages(session, adapter, "turn_completed_flush");
+        }
         this.persistSession(session);
         companionBus.emit("message:result", { sessionId: session.id, message: msg });
 
@@ -1131,7 +1337,14 @@ export class WsBridge {
       if (meta.cliSessionId) {
         companionBus.emit("session:cli-id-received", { sessionId: session.id, cliSessionId: meta.cliSessionId });
       }
-      if (meta.model) session.state.model = meta.model;
+      if (meta.model) {
+        // Baseline seed only when the spawn did not provide one (no --model
+        // flag, or the legacy WS path's first connect). Later inits (the CLI
+        // re-emits one after a set_model) only move the UI label —
+        // persistence waits for the main assistant frame to confirm.
+        if (session.launcherModel === undefined) session.launcherModel = meta.model;
+        session.state.model = meta.model;
+      }
       // For containerized sessions, the CLI reports the container's cwd (e.g. /workspace).
       // Keep the host path (set by markContainerized()) for correct project grouping.
       if (meta.cwd && !session.state.is_containerized) {
@@ -1184,6 +1397,18 @@ export class WsBridge {
 
     // ── onInitError (optional) ───────────────────────────────────────────
     adapter.onInitError?.((error) => {
+      // Council review 2026-09-08 #5: stale-adapter guard, mirroring the
+      // `onDisconnect` handler above. `companionBus.emit` is synchronous, so
+      // on a model-rejection auto-respawn the launcher's own onInitError
+      // subscriber (registered first) replaces `session.backendAdapter` with
+      // the fresh adapter BEFORE this subscriber runs — inside the old
+      // adapter's callback loop. Without this guard we broadcast the old,
+      // already-superseded adapter's error for a session that has already
+      // recovered, showing the user an alarming toast for a self-healed blip.
+      if (session.backendAdapter !== adapter) {
+        log.info("ws-bridge", "Ignoring stale init error (adapter replaced)", { sessionId });
+        return;
+      }
       log.error("ws-bridge", "Backend init error", { sessionId, error });
       this.broadcastToBrowsers(session, { type: "error", message: error });
     });
@@ -1198,6 +1423,19 @@ export class WsBridge {
 
     // Broadcast cli_connected
     this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Transient hydration for browsers that reconnect after a Codex adapter
+    // attaches before the launcher/REST snapshot catches up. Keep it out of
+    // eventBuffer: replay should stay reserved for durable conversation events.
+    for (const ws of session.browserSockets) {
+      this.sendToBrowser(ws, {
+        type: "session_update",
+        session: {
+          session_id: session.id,
+          backend_type: session.backendType,
+          state: "connected",
+        } as Partial<SessionState> & { state: "connected" },
+      });
+    }
     // Fowler finding #12 — reachability derived from the live adapter at read
     // time; no cached bit to flip here.
     log.info("ws-bridge", "Backend adapter attached", {
@@ -1284,6 +1522,50 @@ export class WsBridge {
   handleCLIOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("cli", "open");
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
+    this.openCliTransport(sessionId, new WebSocketCliTransport(ws));
+  }
+
+  /**
+   * Open path for a stdio-transported Claude CLI.
+   *
+   * A current CLI cannot connect back over WebSocket (the `--sdk-url` host
+   * allowlist), so the launcher spawns it with pipes and hands the write end
+   * here. Everything downstream — adapter construction with the bridge's own
+   * idle-clock closures, state-machine transitions, the initialize kickoff and
+   * the queued-message flush — is identical to the WebSocket path, which is
+   * why both funnel through {@link openCliTransport}.
+   *
+   * Returns the adapter so the caller can pump the child's stdout into
+   * {@link ClaudeAdapter.handleRawMessage}.
+   */
+  handleCLIStdioOpen(
+    sessionId: string,
+    transport: CliTransport,
+    opts?: { resume?: boolean; spawnModel?: string },
+  ): ClaudeAdapter {
+    this.recorder?.recordEvent(sessionId, "ws_open", "cli");
+    // A stdio open is always a freshly spawned process, so its spawn
+    // `--model` (from the launcher's real argv) IS the persisted baseline.
+    // The legacy WS path never resets it: a WS reconnect can re-dial the SAME
+    // live process, whose baseline must survive (observer review, cp 152).
+    // Undefined (no --model flag) → the process's first init seeds it.
+    this.getOrCreateSession(sessionId).launcherModel = opts?.spawnModel;
+    return this.openCliTransport(sessionId, transport, { resume: opts?.resume });
+  }
+
+  /**
+   * Transport-agnostic CLI open sequence — see the two entry points above.
+   *
+   * `opts.resume` (stdio path only) flags a `--resume` spawn so the adapter
+   * arms the longer init-frame canary deadline; the legacy WS path leaves it
+   * unset (cold deadline), which is correct — a WS resume re-dials an already
+   * loaded process rather than paying the cold transcript-replay cost.
+   */
+  private openCliTransport(
+    sessionId: string,
+    transport: CliTransport,
+    opts?: { resume?: boolean },
+  ): ClaudeAdapter {
     const session = this.getOrCreateSession(sessionId);
 
     // Create or retrieve ClaudeAdapter for this session
@@ -1330,8 +1612,12 @@ export class WsBridge {
       log.info("ws-bridge", "CLI connected", { sessionId });
     }
 
-    // Attach the raw WebSocket to the adapter (flushes pending NDJSON)
-    adapter.attachWebSocket(ws);
+    // Select the init-frame canary deadline BEFORE attach — a `--resume`
+    // spawn replays its transcript + makes a first API round-trip before
+    // `system.init`, so it gets the longer window (prod incident eb13fc90).
+    adapter.setResumeExpected(!!opts?.resume);
+    // Attach the control channel to the adapter (flushes pending NDJSON)
+    adapter.attachTransport(transport);
 
     // Broadcast cli_connected on reconnection (new adapters already got this
     // via attachBackendAdapter to avoid double-broadcasting)
@@ -1363,6 +1649,8 @@ export class WsBridge {
         }
       }
     }
+
+    return adapter;
   }
 
   handleCLIMessage(ws: ServerWebSocket<SocketData>, raw: string | Buffer) {
@@ -1494,10 +1782,37 @@ export class WsBridge {
     }
 
     // Notify if backend is not connected and request relaunch.
-    // Treat an attached adapter as "alive" during init — `isConnected()`
-    // may flip true only after initialize/thread start, and relaunching
-    // during that window can kill a healthy startup.
-    const backendConnected = !!session.backendAdapter;
+    // LIVENESS, not mere presence (RC-1). A stdio Claude process death runs
+    // `adapter.handleTransportClose()`, which nulls the transport but leaves the
+    // `ClaudeAdapter` object attached and fires no disconnect callback — so
+    // `!!session.backendAdapter` reads that corpse as alive and the returning
+    // user never triggers a relaunch (the exact "idle session won't come back"
+    // regression). For Claude, `isConnected()` is transport-presence: true
+    // throughout init (transport is attached before `system.init`), false only
+    // when the transport is gone — so it is the correct liveness signal and does
+    // NOT relaunch a healthy mid-init session. Codex KEEPS presence semantics:
+    // its `connected` flag is legitimately false during a ~16s init window and
+    // its own `onDisconnect` already emits `session:relaunch-needed` on real
+    // death, so using `isConnected()` for Codex would relaunch a healthy startup.
+    //
+    // INVARIANT — for Claude, `isConnected() === false` means a dead/exited spawn,
+    // NEVER merely "adapter assigned, transport not yet attached". Proof by
+    // construction order: `openCliTransport()` (the sole assigner of a Claude
+    // `session.backendAdapter`, via `attachBackendAdapter`) is SYNCHRONOUS from
+    // that assignment through `adapter.attachTransport(transport)` — no `await`
+    // between them. On the single-threaded loop, this synchronous
+    // `handleBrowserOpen` cannot interleave into that gap, so a Claude adapter
+    // observed here with `transport === null` has always already had its transport
+    // NULLED by a close path (`handleTransportClose` on process exit → launcher
+    // marks `state:"exited"`, or `disconnect()` on archive). The transient WS
+    // reconnect case (transport briefly closed but recovering) is separately
+    // covered by the `!this.disconnectTimers.has(sessionId)` guard below, which
+    // defers to `handleCLIClose`'s 15s debounce timer — so this fix does not
+    // regress `COMPANION_CLAUDE_TRANSPORT=ws`.
+    const backendConnected =
+      session.backendAdapter instanceof ClaudeAdapter
+        ? session.backendAdapter.isConnected()
+        : !!session.backendAdapter;
 
     // An archived session's backend is dead by design (the user closed it).
     // Emitting `cli_disconnected` would render a spurious "reconnecting" flap
@@ -1545,7 +1860,7 @@ export class WsBridge {
   injectUserMessage(
     sessionId: string,
     content: string,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-resume" | "council:peer",
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1553,6 +1868,22 @@ export class WsBridge {
       return;
     }
     this.routeBrowserMessage(session, { type: "user_message", content }, undefined, origin);
+  }
+
+  /**
+   * Publish the pending usage-limit auto-resume for a session (or clear it
+   * with `null`): stored on `session.state.auto_resume` so a reconnecting
+   * browser gets it in `session_init`, and broadcast as `session_update` for
+   * the live banner. No-op for an unknown session.
+   */
+  setAutoResumeState(sessionId: string, state: SessionState["auto_resume"]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const next = state ?? null;
+    if (session.state.auto_resume === undefined && next === null) return;
+    session.state.auto_resume = next;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { auto_resume: next } });
   }
 
   /** Configure MCP servers on a session programmatically (no browser required).
@@ -1622,16 +1953,57 @@ export class WsBridge {
 
   /**
    * Bootstrap kickoff for sessions that never get browser-driven traffic
-   * (e.g. Council Mode observers). Sends ONE `initialize` control_request
-   * on CLI ws_open so the CLI emits its `system` init and reaches "ready"
-   * state without depending on user input or browser activity. Claude-only.
+   * (e.g. Council Mode observers) or fresh chats where the user hasn't
+   * typed yet. Fires on CLI ws_open so the CLI emits its `system` init
+   * and reaches "ready" state without depending on user input or browser
+   * activity. Claude-only.
    *
-   * OBS-STOP-1 fix: if `session.pendingSystemPromptInjection` is set
+   * **Codex has no init probe.** Its app-server handshake is the JSON-RPC
+   * `initialize` / `initialized` exchange done by the Codex adapter, which
+   * needs no user turn; the `instanceof ClaudeAdapter` guard below makes
+   * this a no-op for Codex, so a Codex session's first user message is
+   * never preceded by a probe and cannot be folded into one. Pinned by
+   * "codex solo session" in init-probe-reconnect.replay.test.ts.
+   *
+   * **The kickoff shape changed 2026-09-20 after a prod incident.** The
+   * prior implementation sent a bare `control_request{initialize}`; that
+   * frame IS accepted by CLI 2.1.265+ but does NOT trigger the CLI's
+   * `system.init` emit — the CLI ONLY emits `system.init` in response to
+   * an actual `user` frame on stdin. Verified end-to-end on aura-companion
+   * prod: 4 Claude pairs sat silent-init for hours across CLI 2.1.263,
+   * 2.1.265, 2.1.266, 2.1.278; only typing a real message unblocked each.
+   * Recording (`~/.companion/recordings/*_claude_*.jsonl`) showed
+   * `control_request{initialize}` → `control_response{success}` → no
+   * `system.init` frame ever. See
+   * `feedback_aura_cli_init_needs_user_message_not_kickoff.md`.
+   *
+   * The new kickoff sends the following stdin sequence:
+   *   1. `control_request{initialize, appendSystemPrompt}` — ONLY when
+   *      `pendingSystemPromptInjection` is set (that's the sole
+   *      remaining useful side effect of this frame; the CLI applies
+   *      the system prompt but does not emit init in response).
+   *   2. If `session.pendingMessages` is EMPTY (fresh session, no user
+   *      turn queued): send a probe `user` frame carrying a distinctive
+   *      marker, then `control_request{interrupt}` — sent only once the
+   *      CLI reports the probe as the running turn, never while a cron /
+   *      real prompt it started first is running (ClaudeAdapter.sendInitProbe).
+   *      The user frame is what CLI wants to see for init emit; the
+   *      interrupt aborts before an API call generates a phantom reply.
+   *      Trade-off: the probe adds one placeholder user turn to the
+   *      CLI's own transcript (jsonl) with the marker line
+   *      ({@link AURA_INIT_PROBE_MARKER} — it must never ask for silence,
+   *      see there and init-probe-reconnect.replay.test.ts).
+   *      A brief interrupt-signalled `result` frame may reach the
+   *      browser in the split-second before the interrupt lands.
+   *   3. If `session.pendingMessages` is non-empty, the queued real
+   *      user message will be flushed by `handleCLIOpen` and that frame
+   *      naturally triggers init emit — no probe needed.
+   *
+   * OBS-STOP-1 kept: if `session.pendingSystemPromptInjection` is set
    * (because `injectSystemPrompt` was called before the WS connected),
-   * include the prompt in the kickoff's `appendSystemPrompt` field and
-   * clear the pending slot. This collapses what was previously a two-
-   * initialize race (bare kickoff at WS open → later second initialize
-   * with prompt, second silently dropped) into one well-formed init.
+   * the initialize control_request carries `appendSystemPrompt` and the
+   * pending slot is cleared. This collapses what was previously a
+   * two-initialize race into one well-formed init.
    */
   sendInitializeKickoff(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -1639,23 +2011,206 @@ export class WsBridge {
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
     const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
     const pendingPrompt = session.pendingSystemPromptInjection;
-    const request: { subtype: "initialize"; appendSystemPrompt?: string } =
-      pendingPrompt
-        ? { subtype: "initialize", appendSystemPrompt: pendingPrompt }
-        : { subtype: "initialize" };
-    const ndjson = JSON.stringify({
-      type: "control_request",
-      request_id: randomUUID(),
-      request,
-    });
-    session.backendAdapter.sendRawNDJSON(ndjson);
+
+    // Step 1: system-prompt injection only when we have one to attach.
+    // The initialize control_request no longer serves as init trigger
+    // (that job moved to the user-frame probe in step 2), but it is
+    // still the documented channel for `appendSystemPrompt`.
     if (pendingPrompt) {
+      const ndjson = JSON.stringify({
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "initialize", appendSystemPrompt: pendingPrompt },
+      });
+      session.backendAdapter.sendRawNDJSON(ndjson);
       // Clear the pending slot — kickoff just consumed it. A future
       // `injectSystemPrompt` after this point is a legitimate mid-session
       // re-init (agent-executor mid-flow) and goes through the existing
       // direct-send path.
       session.pendingSystemPromptInjection = null;
     }
+
+    // Step 2: force init emit via a probe user frame + interrupt combo.
+    // Skip if a real user message is already queued — that frame will
+    // naturally trigger init and we avoid polluting the transcript.
+    if (session.pendingMessages.length === 0) {
+      this.sendInitProbeAndInterrupt(sessionId);
+    }
+  }
+
+  /**
+   * Send the probe `user` frame; the adapter interrupts it once the CLI
+   * shows the running turn IS the probe (never a cron / real prompt the
+   * resumed CLI started first). See {@link ClaudeAdapter.sendInitProbe}.
+   */
+  private sendInitProbeAndInterrupt(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
+    session.backendAdapter.sendInitProbe(AURA_INIT_PROBE_MARKER);
+  }
+
+  /**
+   * The `assistant` branch of the backend → browser pipeline: stamp, append
+   * to history, persist, notify, and keep the session's model in sync.
+   * Shared by the live adapter path and {@link deliverRecoveredAssistantRecords}.
+   * The caller broadcasts.
+   */
+  private ingestAssistantFrame(
+    session: Session,
+    msg: Extract<BrowserIncomingMessage, { type: "assistant" }>,
+  ): void {
+    // PLAN Task 12 — stamp `streamStatus: "complete"` on the persisted
+    // form. The consolidated assistant frame IS the completion signal:
+    // by reaching this branch we have a whole turn from the CLI. If a
+    // streaming tracker is still set for this id, clear it so the
+    // disconnect-time interrupted flush doesn't emit a duplicate.
+    if (session.streamingAssistant?.id === msg.message.id) {
+      session.streamingAssistant = null;
+    }
+    const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
+    this.appendHistory(session, assistantMsg);
+    this.persistSession(session);
+    companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+
+    // Keep the session's model in sync with the model the MAIN session is
+    // actually running. `parent_tool_use_id === null` means this is the
+    // main turn, not a Task subagent frame (a subagent may run a different
+    // model, and must never overwrite the session's model). This is the
+    // authoritative signal after a `/model` switch or a composer set_model
+    // — more reliable than aggregating result.modelUsage by token count.
+    // It drives BOTH the UI label (fixes the stale/alarming wrong-model
+    // label) AND the model persisted for relaunch: on change we emit
+    // `session:model-active-changed`, which the orchestrator turns into
+    // launcher.setModel so a `--resume` relaunch spawns on THIS model
+    // rather than the frozen spawn-time `--model`. The `<synthetic>`
+    // sentinel (stamped when a model is unavailable) is skipped, and
+    // observers are skipped for persistence — their model is fixed at
+    // spawn (EC-1) and must not be mutated by a transient frame.
+    //
+    // Persistence compares against `launcherModel` (the model this
+    // process was spawned with, or the last confirmed switch), NOT
+    // `state.model`: the CLI re-emits an init frame carrying the new
+    // model right after a set_model, which moved `state.model` first and
+    // silently defeated the old `!== state.model` check — a session kept
+    // relaunching on its creation-time model for days (8b26ccb7,
+    // 2026-10-12..15).
+    // W7: the main thread's full prompt (cached + uncached + cache write)
+    // is what a cold cache would have to write again — feeds the
+    // cache-rewrite hint. Subagent frames run a different context.
+    if (msg.parent_tool_use_id === null && msg.message?.usage) {
+      const prompt = promptTokensOf(msg.message.usage);
+      if (prompt > 0) session.state.last_context_tokens = prompt;
+    }
+
+    const mainModel = msg.message?.model;
+    if (
+      msg.parent_tool_use_id === null
+      && typeof mainModel === "string"
+      && mainModel.length > 0
+      && mainModel !== "<synthetic>"
+    ) {
+      session.turnObservedModel = mainModel;
+      const persistedBaseline = session.launcherModel ?? session.state.model;
+      session.state.model = mainModel;
+      session.launcherModel = mainModel;
+      if (clearStaleModelFallback(session, mainModel)) {
+        this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+      }
+      if (mainModel !== persistedBaseline && session.state.sessionGroupRole !== "observer") {
+        companionBus.emit("session:model-active-changed", {
+          sessionId: session.id,
+          model: mainModel,
+          source: "assistant",
+        });
+      }
+    }
+  }
+
+  /**
+   * Delivery keys ({@link assistantDeliveryKey}) of assistant records the
+   * drift recovery delivered from the jsonl, per session. The live path
+   * consumes a key when the same frame arrives late on stdout, so each record
+   * reaches the browser and the history exactly once in BOTH directions
+   * (live → recovery is covered by the history check in
+   * {@link deliverRecoveredAssistantRecords}). Bounded per session.
+   */
+  private readonly recoveredDeliveries = new Map<string, Set<string>>();
+  private static readonly RECOVERED_DELIVERY_LIMIT = 500;
+
+  private rememberRecoveredDelivery(sessionId: string, key: string): void {
+    let keys = this.recoveredDeliveries.get(sessionId);
+    if (!keys) {
+      keys = new Set();
+      this.recoveredDeliveries.set(sessionId, keys);
+    }
+    keys.add(key);
+    while (keys.size > WsBridge.RECOVERED_DELIVERY_LIMIT) {
+      const oldest = keys.values().next().value as string;
+      keys.delete(oldest);
+    }
+  }
+
+  /** True (and forgets the key) if the drift recovery already delivered this frame. */
+  private consumeRecoveredDelivery(sessionId: string, message: Record<string, unknown>): boolean {
+    const keys = this.recoveredDeliveries.get(sessionId);
+    if (!keys || keys.size === 0) return false;
+    const key = assistantDeliveryKey(message);
+    if (!keys.delete(key)) return false;
+    if (keys.size === 0) this.recoveredDeliveries.delete(sessionId);
+    return true;
+  }
+
+  /**
+   * Silent-stdio drift recovery (W1, prod 40f03a1e 2026-10-15 15:03): the
+   * CLI wrote its whole reply to its jsonl (tool call + answer + end_turn)
+   * but none of it reached stdout; the recovery kills it and relaunches with
+   * `--resume`, and a resumed CLI does NOT re-emit past turns on stdout. So
+   * the reply existed only in the CLI's jsonl and the user saw a hang.
+   *
+   * The recovery hands us the main-chain `assistant` records it read from
+   * the jsonl after the kill; each is fed through the same pipeline as a live
+   * `assistant` frame (history + persist + broadcast). Exactly once: a record
+   * whose `message.id` + content already sits in the history (it did reach
+   * bun before the stall) is skipped — the jsonl record is byte-identical to
+   * the stdout frame.
+   *
+   * @returns how many records were delivered / skipped as already delivered.
+   */
+  deliverRecoveredAssistantRecords(
+    sessionId: string,
+    records: readonly { message: Record<string, unknown>; timestampMs: number }[],
+  ): { delivered: number; alreadyDelivered: number } {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { delivered: 0, alreadyDelivered: 0 };
+    const seen = new Set<string>();
+    for (const entry of session.messageHistory) {
+      if (entry.type === "assistant") seen.add(assistantDeliveryKey(entry.message as unknown as Record<string, unknown>));
+    }
+    let delivered = 0;
+    let alreadyDelivered = 0;
+    for (const rec of records) {
+      const key = assistantDeliveryKey(rec.message);
+      if (seen.has(key)) {
+        alreadyDelivered++;
+        continue;
+      }
+      seen.add(key);
+      this.rememberRecoveredDelivery(session.id, key);
+      const msg = {
+        type: "assistant",
+        message: rec.message,
+        parent_tool_use_id: null,
+        timestamp: rec.timestampMs,
+      } as unknown as Extract<BrowserIncomingMessage, { type: "assistant" }>;
+      this.noteCliActivity(session);
+      deliveryMetrics.recordBackendFrame(session.id, msg);
+      this.ingestAssistantFrame(session, msg);
+      this.broadcastToBrowsers(session, msg);
+      delivered++;
+    }
+    return { delivered, alreadyDelivered };
   }
 
   /** Send an initialize control request with context appended to the system prompt.
@@ -1665,6 +2220,24 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(`[ws-bridge] Cannot inject system prompt: session ${sessionId} not found`);
+      return;
+    }
+    // WS-3 A-1 (prompt-cache audit C-5): a second initialize{appendSystemPrompt}
+    // AFTER the conversation has started rewrites the system prompt and busts
+    // the CLI's entire prompt-cache prefix for the hottest path. All three
+    // legitimate call sites run before the first user message — refuse
+    // (fail-closed) any future mid-session caller instead of silently
+    // degrading cache behaviour.
+    const hasUserTurn = session.messageHistory.some(
+      (m) => m.type === "user_message"
+    );
+    if (hasUserTurn) {
+      console.warn(
+        `[ws-bridge] injectSystemPrompt REFUSED for ${sessionId}: ` +
+        `conversation already has user turns — a mid-session initialize ` +
+        `would rewrite the system prompt and invalidate the prompt cache ` +
+        `(WS-3 A-1 guard)`
+      );
       return;
     }
     // OBS-STOP-1 fix: if the adapter is not yet connected, buffer the
@@ -1714,7 +2287,7 @@ export class WsBridge {
     // is nothing to drain.
     if (
       session.browserSockets.size === 0 &&
-      session.pendingMessages.length > 0 &&
+      countUserQueuedMessages(session.pendingMessages) > 0 &&
       !this.browserDrainTimers.has(sessionId)
     ) {
       this.startBrowserDrainTimer(sessionId);
@@ -1858,7 +2431,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-resume" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -1935,6 +2508,32 @@ export class WsBridge {
       // fall through to existing adapter delivery
     }
 
+    // -- dismiss_model_fallback: bridge-level, clears the shared record ---
+    if (msg.type === "dismiss_model_fallback") {
+      if (session.state.model_fallback && session.state.model_fallback.at === msg.at) {
+        session.state.model_fallback = null;
+        this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+      }
+      return;
+    }
+
+    // -- W7: prefix-changing control requests ------------------------------
+    // A model switch or an MCP tool-set change rewrites the cached prompt
+    // prefix; the next turn pays cache_creation for the whole context. Log a
+    // structured event now and attribute it on the next llm.turn_usage line.
+    const prefixChange = describeCachePrefixChange(msg, session.state.model);
+    if (prefixChange) {
+      console.log(JSON.stringify({
+        event: "cache.prefix_change",
+        sessionId: session.id,
+        backend: session.backendType,
+        ...prefixChange,
+        lastContextTokens: session.state.last_context_tokens ?? null,
+      }));
+      (session.pendingCachePrefixChanges ??= []).push(prefixChange.reason);
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);
@@ -1953,6 +2552,12 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      session.turnStartedAt ??= Date.now();
+      deliveryMetrics.recordUserMessage(session.id, {
+        text: typeof msg.content === "string" ? msg.content : "",
+        backend: session.backendType,
+        origin,
+      });
       // Council Review #12 (EC-16) — server-driven user_message frames
       // (cron-scheduler, linear-agent-bridge, REST `/sessions/:id/inject`)
       // are NOT user activity and MUST NOT advance the synthetic-turn
@@ -1995,8 +2600,15 @@ export class WsBridge {
         content: msg.content,
         timestamp: ts,
         id: msg.client_msg_id || `user-${ts}-${this.userMsgCounter++}`,
+        // Rendered in chat as an automatic resume, not as the user's words.
+        ...(origin === "server:auto-resume" ? { origin: "auto_resume" as const } : {}),
       };
       this.appendHistory(session, userMessage);
+      // Observer rigor: a liveness probe to a council observer is not review
+      // traffic — the orchestrator keeps its turn off the findings channel.
+      if (session.state.sessionGroupRole === "observer" && isObserverProbeText(msg.content)) {
+        companionBus.emit("observer:probe-injected", { sessionId: session.id });
+      }
       const transitioned = session.stateMachine.transition("streaming", "user_message");
       if (!transitioned) {
         // Session not ready yet (e.g. still initializing). Log a warning so
@@ -2009,6 +2621,11 @@ export class WsBridge {
       }
       this.persistSession(session);
       this.broadcastToBrowsers(session, userMessage);
+    }
+
+    // -- interrupt: the user cancelled the turn, no answer is owed ---------
+    if (msg.type === "interrupt") {
+      deliveryMetrics.recordInterrupt(session.id);
     }
 
     // -- permission_response: populate updatedInput fallback from pending, then remove -------

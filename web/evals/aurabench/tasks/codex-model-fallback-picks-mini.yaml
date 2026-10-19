@@ -1,0 +1,48 @@
+# AuraBench task mined from PR #166 ("fix(codex): prefer model tier over version when falling back").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: codex-model-fallback-picks-mini
+title: "Codex model fallback keeps the requested size tier instead of dropping to a mini"
+start_commit: 26f3b4a2853cce868040d1a430c8d585004f1789
+prompt: |
+  When the requested Codex model can't be launched (e.g. a stale `gpt-5.4` pin
+  that a ChatGPT-tier account rejects), Companion falls back to another model
+  from the models cache. Today a stale full-size pin resolves to a same-version
+  smaller model (`gpt-5.4-mini`) instead of the newer full-size model
+  (`gpt-5.5`) — the user asked for a full-size model and silently got a mini.
+
+  Change the fallback choice in `web/server/codex-models.ts` so the size/family
+  tier of the requested model (mini / max / codex / plain) is what is preserved,
+  and the version is only a weak preference: a stale full-size pin should land on
+  the newer full-size model, and an unavailable mini should still land on a mini.
+  Models rejected at runtime must stay excluded from later fallback attempts.
+expected_files:
+  - web/server/codex-models.ts
+expected_tests:
+  - web/server/codex-models.test.ts
+failure_modes:
+  - "fallback starts parsing 'newest' out of slugs and picks unlaunchable models"
+  - "runtime-rejected models become selectable again"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 166
+  merge_commit: c2210d8ab0151b78d3a0b4e668ec45a51d21a420
+  class: bugfix
+  hidden_tests:
+    - web/server/codex-models.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:38:40.982Z"

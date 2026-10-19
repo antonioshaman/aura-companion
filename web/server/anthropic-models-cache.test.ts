@@ -15,9 +15,29 @@
  *    upstream-unavailable with no cache.
  *  - Fixture replay against `web/server/fixtures/anthropic-models-response.json`.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+// Isolate COMPANION_HOME BEFORE the module under test (and `paths.ts`) is
+// evaluated. Without this the suite wrote to — and `__deleteDiskCacheForTests`
+// DELETED — the real `~/.companion/anthropic_models_cache.json`. On the prod
+// box tests run as the service user, so every test run wiped prod's disk
+// tier: the "serve stale on upstream timeout" fallback never had a file to
+// serve, and a slow /v1/models fetch went straight to 502 → the New Session
+// dropdown fell back to the static list (owner bug 2026-10-16).
+const { isolatedCompanionHome } = await vi.hoisted(async () => {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "amc-test-home-"));
+  process.env.COMPANION_HOME = dir;
+  return { isolatedCompanionHome: dir };
+});
+afterAll(async () => {
+  const fs = await import("node:fs");
+  fs.rmSync(isolatedCompanionHome, { recursive: true, force: true });
+});
 import {
   parseAnthropicModelsResponse,
   sortAnthropicModels,
@@ -26,6 +46,8 @@ import {
   isCacheRecordValid,
   fetchAnthropicModelsRaw,
   getAnthropicModels,
+  warmAnthropicModelsCache,
+  readAnthropicCacheFileMeta,
   readMemoryCache,
   writeMemoryCache,
   __resetMemoryCacheForTests,
@@ -661,6 +683,130 @@ describe("getAnthropicModels orchestrator", () => {
   });
 });
 
+// ── FORCE-REFRESH (operator "Refresh models" button) ──────────────────────
+
+describe("getAnthropicModels — forceRefresh", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  afterEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  // The whole point of the button: a fresh in-memory hit must NOT short-circuit
+  // a force-refresh — the network is consulted so a newly-published model shows
+  // up without waiting for the TTL to expire.
+  it("bypasses a fresh memory hit and re-fetches upstream", async () => {
+    const fp = computeKeyFingerprint("sk-test");
+    writeMemoryCache({
+      schema_version: SCHEMA_VERSION,
+      fetched_at: Date.now(),
+      key_fingerprint: fp,
+      models: [{ value: "claude-opus-4-7", label: "Opus 4.7", description: "" }],
+    });
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ type: "model", id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const r = await getAnthropicModels("sk-test", { fetch: fakeFetch, forceRefresh: true });
+    // Memory hit did NOT short-circuit the fetch.
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("network");
+      expect(r.models.map((m) => m.value)).toContain("claude-sonnet-4-6");
+    }
+  });
+
+  // Availability beats freshness: a force-refresh that fails upstream must still
+  // fall back to the last-known disk record rather than stranding the dropdown.
+  it("falls back to the stale disk record when the forced refresh fails upstream", async () => {
+    // Prime the disk cache with a successful (non-force) fetch.
+    const okFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const primed = await getAnthropicModels("sk-test", { fetch: okFetch });
+    expect(primed.kind).toBe("ok");
+    // Clear memory so only the disk record can satisfy the next call.
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+
+    const failFetch = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
+    const r = await getAnthropicModels("sk-test", { fetch: failFetch, forceRefresh: true });
+    expect(failFetch).toHaveBeenCalledTimes(1);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("disk");
+      expect(r.models.map((m) => m.value)).toContain("claude-opus-4-7");
+    }
+  });
+});
+
+// ── DIAGNOSTICS META READER ────────────────────────────────────────────────
+
+describe("readAnthropicCacheFileMeta", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  afterEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  it("reports absent when no cache file exists", () => {
+    const meta = readAnthropicCacheFileMeta();
+    expect(meta).toEqual({ present: false, fetchedAt: null, modelCount: null });
+  });
+
+  // After a successful fetch the orchestrator persists a disk record; the meta
+  // reader must surface its freshness + model count WITHOUT any fingerprint/TTL
+  // gate (it is a diagnostics side-channel, not a cache-validity check).
+  it("reports present + fetchedAt + modelCount after a successful fetch persists a record", async () => {
+    const okFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" },
+            { type: "model", id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const before = Date.now();
+    const r = await getAnthropicModels("sk-test", { fetch: okFetch });
+    expect(r.kind).toBe("ok");
+
+    const meta = readAnthropicCacheFileMeta();
+    expect(meta.present).toBe(true);
+    expect(meta.modelCount).toBe(2);
+    expect(typeof meta.fetchedAt).toBe("number");
+    expect(meta.fetchedAt).toBeGreaterThanOrEqual(before);
+  });
+});
+
 // ── RECORDING EXCLUSION (Hunt R5) ──────────────────────────────────────────
 
 describe("recorder integration — apiKey leakage canary", () => {
@@ -1192,5 +1338,64 @@ describe("Fixture replay — hostile-input reject coverage (Council P3 #15)", ()
     expect(ids.every((id) => id.length <= 128)).toBe(true);
     // At least 5 distinct reject branches exercised.
     expect(parsed.droppedItems).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("test isolation — never touches the real ~/.companion", () => {
+  // Regression guard for the prod-cache wipe: the disk tier used by this
+  // suite must live under the per-run temp COMPANION_HOME, never under the
+  // invoking user's real home directory.
+  it("resolves ANTHROPIC_MODELS_CACHE_PATH under the isolated temp home", async () => {
+    const os = await import("node:os");
+    expect(ANTHROPIC_MODELS_CACHE_PATH.startsWith(isolatedCompanionHome)).toBe(true);
+    expect(ANTHROPIC_MODELS_CACHE_PATH.startsWith(join(os.homedir(), ".companion"))).toBe(false);
+  });
+});
+
+describe("warmAnthropicModelsCache — boot warm-up", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  // Warm-up populates the memory tier so the first browser request after a
+  // restart is a zero-IO hit instead of a cold upstream fetch.
+  it("fetches once and seeds the cache so the next call is a memory hit", async () => {
+    const fixture = JSON.parse(
+      readFileSync(join(__dirname, "fixtures", "anthropic-models-response.json"), "utf8"),
+    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(fixture), { status: 200 }));
+    const outcome = await warmAnthropicModelsCache("sk-ant-warm-test-key", {
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(outcome).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const second = await getAnthropicModels("sk-ant-warm-test-key", {
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(second.kind).toBe("ok");
+    if (second.kind === "ok") expect(second.source).toBe("memory");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // No key configured → nothing to warm; must not throw.
+  it("resolves 'no-key' without fetching when no key is configured", async () => {
+    const fetchMock = vi.fn();
+    await expect(
+      warmAnthropicModelsCache("", { fetch: fetchMock as unknown as typeof fetch }),
+    ).resolves.toBe("no-key");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Upstream down + empty cache → reports the failure, never throws (it runs
+  // fire-and-forget at boot).
+  it("resolves 'upstream-unavailable' without throwing when upstream fails", async () => {
+    const fetchMock = vi.fn(async () => new Response("down", { status: 503 }));
+    await expect(
+      warmAnthropicModelsCache("sk-ant-warm-test-key", {
+        fetch: fetchMock as unknown as typeof fetch,
+      }),
+    ).resolves.toBe("upstream-unavailable");
   });
 });

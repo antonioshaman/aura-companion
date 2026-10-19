@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   checkStopGrounding,
+  checkStopLines,
+  extractIdentifiers,
   validateObserverFindings,
+  type EvidenceLineFacts,
   type GroundingFailReason,
 } from "./observer-grounding.js";
 import {
@@ -273,5 +276,147 @@ describe("validateObserverFindings (default workspace-bounded existsRelative)", 
       },
     );
     expect(r.findings[0]?.severity).toBe("NOTE");
+  });
+});
+
+// ── B2 (meta-diet): line-level grounding ────────────────────────────────────
+//
+// The gate gets host line facts (content + lines changed by the checkpoint)
+// through an injected provider, so every branch here is hermetic. Contract:
+//   - cited range past EOF / inverted            → downgrade (out_of_range)
+//   - cited range touches no changed line         → downgrade (unchanged)
+//   - changed ranges unknown (null)               → unchanged-check SKIPPED
+//   - no cited lines / claim names nothing on the
+//     cited lines / content unreadable            → STOP kept, weak evidence
+//   - no provider at all                          → exact legacy path-only gate
+
+/** Line facts over an in-memory file; `changed` null = no baseline. */
+function facts(lines: string[], changed: [number, number][] | null): EvidenceLineFacts {
+  return {
+    lineCount: lines.length,
+    lineText: (n) => lines[n - 1],
+    changedRanges: changed,
+  };
+}
+
+const FILE = [
+  "import { readFileSync } from 'node:fs';",
+  "",
+  "export function recordUsage(root: string) {",
+  "  writeTextAtomic(storePath(root), 'x');",
+  "}",
+];
+
+describe("extractIdentifiers", () => {
+  // Keywords and glue words never count as shared evidence; 3+ char names do.
+  it("keeps identifier-like tokens and drops keywords / short tokens", () => {
+    const ids = extractIdentifiers("export const x = recordUsage(storePath) the if");
+    expect([...ids].sort()).toEqual(["recordUsage", "storePath"]);
+  });
+});
+
+describe("checkStopLines", () => {
+  it("is strongly grounded when the claim names an identifier on its changed cited lines", () => {
+    expect(checkStopLines(stop({ claim: "recordUsage writes tracked stores", evidence_lines: [3, 4] }), facts(FILE, [[3, 4]])))
+      .toEqual({ grounded: true });
+  });
+
+  // AC: STOP citing a line that does not exist in the file → NOTE with reason.
+  it.each([
+    ["past EOF", [6, 7]],
+    ["start < 1", [0, 2]],
+    ["inverted", [4, 3]],
+  ] as const)("downgrades a %s range as evidence_lines_out_of_range", (_label, range) => {
+    expect(checkStopLines(stop({ evidence_lines: [range[0], range[1]] }), facts(FILE, null)))
+      .toEqual({ grounded: false, reason: "evidence_lines_out_of_range" });
+  });
+
+  // AC: STOP citing lines the checkpoint did not change → NOTE with reason.
+  it("downgrades a range that touches no changed line as evidence_lines_unchanged", () => {
+    expect(checkStopLines(stop({ claim: "readFileSync misuse", evidence_lines: [1, 2] }), facts(FILE, [[3, 4]])))
+      .toEqual({ grounded: false, reason: "evidence_lines_unchanged" });
+  });
+
+  it("counts a partial overlap with a changed range as changed", () => {
+    expect(checkStopLines(stop({ claim: "storePath is wrong", evidence_lines: [2, 4] }), facts(FILE, [[4, 4]])))
+      .toEqual({ grounded: true });
+  });
+
+  // No baseline must never be read as "nothing changed" — that would silence
+  // every STOP on a group's first checkpoint.
+  it("skips the unchanged check when changed ranges are unknown", () => {
+    expect(checkStopLines(stop({ claim: "readFileSync misuse", evidence_lines: [1, 1] }), facts(FILE, null)))
+      .toEqual({ grounded: true });
+  });
+
+  // AC: claim mentioning no identifier from the cited lines → weak evidence,
+  // not removed (grounded: true keeps severity).
+  it("marks weak evidence when the claim names nothing on the cited lines", () => {
+    expect(checkStopLines(stop({ claim: "the session clock never advances", evidence_lines: [3, 4] }), facts(FILE, [[3, 4]])))
+      .toEqual({ grounded: true, weak: "claim_symbols_not_on_cited_lines" });
+  });
+
+  // Supervisor incident diet-A2-103: a path-only STOP asserting runtime
+  // behaviour ("command X fails") reached the banner. No cited lines → weak.
+  it("marks weak evidence when the STOP cites no lines", () => {
+    const f = stop({ claim: "bun run --cwd web kb:record fails" });
+    delete f.evidence_lines;
+    expect(checkStopLines(f, facts(FILE, null))).toEqual({ grounded: true, weak: "no_cited_lines" });
+  });
+
+  it("marks weak evidence (never downgrades) when content is unavailable", () => {
+    expect(checkStopLines(stop({ evidence_lines: [1, 1] }), null)).toEqual({ grounded: true, weak: "cited_lines_unreadable" });
+  });
+});
+
+describe("validateObserverFindings with lineFacts", () => {
+  const modified = new Set(["src/foo.ts"]);
+  const always = () => true;
+
+  it("downgrades line failures, marks weak evidence, and leaves non-STOP findings alone", () => {
+    const provider = (p: string) => (p === "src/foo.ts" ? facts(FILE, [[3, 4]]) : null);
+    const noLines = stop({ claim: "runtime failure" });
+    delete noLines.evidence_lines;
+    const r = validateObserverFindings(
+      review([
+        stop({ claim: "recordUsage writes tracked stores", evidence_lines: [3, 4] }),
+        stop({ evidence_lines: [90, 99] }),
+        stop({ claim: "readFileSync", evidence_lines: [1, 1] }),
+        noLines,
+        note({ evidence_lines: [90, 99] }),
+      ]),
+      { workspaceRoot: "/ws", modifiedFiles: modified, existsRelative: always, lineFacts: provider },
+    );
+    expect(r.findings.map((f) => f.severity)).toEqual(["STOP", "NOTE", "NOTE", "STOP", "NOTE"]);
+    expect(r.downgrades.map((d) => [d.index, d.reason])).toEqual([
+      [1, "evidence_lines_out_of_range"],
+      [2, "evidence_lines_unchanged"],
+    ]);
+    expect(r.weakEvidence).toEqual([{ index: 3, reason: "no_cited_lines" }]);
+  });
+
+  // Path checks still run first: a STOP outside the modified set keeps its
+  // legacy reason even when its lines would also fail.
+  it("keeps path-check reasons ahead of line checks", () => {
+    const r = validateObserverFindings(review([stop({ evidence_path: "src/other.ts", evidence_lines: [90, 99] })]), {
+      workspaceRoot: "/ws",
+      modifiedFiles: modified,
+      existsRelative: always,
+      lineFacts: () => facts(FILE, null),
+    });
+    expect(r.downgrades[0]?.reason).toBe("evidence_not_in_modified_set");
+  });
+
+  // Omitting the provider is the legacy gate: eval sidecars recorded before
+  // line facts existed must rerun byte-identically.
+  it("runs no line checks and reports no weak evidence without a provider", () => {
+    const r = validateObserverFindings(review([stop({ evidence_lines: [90, 99] })]), {
+      workspaceRoot: "/ws",
+      modifiedFiles: modified,
+      existsRelative: always,
+    });
+    expect(r.downgrades).toEqual([]);
+    expect(r.weakEvidence).toEqual([]);
+    expect(r.findings[0]?.severity).toBe("STOP");
   });
 });

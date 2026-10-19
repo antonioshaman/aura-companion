@@ -1,0 +1,48 @@
+# AuraBench task mined from PR #138 ("fix(council): render observer findings newest-first").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: observer-findings-oldest-first
+title: "The Observer panel shows the newest findings at the top"
+start_commit: c1cf28ba5a60bb3691e1b812f709ce10ecc7cfdc
+prompt: |
+  In the Council Observer panel, fresh findings land at the bottom of the
+  findings rail, so users scroll past old findings to see what the observer just
+  said. The council store appends each review's findings to the end of the array.
+
+  Render the findings rail (`FindingsLog`) newest-first, i.e. the reverse of
+  the append order (do not sort by timestamp — findings from one review share
+  the same timestamp). The change is
+  display-only: the store's array stays append-ordered, and the screen-reader
+  review announcer keeps working as before. Keep the Playground mock consistent
+  with the real append order.
+expected_files:
+  - web/src/components/Playground.tsx
+  - web/src/components/council/FindingsLog.tsx
+expected_tests:
+  - web/src/components/council/FindingsLog.test.tsx
+failure_modes:
+  - "the store array itself is reversed (breaks other consumers)"
+  - "the live-region announcer re-announces old findings"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 138
+  merge_commit: 5ba9227a91bbc5b03b3e5f8e47a01c8cfcc61386
+  class: ui
+  hidden_tests:
+    - web/src/components/council/FindingsLog.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:32:41.771Z"

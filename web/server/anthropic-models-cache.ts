@@ -41,7 +41,7 @@
  *   no idle-kill, no stdio drain. Model validity is upstream's concern;
  *   CLI's spawn-time rejection is the only acceptable runtime check.
  *
- * Reference: PLAN-aura-dynamic-model-list.md — convergent recommendations from
+ * Reference: docs/history/PLAN-aura-dynamic-model-list.md — convergent recommendations from
  * Fowler (extract from routes.ts god-module), Backend (testability),
  * Deploy (file-granular coverage gate), Persistence (atomic write floor).
  */
@@ -191,6 +191,19 @@ export interface BackendModelInfo {
    */
   status?: ModelStatus;
   replacement?: string | null;
+  /**
+   * `true` when the model is NOT in the registry — offered (the catalogue
+   * lists it) but never verified on this install. Additive; the dropdown
+   * renders a subtle "Untested" hint.
+   */
+  untested?: true;
+  /**
+   * `"observed"` when the model is NOT in the registry but a session on this
+   * install completed a successful main-thread turn on it
+   * (`verified-models.ts`). Mutually exclusive with `untested`. Registry
+   * entries omit it (they are verified by the registry itself).
+   */
+  verifiedBy?: "observed";
 }
 
 // ── Per-request result discriminated union (Backend R1 + Fowler R1) ─────────
@@ -1020,6 +1033,38 @@ export function writeDiskCache(
   writeAtomicJson(ANTHROPIC_MODELS_CACHE_PATH, record);
 }
 
+/**
+ * Read lightweight cache metadata for the operator diagnostics surface
+ * (Settings panel "model cache" indicator). Unlike {@link readDiskCache}
+ * this deliberately does NOT check the key fingerprint or the TTL — it only
+ * answers "is there a cache file, and how old is it?" and never gates a live
+ * decision, so it needs no `currentFingerprint`. Never throws; a
+ * missing/corrupt file degrades to nulls.
+ */
+export function readAnthropicCacheFileMeta(): {
+  present: boolean;
+  fetchedAt: number | null;
+  modelCount: number | null;
+} {
+  let raw: string;
+  try {
+    raw = readFileSync(ANTHROPIC_MODELS_CACHE_PATH, "utf8");
+  } catch {
+    return { present: false, fetchedAt: null, modelCount: null };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedModelsRecord>;
+    const fetchedAt =
+      typeof parsed.fetched_at === "number" && Number.isFinite(parsed.fetched_at)
+        ? parsed.fetched_at
+        : null;
+    const modelCount = Array.isArray(parsed.models) ? parsed.models.length : null;
+    return { present: true, fetchedAt, modelCount };
+  } catch {
+    return { present: true, fetchedAt: null, modelCount: null };
+  }
+}
+
 // ── Orchestrator (Task 5, Hunt R4 + Backend R1 single-flight) ──────────────
 
 /**
@@ -1073,8 +1118,17 @@ export function __deleteDiskCacheForTests(): void {
 /**
  * Combined dependency-injection seam for the orchestrator + nested
  * fetch. Tests pass `fetch` + `now` mocks; production omits.
+ *
+ * `forceRefresh` bypasses the memory + disk read tiers so the request goes
+ * straight to the network (used by the operator-triggered "Refresh models"
+ * button — Hunt R4 keeps the GET handler cache-honest, so an explicit
+ * refresh is a distinct POST intent, never a `?force=1` escape hatch on the
+ * GET). The network result still persists to both cache tiers, and the
+ * upstream-failure path still falls back to the last-known disk record
+ * (availability beats freshness) — a force-refresh that fails upstream does
+ * NOT wipe a usable cache.
  */
-export type GetModelsDeps = AnthropicFetchDeps;
+export type GetModelsDeps = AnthropicFetchDeps & { forceRefresh?: boolean };
 
 /**
  * Resolve the dynamic Claude model list for a given API key.
@@ -1121,35 +1175,44 @@ export async function getAnthropicModels(
   const fingerprint = computeKeyFingerprint(apiKey);
   const nowImpl = deps?.now ?? Date.now;
   const currentTime = nowImpl();
+  const forceRefresh = deps?.forceRefresh === true;
 
-  // Memory hit — zero-IO fast path.
-  const memHit = readMemoryCache(fingerprint, currentTime);
-  if (memHit !== null) {
-    log.info("anthropic-models-cache", "cache.hit.memory", {
-      event: "anthropic-models.cache.hit",
-      source: "memory",
-      key_fingerprint: fingerprint,
-      model_count: memHit.models.length,
-      cache_age_ms: currentTime - memHit.fetched_at,
-    });
-    return {
-      kind: "ok",
-      source: "memory",
-      models: memHit.models,
-      fetched_at: memHit.fetched_at,
-    };
-  }
+  // Memory hit — zero-IO fast path. Skipped on force-refresh so the
+  // operator's explicit "Refresh" reaches the network, not a warm tier.
+  if (!forceRefresh) {
+    const memHit = readMemoryCache(fingerprint, currentTime);
+    if (memHit !== null) {
+      log.info("anthropic-models-cache", "cache.hit.memory", {
+        event: "anthropic-models.cache.hit",
+        source: "memory",
+        key_fingerprint: fingerprint,
+        model_count: memHit.models.length,
+        cache_age_ms: currentTime - memHit.fetched_at,
+      });
+      return {
+        kind: "ok",
+        source: "memory",
+        models: memHit.models,
+        fetched_at: memHit.fetched_at,
+      };
+    }
 
-  // Single-flight: piggyback on existing in-flight fetch for this key.
-  const existing = inflightFetches.get(fingerprint);
-  if (existing !== undefined) {
-    return existing;
+    // Single-flight: piggyback on existing in-flight fetch for this key.
+    // A force-refresh does NOT piggyback — an in-flight call may itself be
+    // resolving from a warm disk tier, which would defeat the refresh
+    // intent; force always allocates its own network fetch.
+    const existing = inflightFetches.get(fingerprint);
+    if (existing !== undefined) {
+      return existing;
+    }
   }
 
   const promise = (async (): Promise<AnthropicModelsResult> => {
     try {
-      // Disk hit — warm-start on bun cold restart.
-      const diskHit = readDiskCache(fingerprint, currentTime);
+      // Disk hit — warm-start on bun cold restart. Skipped on force-refresh.
+      const diskHit = forceRefresh
+        ? ({ ok: false, reason: "enoent" } as const)
+        : readDiskCache(fingerprint, currentTime);
       if (diskHit.ok) {
         writeMemoryCache(diskHit.record);
         log.info("anthropic-models-cache", "cache.hit.disk", {
@@ -1291,4 +1354,37 @@ export async function getAnthropicModels(
 
   inflightFetches.set(fingerprint, promise);
   return promise;
+}
+
+/**
+ * Boot-time, fire-and-forget warm-up of the Claude model list.
+ *
+ * Why: the first browser to open New Session after a restart used to pay
+ * the cold upstream fetch (observed 3-4s on prod, against a 5s timeout,
+ * while the boot event loop was busiest). A timeout there left the
+ * dropdown on the static fallback. Warming here moves that cold fetch off
+ * the user's critical path and populates both cache tiers, so later
+ * upstream failures can serve stale-from-disk instead of a 502.
+ *
+ * Never throws, never blocks: resolves to the outcome kind (for tests and
+ * the log line), or `"error"` if the orchestrator itself threw.
+ */
+export async function warmAnthropicModelsCache(
+  apiKey: string,
+  deps?: GetModelsDeps,
+): Promise<AnthropicModelsResult["kind"] | "error"> {
+  try {
+    const result = await getAnthropicModels(apiKey, deps);
+    log.info("anthropic-models-cache", "warmup", {
+      event: "anthropic-models.warmup",
+      outcome: result.kind,
+    });
+    return result.kind;
+  } catch (err: unknown) {
+    log.warn("anthropic-models-cache", "warmup.failed", {
+      event: "anthropic-models.warmup.failed",
+      error_name: err instanceof Error ? err.name : "unknown",
+    });
+    return "error";
+  }
 }

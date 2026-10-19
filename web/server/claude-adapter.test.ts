@@ -47,8 +47,24 @@ vi.mock("./model-availability.js", () => ({
       : { kind: "ok", model: opts.requested },
 }));
 
-import { ClaudeAdapter } from "./claude-adapter.js";
+// Broken-model table (single source of truth, shared with spawn). The live
+// table is empty since the 2026-10-16 re-probe; tests inject entries.
+const mockBrokenModelTable = vi.hoisted(() => ({
+  entries: [] as Array<{ from: string; to: string; reason: string }>,
+}));
+vi.mock("./broken-model-substitution.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import("./broken-model-substitution.js");
+  return {
+    ...actual,
+    resolveModelSubstitution: (model: string | null | undefined) =>
+      (model && mockBrokenModelTable.entries.find((e) => e.from === model)) || null,
+  };
+});
+
+import { ClaudeAdapter, resolveSilentStdioTimeoutMs, resolveInitFrameTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
+import { companionBus } from "./event-bus.js";
+import { OBSERVER_WAKE_SILENCE_MS } from "./observer-wake-silence.js";
 
 // ─── Mock socket factory ────────────────────────────────────────────────────
 
@@ -695,6 +711,21 @@ describe("send() — outgoing message translation", () => {
     expect(sent.request.model).toBe("claude-opus-4-6");
   });
 
+  it("set_model does NOT persist the choice to the launcher (only a confirmed main assistant frame does)", () => {
+    // A composer choice is only "sent", not confirmed: a model the static gate
+    // passes can still 404 at the account's subscription tier on the next turn.
+    // Persisting it here would make a relaunch in that window spawn the rejected
+    // model. So no session:model-active-changed is emitted from set_model.
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      adapter.send({ type: "set_model", model: "claude-opus-4-6" });
+    } finally {
+      off();
+    }
+    expect(events).toEqual([]);
+  });
+
   it("set_model (proactive gate: substituted) → sends ONE frame for the replacement + emits model_substitution", () => {
     // Task 5: a retired target is swapped for its same-tier replacement BEFORE
     // the frame crosses the wire. Exactly one control_request is sent, carrying
@@ -719,6 +750,29 @@ describe("send() — outgoing message translation", () => {
       outcome: "substituted",
       reason: "retired",
     });
+  });
+
+  it("set_model consults the broken-model table: sends the spawn substitute + emits a cli-incompatible model_substitution", () => {
+    // Previously the switcher's set_model bypassed the table: the user ran the
+    // listed model until the next relaunch, then was silently rewritten. Now
+    // set_model and spawn agree (one table) and the browser is told why.
+    mockBrokenModelTable.entries = [
+      { from: "claude-opus-5", to: "claude-opus-4-8", reason: "CLI x.y does not emit opus-5 on stdout" },
+    ];
+    try {
+      const result = adapter.send({ type: "set_model", model: "claude-opus-5" });
+      expect(result).toBe(true);
+      expect(getLastSent().request.model).toBe("claude-opus-4-8");
+      expect(browserMessageCb).toHaveBeenCalledWith({
+        type: "model_substitution",
+        requested: "claude-opus-5",
+        applied: "claude-opus-4-8",
+        outcome: "substituted",
+        reason: "cli-incompatible",
+      });
+    } finally {
+      mockBrokenModelTable.entries = [];
+    }
   });
 
   it("set_model (proactive gate: needs-user-action) → sends NO frame + emits model_substitution", () => {
@@ -852,6 +906,28 @@ describe("handleRawMessage() — incoming CLI message routing", () => {
     expect(msg.session.permissionMode).toBe("default");
     expect(msg.session.claude_code_version).toBe("1.0");
     expect(msg.session.mcp_servers).toEqual([]);
+  });
+
+  it("task_started / task_notification feed the delivery metrics' running-task count", async () => {
+    // A drift recovery kills the CLI and every background task it still
+    // runs; the count comes from these frames (task_started has no browser
+    // mapping, so the adapter is the only place that sees it). The CLI
+    // exiting clears the count.
+    const { deliveryMetrics } = await import("./delivery-metrics.js");
+    deliveryMetrics.reset();
+    try {
+      const task = (subtype: string, task_id: string) =>
+        JSON.stringify({ type: "system", subtype, task_id, task_type: "local_agent", uuid: `u-${subtype}-${task_id}`, session_id: "cli-123" }) + "\n";
+      adapter.handleRawMessage(task("task_started", "t1"));
+      adapter.handleRawMessage(task("task_started", "t2"));
+      adapter.handleRawMessage(task("task_notification", "t1"));
+      expect(deliveryMetrics.getSnapshot().sessions["sess-1"].runningTasks).toBe(1);
+
+      adapter.handleTransportClose();
+      expect(deliveryMetrics.getSnapshot().sessions["sess-1"].runningTasks).toBe(0);
+    } finally {
+      deliveryMetrics.reset();
+    }
   });
 
   it("system status → emits browserMessageCb with status_change", () => {
@@ -1611,6 +1687,150 @@ describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
   });
 });
 
+// ─── Observer wake completion backstop — Council Review 2026-09-11 P2-3 ──────
+//
+// A wake `result` frame split across TCP chunks whose first chunk fails
+// JSON.parse never reaches `handleResultMessage`, so `observerTurnState`
+// strands `in-flight` forever and every future wake returns `busy` — the
+// observer pair deadlocks. The Codex adapter already carried this backstop
+// (`OBSERVER_WAKE_COMPLETION_WATCHDOG_MS`); these tests pin the Claude port:
+// the 360s timer force-releases the slot, and every legitimate return to
+// idle (normal result, transport close) clears the timer so it never
+// double-fires on a healthy turn.
+describe("observer wake completion backstop (P2-3)", () => {
+  const BACKSTOP_MS = 360_000;
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("force-releases a stranded in-flight wake turn at 360s and emits observer:turn-done", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-1");
+    const ws = createMockSocket("sess-backstop-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("# Council Checkpoint stranded").kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    // The turn DID produce output — only its `result` frame was lost (the P2-3
+    // scenario). W14: without any output the earlier observer-wake silence
+    // verdict (OBSERVER_WAKE_SILENCE_MS) would own the turn instead.
+    adapter.handleRawMessage(`${JSON.stringify({ type: "stream_event", event: { type: "message_start" } })}\n`);
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Just before the deadline — still stranded, no force-release.
+    vi.advanceTimersByTime(BACKSTOP_MS - 1_000);
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    expect(drained.length).toBe(0);
+
+    // Cross the deadline — slot force-released + drain emitted so the
+    // orchestrator can dispatch a queued checkpoint instead of deadlocking.
+    vi.advanceTimersByTime(2_000);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+    expect((drained[0] as { sessionId: string }).sessionId).toBe("sess-backstop-1");
+
+    // A fresh wake is now accepted (the pair is unblocked).
+    expect(adapter.sendUserFrameFromServer("next").kind).toBe("sent");
+    off();
+  });
+
+  it("does NOT fire the backstop when the turn completes normally via a result frame", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-2");
+    const ws = createMockSocket("sess-backstop-2");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Result lands normally → idle + one drain emit from handleResultMessage.
+    adapter.handleRawMessage(makeResultMsg({ session_id: "cli-backstop-2" }));
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+
+    // Push far past the deadline — the backstop was cleared on completion,
+    // so it must NOT force a second observer:turn-done.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(1);
+    off();
+  });
+
+  it("clears the backstop on transport close so it cannot fire after teardown", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-3");
+    const ws = createMockSocket("sess-backstop-3");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    adapter.handleTransportClose();
+    expect(adapter.getObserverTurnState()).toBe("idle");
+
+    // Transport-close reset already returned the slot to idle; the stale
+    // backstop must not fire a spurious drain 360s later.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(0);
+    off();
+  });
+});
+
+// ─── silent-stdio watchdog arming at the 300s default — P2-6 ────────────────
+//
+// The default (300_000 ms) is unit-asserted on resolveSilentStdioTimeoutMs and
+// the generic fire/no-fire behaviour on SilentStdioWatchdog, but the review
+// (2026-09-11 P2-6) flagged that nothing verified `new ClaudeAdapter()` ACTUALLY
+// arms its watchdog at that value. These tests pin the wiring: a user turn arms
+// it, it fires session:backend-silent just past 300s and not before, and any CLI
+// frame in the window resets the deadline (no false positive on a live turn).
+describe("silent-stdio watchdog arming (P2-6)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("arms at the 300000ms default: fires session:backend-silent just past the deadline, not before", () => {
+    const adapter = new ClaudeAdapter("sess-wd-300");
+    adapter.attachWebSocket(createMockSocket("sess-wd-300"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    // A user turn arms the silence watchdog.
+    adapter.send({ type: "user_message", content: "hello" });
+
+    // Just before the 300s deadline — must NOT fire.
+    vi.advanceTimersByTime(299_000);
+    expect(silent.length).toBe(0);
+
+    // Cross the deadline — fires exactly once for this session.
+    vi.advanceTimersByTime(2_000);
+    expect(silent.length).toBe(1);
+    expect((silent[0] as { sessionId: string }).sessionId).toBe("sess-wd-300");
+    off();
+  });
+
+  it("a CLI frame inside the window resets the deadline (no false positive on a live turn)", () => {
+    const adapter = new ClaudeAdapter("sess-wd-reset");
+    adapter.attachWebSocket(createMockSocket("sess-wd-reset"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    adapter.send({ type: "user_message", content: "hello" });
+    vi.advanceTimersByTime(200_000);
+    // Any non-empty CLI frame proves the pipe is alive → deadline resets.
+    adapter.handleRawMessage(makeAssistantMsg());
+    // 200s more (400s total, but only 200s since the frame) — still no fire.
+    vi.advanceTimersByTime(200_000);
+    expect(silent.length).toBe(0);
+    off();
+  });
+});
+
 // ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
 //
 // PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half
@@ -2150,5 +2370,353 @@ describe("result-frame sticky-token cleanup (Task 11.8)", () => {
     // (per the guard in handleResultMessage). A no-op result on
     // already-awaiting state is the replay-defence case.
     expect(noteTerminalResultFrame).not.toHaveBeenCalled();
+  });
+});
+/**
+ * PR #179 — Init-frame health canary. On every `attachTransport`, arm
+ * a 30-second deadline. First `system.init` frame cancels it. If it
+ * expires, adapter emits `session:no-init-frame` on the bus AND
+ * pushes a browser toast so the operator sees the regression on the
+ * FIRST failed spawn, not after MAX_AUTO_RELAUNCHES worth of
+ * symptomatic kills. Distinct from the silent-stdio watchdog which
+ * only arms on user_message send.
+ */
+describe("Init-frame health canary", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("fires session:no-init-frame + browser toast when init never arrives within 30s", async () => {
+    const browserCb = vi.fn();
+    const a = new ClaudeAdapter("sess-canary-1");
+    a.onBrowserMessage(browserCb as any);
+
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // Attach transport but do NOT feed an init frame.
+    a.attachWebSocket(createMockSocket("sess-canary-1"));
+
+    // Advance to just before the deadline — should not fire.
+    vi.advanceTimersByTime(29_000);
+    expect(busEvents.length).toBe(0);
+
+    // Cross the deadline.
+    vi.advanceTimersByTime(2_000);
+    expect(busEvents.length).toBe(1);
+    const evt = busEvents[0] as { sessionId: string; sinceMs: number };
+    expect(evt.sessionId).toBe("sess-canary-1");
+    expect(evt.sinceMs).toBeGreaterThanOrEqual(30_000);
+
+    // Browser was told too.
+    const browserNotices = browserCb.mock.calls.map((c: any[]) => c[0]);
+    const initErr = browserNotices.find((n: any) => n.type === "error" && /never emitted its init/i.test(n.message));
+    expect(initErr).toBeDefined();
+
+    off();
+  });
+
+  it("does NOT fire when init arrives before the deadline", () => {
+    const a = new ClaudeAdapter("sess-canary-2");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    a.attachWebSocket(createMockSocket("sess-canary-2"));
+    // Init lands well within the window.
+    vi.advanceTimersByTime(5_000);
+    a.handleRawMessage(makeInitMsg({ session_id: "cli-canary-2" }));
+
+    // Push far past the deadline — nothing fires (canary was disarmed
+    // by handleSystemInit).
+    vi.advanceTimersByTime(60_000);
+    expect(busEvents.length).toBe(0);
+
+    off();
+  });
+
+  it("does NOT fire when transport closes before the deadline (clean disconnect)", () => {
+    const a = new ClaudeAdapter("sess-canary-3");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    a.attachWebSocket(createMockSocket("sess-canary-3"));
+    vi.advanceTimersByTime(5_000);
+    // Simulate stdio transport close before init landed (subprocess died).
+    a.handleTransportClose();
+    // Advance past the deadline — no fire.
+    vi.advanceTimersByTime(60_000);
+    expect(busEvents.length).toBe(0);
+
+    off();
+  });
+
+  it("re-arms cleanly on a second attachTransport (each spawn gets a fresh 30s window)", () => {
+    const a = new ClaudeAdapter("sess-canary-4");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // First attach — no init, timer armed.
+    a.attachWebSocket(createMockSocket("sess-canary-4"));
+    vi.advanceTimersByTime(20_000);
+    // Second attach BEFORE first deadline (simulates re-connect flap).
+    a.attachWebSocket(createMockSocket("sess-canary-4"));
+    // Original 30s window from first attach would have fired at t=30_000,
+    // but the re-arm cancels it. Advance to t=25_000 total: original
+    // deadline would have hit already (25s > 20s remaining from first
+    // arm was 10s, so 20s+10s=30s would have fired). New window is
+    // 30s from second attach → deadline at t=20+30=50s. So at t=25s
+    // (i.e. 5s into the second window) → NO fire.
+    vi.advanceTimersByTime(5_000);
+    expect(busEvents.length).toBe(0);
+    // Advance to 30s past the SECOND attach → deadline crossed.
+    vi.advanceTimersByTime(26_000);
+    expect(busEvents.length).toBe(1);
+
+    off();
+  });
+
+  // Prod incident eb13fc90 (2026-09-14): a `--resume` spawn on a large
+  // transcript legitimately blows past the 30s cold deadline (transcript
+  // replay + first API round-trip precede `system.init`), so the canary was
+  // flagging a healthy-but-loading resume as "CLI may be broken". A resume
+  // spawn (setResumeExpected(true)) must use the longer 120s window instead.
+  it("uses the longer 120s deadline for a --resume spawn (no fire at 30s, fires at 120s)", () => {
+    const a = new ClaudeAdapter("sess-canary-resume");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // Bridge marks this spawn as a resume BEFORE attach (mirrors openCliTransport).
+    a.setResumeExpected(true);
+    a.attachWebSocket(createMockSocket("sess-canary-resume"));
+
+    // Past the COLD deadline — a cold spawn would have fired here; a resume
+    // must still be waiting (transcript replay + first API call in flight).
+    vi.advanceTimersByTime(35_000);
+    expect(busEvents.length).toBe(0);
+
+    // Just before the resume deadline — still quiet.
+    vi.advanceTimersByTime(84_000); // t=119s
+    expect(busEvents.length).toBe(0);
+
+    // Cross the 120s resume deadline → fires.
+    vi.advanceTimersByTime(2_000); // t=121s
+    expect(busEvents.length).toBe(1);
+    const evt = busEvents[0] as { sinceMs: number };
+    expect(evt.sinceMs).toBeGreaterThanOrEqual(120_000);
+
+    off();
+  });
+
+  // The resume flag is per-spawn state consumed at arm time: a cold re-attach
+  // after a resume attach must fall back to the tight 30s window, never leak
+  // the longer deadline. Guards against a stale `resumeExpected` over-waiting.
+  it("falls back to the cold 30s deadline when the next spawn is not a resume", () => {
+    const a = new ClaudeAdapter("sess-canary-resume-2");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // A resume spawn first.
+    a.setResumeExpected(true);
+    a.attachWebSocket(createMockSocket("sess-canary-resume-2"));
+    // Transport closes before init (subprocess died) — disarms the timer.
+    a.handleTransportClose();
+
+    // Next spawn is a plain cold relaunch — bridge clears the resume flag.
+    a.setResumeExpected(false);
+    a.attachWebSocket(createMockSocket("sess-canary-resume-2"));
+    // Cold deadline must apply: fires at 30s, not 120s.
+    vi.advanceTimersByTime(29_000);
+    expect(busEvents.length).toBe(0);
+    vi.advanceTimersByTime(2_000);
+    expect(busEvents.length).toBe(1);
+
+    off();
+  });
+});
+
+/**
+ * PR — Silent-stdio watchdog threshold env override
+ * (`AURA_SILENT_STDIO_TIMEOUT_MS`). Default raised from 60s (PR #175
+ * value) to 300s after field observation that legitimate tool-heavy
+ * turns can silence >60s between intermediate stream frames, causing
+ * the watchdog to kill healthy work.
+ */
+describe("resolveSilentStdioTimeoutMs — env override parsing", () => {
+  it("returns default (300000 ms) when env is unset", () => {
+    expect(resolveSilentStdioTimeoutMs(undefined)).toBe(300_000);
+  });
+
+  it("returns default when env is empty string", () => {
+    expect(resolveSilentStdioTimeoutMs("")).toBe(300_000);
+  });
+
+  it("returns parsed value for integer >= MIN_MS (10000)", () => {
+    expect(resolveSilentStdioTimeoutMs("60000")).toBe(60_000);
+    expect(resolveSilentStdioTimeoutMs("120000")).toBe(120_000);
+    expect(resolveSilentStdioTimeoutMs("600000")).toBe(600_000);
+    // Boundary
+    expect(resolveSilentStdioTimeoutMs("10000")).toBe(10_000);
+  });
+
+  it("REJECTS values below MIN_MS with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("9999", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("100", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("0", warn)).toBe(300_000);
+    expect(warns.length).toBe(3);
+    // Each warn must identify the offending value + the minimum so
+    // operators can fix their config.
+    for (const w of warns) {
+      expect(w).toContain("AURA_SILENT_STDIO_TIMEOUT_MS");
+      expect(w).toContain("10000");
+    }
+  });
+
+  it("REJECTS negative values with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("-500", warn)).toBe(300_000);
+    expect(warns.length).toBe(1);
+  });
+
+  it("REJECTS non-numeric with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("banana", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("60s", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("Infinity", warn)).toBe(300_000);
+    expect(warns.length).toBe(3);
+  });
+
+  it("REJECTS partial-parse strings like '60000abc' — String(parseInt) round-trip check", () => {
+    // parseInt("60000abc") is 60000 numerically, but that's a config
+    // typo (trailing garbage) and MUST NOT silently succeed with a
+    // partial value. The round-trip `String(parsed) === env.trim()`
+    // is the tripwire.
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("60000abc", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("60000.5", warn)).toBe(300_000);
+    expect(warns.length).toBe(2);
+  });
+});
+
+/**
+ * Init-frame canary deadline env overrides — `AURA_INIT_FRAME_TIMEOUT_MS`
+ * (cold, default 30s) and `AURA_INIT_FRAME_TIMEOUT_RESUME_MS` (resume,
+ * default 120s). Same strict fail-loud family as the silence-watchdog
+ * resolver, but with a 5s floor (a warm-transcript resume can init faster
+ * than the 10s silence floor, and an operator tuning DOWN is legitimate).
+ */
+describe("resolveInitFrameTimeoutMs — env override parsing", () => {
+  it("returns the provided default when env is unset or empty", () => {
+    expect(resolveInitFrameTimeoutMs(undefined)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("")).toBe(30_000);
+    // Caller can supply a different default (the resume constant uses 120s).
+    expect(resolveInitFrameTimeoutMs(undefined, 120_000)).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("", 120_000)).toBe(120_000);
+  });
+
+  it("returns parsed value for integer >= MIN_MS (5000)", () => {
+    expect(resolveInitFrameTimeoutMs("30000")).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("120000")).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("600000")).toBe(600_000);
+    // Boundary — 5s floor accepted.
+    expect(resolveInitFrameTimeoutMs("5000")).toBe(5_000);
+  });
+
+  it("REJECTS values below MIN_MS (5000) with warn → default, naming the env var", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveInitFrameTimeoutMs("4999", 120_000, "AURA_INIT_FRAME_TIMEOUT_RESUME_MS", warn)).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("0", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(warns.length).toBe(2);
+    expect(warns[0]).toContain("AURA_INIT_FRAME_TIMEOUT_RESUME_MS");
+    expect(warns[0]).toContain("5000");
+    expect(warns[1]).toContain("AURA_INIT_FRAME_TIMEOUT_MS");
+  });
+
+  it("REJECTS non-numeric, negative, float, and partial-parse strings → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveInitFrameTimeoutMs("banana", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("-500", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("30000.5", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("30000abc", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(warns.length).toBe(4);
+  });
+});
+
+// ─── W14: observer wake silence — Claude parity ──────────────────────────────
+//
+// Prod 2026-10-16 (codex observer): a wake was accepted and then not one frame
+// reached the adapter. The Claude observer has the same exposure (2026-09-09:
+// stream-json output silently stopped reaching bun) but its session-level
+// silence watchdog is armed only for browser user messages. A wake with ZERO
+// output for OBSERVER_WAKE_SILENCE_MS is now reported as observer:wake-failed
+// (reason `silent`) so the orchestrator degrades + auto-heals (relaunches) the
+// observer and redelivers the checkpoint. Claude has no in-process fresh
+// thread, so there is no retry step — the relaunch is the retry.
+describe("observer wake silence (W14, Claude parity)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports a wake with zero output as observer:wake-failed (silent) and frees the slot", () => {
+    const adapter = new ClaudeAdapter("sess-w14-silent");
+    adapter.attachWebSocket(createMockSocket("sess-w14-silent"));
+    const failed: Array<{ reason?: string }> = [];
+    const drained: unknown[] = [];
+    const off1 = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    const off2 = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+    expect(adapter.sendUserFrameFromServer("# Council Checkpoint silent").kind).toBe("sent");
+
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS - 1_000);
+    expect(failed).toHaveLength(0);
+    vi.advanceTimersByTime(2_000);
+    expect(failed).toEqual([expect.objectContaining({ sessionId: "sess-w14-silent", reason: "silent" })]);
+    // No drain: the pair is about to degrade; the orchestrator re-queues.
+    expect(drained).toHaveLength(0);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    off1();
+    off2();
+  });
+
+  it("does not fire once the wake produced any output", () => {
+    const adapter = new ClaudeAdapter("sess-w14-live");
+    adapter.attachWebSocket(createMockSocket("sess-w14-live"));
+    const failed: unknown[] = [];
+    const off = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    adapter.sendUserFrameFromServer("# Council Checkpoint live");
+    vi.advanceTimersByTime(5_000);
+    adapter.handleRawMessage(`${JSON.stringify({ type: "stream_event", event: { type: "message_start" } })}\n`);
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS * 2);
+    expect(failed).toHaveLength(0);
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    off();
+  });
+
+  it("is disarmed by a normal result frame", () => {
+    const adapter = new ClaudeAdapter("sess-w14-done");
+    adapter.attachWebSocket(createMockSocket("sess-w14-done"));
+    const failed: unknown[] = [];
+    const off = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    adapter.sendUserFrameFromServer("# Council Checkpoint done");
+    adapter.handleRawMessage(makeResultMsg({ session_id: "cli-w14" }));
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS * 2);
+    expect(failed).toHaveLength(0);
+    off();
   });
 });

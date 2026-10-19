@@ -11,6 +11,12 @@ import type {
   CreationProgressEvent,
   BrowserObserverFinding,
   BrowserObserverDowngrade,
+  ModelFallbackReason,
+  ModelFallbackRecord,
+  ContextAdvisoryRecord,
+  ContextAdvisoryPayload,
+  ContextAdvisorySignal,
+  BrowserCheckpointCoverageGap,
 } from "../server/session-types.js";
 
 export type {
@@ -26,6 +32,12 @@ export type {
   CreationProgressEvent,
   BrowserObserverFinding,
   BrowserObserverDowngrade,
+  ModelFallbackReason,
+  ModelFallbackRecord,
+  ContextAdvisoryRecord,
+  ContextAdvisoryPayload,
+  ContextAdvisorySignal,
+  BrowserCheckpointCoverageGap,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";
 
@@ -59,6 +71,35 @@ export interface ChatMessage {
    * on a synthesised partial frame after a CLI disconnect.
    */
   streamStatus?: "complete" | "interrupted" | "errored";
+  /**
+   * Turn boundary: set on the last user/assistant message in the feed when
+   * the turn's `result` frame arrives (live or replayed from
+   * message_history). The observer feed uses it to bind a liveness probe to
+   * its own turn (`utils/observer-probe.ts`).
+   */
+  turnEnd?: boolean;
+  /**
+   * Rendering hint for system messages built from an errored result frame.
+   * "error" — a real execution error (red). "resume-interrupted" — the
+   * bookkeeping frame closing a turn cut off by a restart (`--resume`) or a
+   * user Stop mid-tool-call (indistinguishable from the frame); shown as
+   * a muted, collapsed note with `content` as the expandable diagnostic
+   * (see `utils/resume-interrupted.ts`). "drift-recovery" — the silent-stdio
+   * drift-recovery notice ("Backend transcript …s behind CLI's jsonl —
+   * relaunching to recover.", see `server/session-recovery.ts` and
+   * `utils/drift-recovery-message.ts`); muted, same divider as the plain
+   * variant. Absent → the plain muted divider. "resume-interrupted" and
+   * "drift-recovery" are also the two variants `MessageFeed.tsx` collapses
+   * into a single expandable row when 2+ of them land back to back with no
+   * other content between them.
+   */
+  systemVariant?: "error" | "resume-interrupted" | "drift-recovery";
+  /**
+   * Set on a user-role message the server sent on the user's behalf —
+   * currently only the usage-limit auto-resume continuation prompt. The
+   * bubble shows an "Автопродолжение после лимита" caption.
+   */
+  origin?: "auto_resume";
 }
 
 export interface TaskItem {
@@ -129,7 +170,7 @@ export interface GroupRecord {
   /** Which half died — populated only when status === "degraded". */
   deadRole?: SessionRole;
   /** Optional degraded reason published by the server for council pairs. */
-  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   /** Wallclock (ms) of the most recent checkpoint received. */
   lastCheckpointAt?: number;
   /** Monotonic sequence of the most recent checkpoint received. */
@@ -174,7 +215,57 @@ export interface GroupRecord {
   cycleNumber?: number;
   convergenceThreshold?: number;
   convergenceState?: "in-progress" | "converged" | "revoked";
+  /**
+   * P3/CONV-HONEST: set when the LATEST review was not counted toward
+   * convergence (the checkpoint had no changed files, or the host saw the
+   * observer read none of them, or a STOP in it was downgraded by grounding —
+   * CONV-DOWNGRADE). Cleared by the next counted review.
+   */
+  lastReviewNotCounted?: ConvergenceNotCountedReason;
+  /** Id of the most recent checkpoint received (from `group_checkpoint`). */
+  lastCheckpointId?: string;
+  /**
+   * Observer rigor: checkpoints not covered by a real review — "без ревью"
+   * (never reviewed) or "не проверено" (empty review, nothing beyond the
+   * prose artifact was read). REST bootstrap replaces it; live frames merge.
+   */
+  checkpointCoverage?: BrowserCheckpointCoverageGap[];
 }
+
+/** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
+export type ConvergenceNotCountedReason =
+  | "no_changed_files"
+  | "no_files_read"
+  | "downgraded_stop"
+  | "unverified_clean"
+  /** W15: observer clean, second opinion still running. */
+  | "awaiting_second_review"
+  /** W15: the second opinion raised a STOP on the checkpoint. */
+  | "second_review_blocked"
+  /** W15: the owed second opinion failed / timed out / was limited. */
+  | "second_review_missing";
+
+/** User-facing copy for {@link ConvergenceNotCountedReason}. */
+export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
+  no_changed_files: "Not counted: no changed files",
+  no_files_read: "Not counted: no files read",
+  downgraded_stop: "Not counted: downgraded STOP",
+  unverified_clean: "Not counted: unverified clean review",
+  awaiting_second_review: "Not counted yet: waiting for the second opinion",
+  second_review_blocked: "Not counted: second opinion raised a STOP",
+  second_review_missing: "Not counted: second opinion missing",
+};
+
+/** Inline form of {@link CONVERGENCE_NOT_COUNTED_COPY} ("…: downgraded STOP"
+ *  keeps the acronym; only the leading capital is dropped). */
+export function convergenceNotCountedInline(reason: ConvergenceNotCountedReason): string {
+  const copy = CONVERGENCE_NOT_COUNTED_COPY[reason];
+  return copy.charAt(0).toLowerCase() + copy.slice(1);
+}
+
+/** P3/CONV-HONEST: the counter is a streak, never a readiness verdict. */
+export const CONVERGENCE_DISCLAIMER =
+  "Not a readiness guarantee — only reviews in which the observer read changed files are counted.";
 
 /**
  * Browser-side finding record. Adds `receivedAt`, `checkpointId`, `phase`
@@ -201,9 +292,53 @@ export interface ObserverFinding {
    *  `wake_version_mismatch` (Task 10) is a global downgrade applied to
    *  every finding when the observer's echo of the wake-payload version
    *  disagrees with what the server dispatched. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?:
+    | "evidence_not_in_modified_set"
+    | "evidence_missing_on_disk"
+    | "evidence_lines_out_of_range"
+    | "evidence_lines_unchanged"
+    | "wake_version_mismatch";
+  /** B2: a STOP the server kept but could not tie to its cited lines. Stays a
+   *  STOP in the findings log; never raises the blocker banner or the unread
+   *  blocker count. */
+  weakEvidence?: "no_cited_lines" | "claim_symbols_not_on_cited_lines" | "cited_lines_unreadable";
+  /** B2b: a STOP repeating a claim a human already dismissed in this group
+   *  (server match: identical claim, or the same quoted command/code span).
+   *  Stays a STOP in the findings log; never raises the blocker banner. */
+  disputed?: "same_claim" | "shared_anchor";
+  /** FIX-AP-3: this finding holds the pair's auto-proceed (a STOP whose
+   *  grounding verdict was never frozen) even though its current severity or
+   *  weak evidence would keep it off the banner. Shown as a blocker anyway so
+   *  no hold is invisible; Dismiss / Dispute release it. */
+  holdsAutoProceed?: true;
+  /** BANNER-RESOLVED: the server says a human already released this STOP with
+   *  "Dismiss for now" (persisted resolution). Never a blocker; the findings
+   *  log marks it "dismissed". */
+  dismissed?: true;
   observerModel: string;
   observerProvider: string;
+  /** W15: true on a finding of the host-run second-opinion reviewer (its own
+   *  provider/model are in `observerProvider` / `observerModel`). */
+  secondOpinion?: true;
+  /** W15: id of the other reviewer's earlier finding this one near-duplicates;
+   *  folded into that row ("also flagged by …"), never its own blocker. */
+  duplicateOf?: string;
+}
+
+/**
+ * FIX-AP-4 — why a pair's auto-proceed stays paused after a server restart:
+ * the server could not fully restore its STOP hold from `.council/reviews/`.
+ * Wire shape of `autoProceedRestoreGaps` in `GET /api/groups/:id/findings`.
+ */
+export interface AutoProceedRestoreGap {
+  /** Raw gap code, as in the server log `auto-proceed.hold-restore-incomplete`. */
+  gap: string;
+  /** Human-readable reason. */
+  reason: string;
+  /** Review file name (review-file gaps only). */
+  file?: string;
+  /** Present iff the gap can be ignored; sent back with "Ignore this file". */
+  fingerprint?: string;
 }
 
 export type ObserverPanelStateName =
@@ -248,13 +383,14 @@ export type ObserverPanelState =
    */
   | { name: "cycle-progress"; cycleNumber: number; threshold: number }
   /**
-   * Bidirectional pipeline Story 4.1 — pair has converged. Pill renders
-   * `✅ Converged — ready to ship` (emerald-500 token). Slots BELOW
+   * Bidirectional pipeline Story 4.1 — pair reached the threshold. Pill
+   * renders `✅ N reviews in a row without blockers` (emerald-500 token) —
+   * P3/CONV-HONEST: a streak, NOT "ready to ship". Slots BELOW
    * `degraded` so a half going dead immediately re-asserts the warning.
    */
   | { name: "converged"; cycleNumber: number; threshold: number }
   | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }
-  | { name: "degraded"; deadRole: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" };
+  | { name: "degraded"; deadRole: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review" };
 
 export interface SdkSessionInfo {
   sessionId: string;
@@ -289,4 +425,16 @@ export interface SdkSessionInfo {
   agentName?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** Git worktree the session runs in (set when Aura created/tracks one). */
+  worktree?: SessionWorktreeInfo;
+}
+
+export interface SessionWorktreeInfo {
+  path: string;
+  branch: string;
+  repoRoot: string;
+  /** Created automatically to isolate from another live session in the same tree. */
+  isolated: boolean;
+  /** Kept after archive because it has uncommitted changes (`dirty`) or removal failed. */
+  retained?: "dirty" | "error";
 }

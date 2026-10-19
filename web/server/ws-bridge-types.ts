@@ -8,6 +8,7 @@ import type {
 } from "./session-types.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type { SessionStateMachine } from "./session-state-machine.js";
+import type { CachePrefixChangeReason } from "./turn-usage-telemetry.js";
 import { getSettings } from "./settings-manager.js";
 
 // PLAN T10 (Phase F) - re-export the wire frame so the Phase G
@@ -29,6 +30,13 @@ export interface BrowserSocketData {
   sessionId: string;
   subscribed?: boolean;
   lastAckSeq?: number;
+  /**
+   * Anonymous per-browser id (localStorage `companion_client_id`), captured
+   * from the WS connect query. Lets `countDistinctBrowsers` collapse "one human
+   * with N sessions open" (N sockets) into a single presence headcount. Absent
+   * for legacy clients that don't send it — such sockets each count on their own.
+   */
+  clientId?: string;
 }
 
 export interface TerminalSocketData {
@@ -92,6 +100,18 @@ export interface Session {
    * silently losing the partial text. Not persisted itself — recomputed
    * deterministically from incoming wire frames.
    */
+  /**
+   * Model the launcher has persisted for the CURRENT CLI process: set by the
+   * process's first init frame (its spawn `--model`), then by each main
+   * assistant frame. A main assistant frame on a different model is a
+   * confirmed switch → `session:model-active-changed` → launcher.setModel.
+   * Seeded from the launcher's spawn argv on every stdio spawn
+   * (`handleCLIStdioOpen`); never reset on a WS reconnect, which can re-dial
+   * the same live process. Distinct from
+   * `state.model` (UI label), which the CLI's post-set_model init frame
+   * moves BEFORE the switch is confirmed.
+   */
+  launcherModel?: string;
   streamingAssistant?: {
     id: string;
     text: string;
@@ -111,6 +131,23 @@ export interface Session {
    * later second initialize.
    */
   pendingSystemPromptInjection?: string | null;
+  /**
+   * Prompt-cache telemetry (W6/W7), in-memory only. When the message that
+   * opened the current turn was routed — the idle gap for `llm.turn_usage`
+   * is measured from the previous turn's completion to THIS, since the cache
+   * TTL runs until the next request, not until the next result.
+   */
+  turnStartedAt?: number;
+  /** Prefix-changing control requests since the last turn_usage line. */
+  pendingCachePrefixChanges?: CachePrefixChangeReason[];
+  /**
+   * Real (non-`<synthetic>`) model of the current turn's MAIN-thread assistant
+   * frame, in-memory only. Consumed — and cleared — by the next `result`: a
+   * successful result records it in the observed-working model store
+   * (`verified-models.ts`). Cleared on every result so a later turn without a
+   * main assistant frame never reuses a stale model as evidence.
+   */
+  turnObservedModel?: string;
 }
 
 export type GitSessionKey =

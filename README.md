@@ -6,6 +6,8 @@
 <p align="center"><strong>Self-learning web UI for Claude Code & Codex with Council Mode.</strong></p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/aura-companion"><img src="https://img.shields.io/npm/v/aura-companion?label=npm&color=e05d2c" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/aura-companion"><img src="https://img.shields.io/npm/dm/aura-companion?label=downloads" alt="npm downloads per month" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
   <a href="https://github.com/antonioshaman/aura-companion/stargazers"><img src="https://img.shields.io/github/stars/antonioshaman/aura-companion?style=social" alt="GitHub stars" /></a>
 </p>
@@ -40,12 +42,10 @@ Open http://localhost:5174.
 
 **Requirements:** [Bun](https://bun.sh/) ≥ 1.0, Claude Code CLI or Codex CLI.
 
-```bash
-# Or install the published package globally
-bun install -g aura-companion
+Or run the published package directly (no checkout needed):
 
-# Or run without installing
-bunx aura-companion
+```bash
+bunx aura-companion          # starts the server on http://localhost:3456
 ```
 
 ## Self-Learning
@@ -97,7 +97,6 @@ Based on John Carmack's engineering philosophy. A council of domain experts revi
 | `/council-implement` | Execute council plans task-by-task with per-task expert guidance |
 | `/spec-writer` | Generate structured specs with Job Stories + Gherkin acceptance criteria |
 | `/test-architect` | Audit test quality, detect AI shortcut patterns, specify tests before implementation |
-| `/self-improvement` | Continuous learning: log errors, corrections, and feature requests |
 
 **Council experts include:** Troy Hunt (security), Martin Fowler (refactoring), Kent Beck (testing), Brandur Leach (databases), Simon Willison (LLM pipelines), Karri Saarinen (UI), Vitaly Friedman (UX), plus stack-specific Backend, Realtime, Subprocess, a11y, and Deploy experts.
 
@@ -196,6 +195,22 @@ web/
 ├── checkpoints/<phase>.json
 └── reviews/<phase>-<provider>-observer.md
 ```
+
+## Telemetry & privacy
+
+Aura Companion reports an **anonymous usage counter** — a random install id plus a
+periodic heartbeat/online ping — to a Cloudflare aggregator so the footer badge can
+show the global "online · active · total" install count. It never sends your prompts,
+code, file contents, session transcripts, or any personally identifying data.
+
+This is **on by default (opt-out)**. To turn it off, either:
+
+- toggle **Settings → Telemetry → Anonymous usage counter** off, or
+- set the environment variable `COMPANION_TELEMETRY=0` (the env override always wins).
+
+A separate, independently-toggled setting (**Settings → Telemetry → Usage analytics and
+errors**) controls optional PostHog product analytics / crash reporting and respects your
+browser's Do Not Track.
 
 ## Contributing
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, useId } from "react";
 import { createPortal } from "react-dom";
 import { api, type CronJobInfo } from "../api.js";
 import { useStore } from "../store.js";
@@ -83,6 +83,8 @@ interface JobFormData {
   backendType: "claude" | "codex";
   model: string;
   cwd: string;
+  /** "default" asks before tool use; "bypassPermissions" is an explicit opt-in. */
+  permissionMode: string;
 }
 
 const EMPTY_FORM: JobFormData = {
@@ -94,6 +96,7 @@ const EMPTY_FORM: JobFormData = {
   backendType: "claude",
   model: getDefaultModel("claude"),
   cwd: "",
+  permissionMode: "default",
 };
 
 const CRON_PRESETS: { label: string; value: string }[] = [
@@ -150,6 +153,7 @@ export function CronManager({ onClose, embedded = false }: Props) {
         backendType: formData.backendType,
         model: formData.model.trim() || undefined,
         cwd: formData.cwd.trim() || undefined,
+        permissionMode: formData.permissionMode,
       } as Partial<CronJobInfo>);
       setFormData(EMPTY_FORM);
       setShowCreate(false);
@@ -174,6 +178,7 @@ export function CronManager({ onClose, embedded = false }: Props) {
       backendType: job.backendType,
       model: job.model,
       cwd: job.cwd,
+      permissionMode: job.permissionMode || "default",
     });
     setError("");
   }
@@ -203,6 +208,7 @@ export function CronManager({ onClose, embedded = false }: Props) {
         backendType: editForm.backendType,
         model: editForm.model.trim() || undefined,
         cwd: editForm.cwd.trim() || undefined,
+        permissionMode: editForm.permissionMode,
       } as Partial<CronJobInfo>);
       setEditingId(null);
       setError("");
@@ -290,9 +296,6 @@ export function CronManager({ onClose, embedded = false }: Props) {
               style={{ animation: "fadeSlideIn 150ms ease-out" }}
             >
               <JobForm form={formData} onChange={setFormData} />
-              <p className="text-[10px] text-cc-muted">
-                Scheduled tasks run with full autonomy (bypassPermissions)
-              </p>
 
               {error && showCreate && (
                 <div className="px-3 py-2 rounded-lg bg-cc-error/10 text-xs text-cc-error">{error}</div>
@@ -490,9 +493,6 @@ export function CronManager({ onClose, embedded = false }: Props) {
       {showCreate && (
         <div className="px-3 py-3 space-y-2.5">
           <JobForm form={formData} onChange={setFormData} />
-          <div className="text-[10px] text-cc-muted">
-            Scheduled tasks run with full autonomy (bypassPermissions)
-          </div>
           <button
             onClick={handleCreate}
             disabled={!formData.name.trim() || !formData.prompt.trim() || creating}
@@ -692,6 +692,7 @@ function JobForm({
 }) {
   const update = (partial: Partial<JobFormData>) =>
     onChange({ ...form, ...partial });
+  const autonomyHintId = useId();
 
   // ─── Dynamic model fetching (same pattern as HomePage) ──────────
   // PLAN-aura-dynamic-model-list Task 10: lifted to settings-slice.
@@ -927,6 +928,27 @@ function JobForm({
           />
         )}
       </div>
+
+      {/* Permission mode — safe by default, full autonomy is an explicit opt-in */}
+      <label className="flex items-start gap-2 min-h-[44px] py-1 text-xs text-cc-fg cursor-pointer">
+        <input
+          type="checkbox"
+          checked={form.permissionMode === "bypassPermissions"}
+          onChange={(e) =>
+            update({ permissionMode: e.target.checked ? "bypassPermissions" : "default" })
+          }
+          aria-describedby={autonomyHintId}
+          className="mt-0.5 accent-cc-primary"
+        />
+        <span>
+          Full autonomy (bypassPermissions)
+          <span id={autonomyHintId} className="block text-[10px] text-cc-muted">
+            {form.permissionMode === "bypassPermissions"
+              ? "Runs every tool without asking, unattended. Only enable for prompts you trust."
+              : "Off: the session asks for your approval before using tools."}
+          </span>
+        </span>
+      </label>
     </div>
   );
 }

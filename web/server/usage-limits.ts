@@ -1,7 +1,10 @@
+import { classifyFetchError, usageLimitsUpstream } from "./diagnostics/upstream-status.js";
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { writeAtomicJson } from "./atomic-write.js";
+import { log } from "./logger.js";
 
 export interface UsageLimits {
   five_hour: { utilization: number; resets_at: string | null } | null;
@@ -11,6 +14,7 @@ export interface UsageLimits {
     monthly_limit: number;
     used_credits: number;
     utilization: number | null;
+    disabled_reason?: string | null;
   } | null;
 }
 
@@ -90,26 +94,38 @@ function readRawCredentials(): RawCredentials | null {
 
 function writeCredentials(creds: Record<string, unknown>, sourcePath?: string): void {
   try {
-    const json = JSON.stringify(creds);
     if (process.platform === "darwin") {
+      const json = JSON.stringify(creds);
       execFileSync(
         "security",
         ["add-generic-password", "-U", "-s", "Claude Code-credentials", "-a", "Claude Code", "-w", json],
         { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
       );
-    } else {
-      // Write back to the same file that was read, or default to .credentials.json
-      const credPath = sourcePath ?? join(
-        process.env.USERPROFILE || process.env.HOME || homedir() || "",
-        ".claude",
-        ".credentials.json",
-      );
-      writeFileSync(credPath, json, "utf-8");
+      return;
     }
-  } catch {
-    // best-effort
+    // Write back to the same file that was read, or default to .credentials.json.
+    // Atomic (tmp+fsync+rename) so a crash or concurrent read never leaves a
+    // truncated .credentials.json — a torn creds file fails to parse and breaks
+    // both the usage panel AND the CLI's own auth. No size cap: credentials are
+    // small and auth-critical, so a cap must never silently drop the writeback.
+    const credPath = sourcePath ?? join(
+      process.env.USERPROFILE || process.env.HOME || homedir() || "",
+      ".claude",
+      ".credentials.json",
+    );
+    writeAtomicJson(credPath, creds, { maxBytes: Number.POSITIVE_INFINITY });
+  } catch (e) {
+    // Surface the failure: silently losing a just-refreshed token forces a
+    // re-refresh next call, and single-use refresh tokens can rotate out from
+    // under us, permanently breaking refresh.
+    log.warn("usage-limits", "Failed to persist refreshed OAuth credentials", {
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 }
+
+/** Bound for the usage and OAuth-refresh fetches (review D-1). */
+export const USAGE_FETCH_TIMEOUT_MS = 10_000;
 
 async function refreshAccessToken(refreshToken: string): Promise<{
   accessToken: string;
@@ -118,6 +134,7 @@ async function refreshAccessToken(refreshToken: string): Promise<{
 } | null> {
   try {
     const res = await fetch(OAUTH_TOKEN_URL, {
+      signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -177,6 +194,9 @@ export async function fetchUsageLimits(
 ): Promise<UsageLimits | null> {
   try {
     const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      // Review D-1: a hung upstream must settle as a recorded timeout, not
+      // leave the Diagnostics card saying "OK" forever.
+      signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -187,15 +207,21 @@ export async function fetchUsageLimits(
       },
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      usageLimitsUpstream.recordFailure(response.status === 401 ? "oauth-expired" : "http", response.status);
+      return null;
+    }
 
     const data = await response.json();
+    usageLimitsUpstream.recordOk();
     return {
       five_hour: data.five_hour || null,
       seven_day: data.seven_day || null,
       extra_usage: data.extra_usage || null,
     };
-  } catch {
+  } catch (err) {
+    usageLimitsUpstream.recordFailure(classifyFetchError(err));
     return null;
   }
 }
@@ -212,7 +238,11 @@ export async function getUsageLimits(): Promise<UsageLimits> {
     }
 
     const token = await getValidAccessToken();
-    if (!token) return empty;
+    if (!token) {
+      // Diagnostics: no credentials file at all vs an expired / unrefreshable token.
+      usageLimitsUpstream.recordFailure(readRawCredentials() ? "oauth-expired" : "no-credentials");
+      return empty;
+    }
 
     const limits = await fetchUsageLimits(token);
     if (!limits) return empty;

@@ -6,19 +6,28 @@ import {
   cpSync,
   realpathSync,
   statSync,
+  lstatSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import type { ClaudeAdapter } from "./claude-adapter.js";
+import type { CliTransport } from "./cli-transport.js";
+import { StdioCliTransport, pumpStdoutLines } from "./cli-transport.js";
+import { trackSync } from "./event-loop-lag-monitor.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
 import { verifyProcessIdentity, readProcessStartMs } from "./process-identity.js";
+import { resolveJsonlPath } from "./silent-stdio-drift-detector.js";
 // AURA-LOCAL — PLAN T7. Per-session runtime sidecar carrying spawn-time
 // pid + processStartMs + argvSha256. Phase D upgrades the boot probe
 // from Phase A's interim two-factor to three-factor and feeds the
@@ -39,10 +48,117 @@ import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { selectLaunchableCodexModel } from "./codex-models.js";
 import { getSuppressedModelIds } from "./model-availability.js";
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
+import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
+import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+import {
+  buildLayerSpawnConfig,
+  composeSystemPrompt,
+  type LayerFlags,
+} from "./layer-flags.js";
+
+/**
+ * Control-channel transport for Claude sessions.
+ *
+ * Defaults to `stdio` because a current Claude Code CLI (>= 2.1.121) refuses
+ * `--sdk-url ws://localhost`. Set `COMPANION_CLAUDE_TRANSPORT=ws` only with a
+ * CLI pinned below that version.
+ */
+export function claudeTransportMode(): "stdio" | "ws" {
+  return (process.env.COMPANION_CLAUDE_TRANSPORT || "stdio").toLowerCase() === "ws" ? "ws" : "stdio";
+}
+
+/**
+ * A spawn dying within this window while resuming is *suspicious* — it may mean
+ * the resume target is gone, but it may equally be a version/transport mismatch
+ * or a transient failure. Kept identical to the pre-existing 5s heuristic.
+ */
+const RESUME_FAILURE_UPTIME_MS = 5000;
+
+/**
+ * How many *consecutive* fast resume-deaths it takes before we give up on the
+ * `cliSessionId` and start fresh. A genuinely dead resume target fails
+ * identically every attempt and clears after this many; a one-off transient
+ * (e.g. the stdio-transport cutover) is absorbed without destroying the
+ * conversation reference.
+ */
+const RESUME_FAILURE_THRESHOLD = 2;
+
+/**
+ * Council review 2026-09-11 P2-1: when the resume TARGET (the `--resume`
+ * transcript on disk) still exists, a fast death is much more likely a
+ * transient (startup lag, resource pressure, version/transport mismatch) than a
+ * genuinely-unresumable target — and discarding the anchor forfeits the user's
+ * whole conversation. So we give a present-transcript session more strikes
+ * before falling back to a fresh session. We still DO fall back eventually: a
+ * transcript that exists but is genuinely unresumable (corrupt / rolled-over)
+ * must not pin the session on a resume that always crashes, so the fresh-start
+ * escape hatch is preserved — just at a higher bar.
+ */
+const RESUME_FAILURE_THRESHOLD_TRANSCRIPT_PRESENT = 4;
+
+/**
+ * Shared decision for the two `proc.exited` handlers (WS + stdio). Mutates the
+ * session's `resumeImmediateFailures` counter and returns whether the caller
+ * should discard `cliSessionId`. A spawn that lived past the window resets the
+ * counter (the resume worked); a fast death while resuming increments it and
+ * only trips the discard once `threshold` consecutive fast deaths accrue.
+ *
+ * `threshold` is injected by the caller (see {@link resumeFailureThresholdFor})
+ * so a session whose resume transcript is still on disk gets more retries
+ * before its anchor is destroyed (P2-1).
+ */
+export function shouldClearResumeAfterExit(
+  session: SdkSessionInfo,
+  uptimeMs: number,
+  wasResuming: boolean,
+  threshold: number = RESUME_FAILURE_THRESHOLD,
+): boolean {
+  if (uptimeMs >= RESUME_FAILURE_UPTIME_MS || !wasResuming) {
+    session.resumeImmediateFailures = 0;
+    return false;
+  }
+  session.resumeImmediateFailures = (session.resumeImmediateFailures ?? 0) + 1;
+  return session.resumeImmediateFailures >= threshold;
+}
+
+/**
+ * P2-1 pure helper: how many consecutive fast resume-deaths to tolerate before
+ * discarding `cliSessionId`. A present transcript (only meaningful for Claude,
+ * whose resume target is the `~/.claude/projects/**.jsonl` file) earns a higher
+ * bar; anything else keeps the base threshold.
+ */
+export function resumeFailureThresholdFor(
+  backendType: BackendType | undefined,
+  transcriptPresent: boolean,
+): number {
+  if (backendType !== "codex" && transcriptPresent) {
+    return RESUME_FAILURE_THRESHOLD_TRANSCRIPT_PRESENT;
+  }
+  return RESUME_FAILURE_THRESHOLD;
+}
+
+/**
+ * P2-1 filesystem predicate (EC-7: inlined resolution, injectable stat for
+ * tests): does a non-empty resume transcript exist at `jsonlPath`? Any error
+ * (missing, unreadable) → `false`, i.e. "cannot confirm the target exists" →
+ * the caller falls back to the base discard threshold rather than pinning a
+ * resume that may be unrecoverable.
+ */
+export function resumeTranscriptExists(
+  jsonlPath: string,
+  statFn: (p: string) => { size: number } = statSync,
+): boolean {
+  try {
+    return statFn(jsonlPath).size > 0;
+  } catch {
+    return false;
+  }
+}
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
@@ -109,7 +225,24 @@ export interface SdkSessionInfo {
   createdAt: number;
   /** The CLI's internal session ID (from system.init), used for --resume */
   cliSessionId?: string;
+  /**
+   * Count of consecutive spawns that died within RESUME_FAILURE_UPTIME_MS while
+   * carrying `--resume`. A single fast death is NOT proof the resume target is
+   * bad — a version/transport mismatch or transient error looks identical — so
+   * we only discard `cliSessionId` once this reaches RESUME_FAILURE_THRESHOLD.
+   * Reset to 0 whenever a spawn lives past the window (the resume worked).
+   */
+  resumeImmediateFailures?: number;
   archived?: boolean;
+  /**
+   * W2 boot-resume marker. Set by {@link CliLauncher.markLiveForBootResume}
+   * during graceful shutdown on every session whose CLI was alive (or awaiting
+   * a keepalive relaunch) BEFORE the shutdown itself killed it — the council
+   * group teardown kills both halves, which persists them as `exited` and
+   * would otherwise make them indistinguishable from a session that was
+   * really down. Consumed (deleted) by `restoreFromDisk`.
+   */
+  resumeOnBoot?: boolean;
   /** User-facing session name */
   name?: string;
   /** Which backend this session uses */
@@ -127,7 +260,7 @@ export interface SdkSessionInfo {
   /** Whether internet/web search is enabled for Codex sessions */
   codexInternetAccess?: boolean;
   /** Sandbox mode selected for Codex sessions */
-  codexSandbox?: "workspace-write" | "danger-full-access";
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** If this session was spawned by a cron job */
   cronJobId?: string;
   /** Human-readable name of the cron job that spawned this session */
@@ -144,6 +277,15 @@ export interface SdkSessionInfo {
   agentName?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** aura-meta-diet C3 — non-default layer flags (absent = all layers on).
+   *  Persisted so a relaunch re-applies the same restrictions. */
+  layers?: LayerFlags;
+  /** Opt-in KB auto-prime directive (default off). Persisted so a relaunch
+   *  re-applies it. */
+  kbAutoPrime?: boolean;
+  /** aura-meta-diet AP-WIRE — validated auto-proceed opt-in; set only on a
+   *  council orchestrator-half. Persisted so the opt-in survives restarts. */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport (host mode). */
@@ -175,7 +317,7 @@ export interface SdkSessionInfo {
    * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
    * - `"bundled"` — workspace file absent (ENOENT); fell back to the
    *    bundled artifact shipped with aura-companion
-   * (Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
+   * (Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
    *
    * Consumers (recorder attribution, EC-9 invocation log, UI provenance
    * display, replay determinism) MUST distinguish on THIS field rather
@@ -209,10 +351,16 @@ export interface LaunchOptions {
   /** When set, Claude `--resume <id>` is passed to restore conversation
    *  context on relaunch. Internal to launcher relaunch path. */
   resumeSessionId?: string;
-  env?: Record<string, string>;
+  /**
+   * Spawn env overrides. Values may be `undefined` to explicitly UNSET an
+   * inherited var: the spawn merge (`{ ...process.env, ...options.env }`) lets
+   * Bun.spawn drop `undefined` keys, which is how the relaunch reconcile clears
+   * a stale auth var that lives on the server's own process.env (P2 #7).
+   */
+  env?: Record<string, string | undefined>;
   backendType?: BackendType;
   /** Codex sandbox mode. */
-  codexSandbox?: "workspace-write" | "danger-full-access";
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** Whether Codex internet/web search should be enabled for this session. */
   codexInternetAccess?: boolean;
   /** Optional override for CODEX_HOME used by Codex sessions. */
@@ -247,6 +395,18 @@ export interface LaunchOptions {
    *  launcher disables the recorder for this sessionId before the
    *  adapter wires its first `record()` call. */
   record?: boolean;
+  /** aura-meta-diet C3 — resolved layer flags. Absent or all-default →
+   *  spawn argv unchanged. See `layer-flags.ts`. */
+  layers?: LayerFlags;
+  /** Opt-in KB auto-prime directive (see `KB_AUTO_PRIME_DIRECTIVE`). Never
+   *  applied to a Council observer half. */
+  kbAutoPrime?: boolean;
+  /** AP-WIRE — auto-proceed opt-in; stored only when `sessionGroupRole` is
+   *  `orchestrator` (the manager's gate refuses any other half anyway). */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
+  /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
+   *  appended to Claude's system prompt / Codex `developerInstructions`. */
+  layerSystemPrompt?: string;
 }
 
 /**
@@ -255,18 +415,36 @@ export interface LaunchOptions {
  */
 export class CliLauncher {
   private sessions = new Map<string, SdkSessionInfo>();
+  /**
+   * W2: sessions that were alive before the server restart but that
+   * `restoreFromDisk` had to leave `exited` (stdio pipes and the Codex proxy
+   * die with the old server). The orchestrator drains this once at boot and
+   * relaunches them with `--resume` without waiting for a browser.
+   */
+  private bootResumeCandidates: string[] = [];
   private processes = new Map<string, Subprocess>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
+  /**
+   * P4/FIX-AUTOHEAL-2: Codex WS spawns still awaiting their port pick. The
+   * processes are not in `processes` yet, so a `kill`/relaunch/delete landing
+   * in that gap had nothing to signal and the spawn then went ahead — a live
+   * app-server for an archived, deleted or stopped session. Those paths set
+   * `cancelled`; the spawn re-checks it before `Bun.spawn`.
+   */
+  private pendingCodexWsSpawns = new Map<string, { cancelled: boolean }>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
   /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
   private rejectedCodexModels = new Map<string, Set<string>>();
   /** Runtime-only env vars per session (kept out of persisted launcher state). */
-  private sessionEnvs = new Map<string, Record<string, string>>();
+  private sessionEnvs = new Map<string, Record<string, string | undefined>>();
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
+  private stdioCliOpener:
+    | ((sessionId: string, transport: CliTransport, opts?: { resume?: boolean; spawnModel?: string }) => ClaudeAdapter)
+    | null = null;
   constructor(port: number) {
     this.port = port;
   }
@@ -276,9 +454,34 @@ export class CliLauncher {
     this.store = store;
   }
 
+  /**
+   * The persistence directory (sessions root = sentinel root, same tier the
+   * boot `reapOrphans` uses). Sweep-orphans (Task 6) reads it to build the
+   * owned-argv map from runtime sidecars and to place the `.reaping/`
+   * sentinel. Null until {@link setStore} runs at boot wiring.
+   */
+  getStoreDirectory(): string | null {
+    return this.store?.directory ?? null;
+  }
+
   /** Attach a recorder for raw message capture. */
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
+  }
+
+  /**
+   * Wire the bridge's stdio CLI open path.
+   *
+   * The launcher owns the child process but must not construct the
+   * ClaudeAdapter itself — the adapter needs bridge-internal closures (idle
+   * clock, idle-timer probe). So the launcher hands over the write end of the
+   * pipe and gets the adapter back. Injected in index.ts alongside the store
+   * and recorder.
+   */
+  setStdioCliOpener(
+    opener: (sessionId: string, transport: CliTransport, opts?: { resume?: boolean; spawnModel?: string }) => ClaudeAdapter,
+  ): void {
+    this.stdioCliOpener = opener;
   }
 
   /** Persist launcher state to disk. */
@@ -358,6 +561,28 @@ export class CliLauncher {
     const next = new Set(this.rejectedCodexModels.get(sessionId) ?? info?.rejectedCodexModels ?? []);
     next.add(model);
     this.syncRejectedCodexModels(sessionId, next);
+  }
+
+  /**
+   * Task A.2: announce a launcher-side Codex model swap so the orchestrator
+   * records a persistent fallback notice (from→to + why + "switch back").
+   * No-op when nothing actually changed.
+   */
+  private announceCodexFallback(
+    sessionId: string,
+    from: string | undefined,
+    to: string,
+    reason: "rejected" | "unavailable",
+    detail?: string,
+  ): void {
+    if (!from || from === to) return;
+    companionBus.emit("session:model-fell-back", {
+      sessionId,
+      from,
+      to,
+      reason,
+      ...(detail ? { detail: detail.slice(0, 300) } : {}),
+    });
   }
 
   private isCodexModelAvailabilityError(error: string): boolean {
@@ -484,6 +709,23 @@ export class CliLauncher {
   }
 
   /**
+   * P2-1: resolve the resume-failure discard threshold for a session. A Claude
+   * session whose resume transcript is still on disk earns more retries before
+   * its `cliSessionId` is discarded (the deaths are likely transient and the
+   * user's conversation is worth preserving); Codex and path-resolution
+   * failures fall back to the base threshold.
+   */
+  private resolveResumeFailureThreshold(session: SdkSessionInfo): number {
+    const cliSessionId = session.cliSessionId;
+    if (session.backendType === "codex" || !cliSessionId) {
+      return RESUME_FAILURE_THRESHOLD;
+    }
+    const jsonlPath = resolveJsonlPath(`${homedir()}/.claude`, session.cwd, cliSessionId);
+    if (!jsonlPath) return RESUME_FAILURE_THRESHOLD;
+    return resumeFailureThresholdFor(session.backendType, resumeTranscriptExists(jsonlPath));
+  }
+
+  /**
    * EC-45 — decide whether the relaunch path may SIGTERM `info.pid`, a PID
    * inherited from a previous server instance (no live in-process handle).
    *
@@ -495,25 +737,31 @@ export class CliLauncher {
    *     `mismatch`/`gone` → SKIP (the PID is not ours / already dead).
    *   • `unavailable` (non-Linux, no /proc) → kill best-effort: identity is
    *     unknowable and there is no stronger signal than the prior behaviour.
-   *   • Codex host-mode → kill best-effort: the argv factor recognises only
-   *     Claude's `--sdk-url` token, so the probe can't verify Codex; a
-   *     Codex argv/port identity factor is future work.
+   *   • Codex host-mode → run the SAME probe (council review 2026-09-11 P3-4).
+   *     The argv factor's stdio fallback hashes the spawn argv
+   *     (`argvSha256(tokens) === sidecar.argvSha256`); Codex spawns write that
+   *     sidecar, so the probe verifies Codex identically to a stdio Claude
+   *     session. `match` → kill; `mismatch`/`gone` → SKIP (a reused PID is not
+   *     ours); `unavailable` (non-Linux) → best-effort kill as before. This
+   *     closes the collateral-kill hazard the old blind Codex kill carried.
    */
   private shouldSignalPreviousInstancePid(info: SdkSessionInfo): boolean {
     if (typeof info.pid !== "number") return false;
-    // Codex has no argv identity factor — preserve prior best-effort kill.
-    if (info.backendType === "codex") return true;
     let expectedStartMs: number | null = null;
+    let expectedArgvSha256: string | null = null;
     if (this.store) {
       try {
         const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
-        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+        if (sidecar.kind === "present") {
+          expectedStartMs = sidecar.payload.processStartMs;
+          expectedArgvSha256 = sidecar.payload.argvSha256;
+        }
       } catch {
         // Corrupt/absent sidecar → degrade to the two-factor probe
         // (liveness + argv), still strictly stronger than a blind kill.
       }
     }
-    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
     switch (verdict.kind) {
       case "match":
         return true;
@@ -536,6 +784,15 @@ export class CliLauncher {
     this.claimedCodexWsPorts.add(port);
   }
 
+  /** P4/FIX-AUTOHEAL-2: returns true when a pending Codex WS spawn was cancelled. */
+  private cancelPendingCodexWsSpawn(sessionId: string): boolean {
+    const pending = this.pendingCodexWsSpawns.get(sessionId);
+    if (!pending) return false;
+    pending.cancelled = true;
+    this.pendingCodexWsSpawns.delete(sessionId);
+    return true;
+  }
+
   private releaseCodexWsPort(info: SdkSessionInfo | undefined): void {
     if (!info || info.containerId) return;
     if (typeof info.codexWsPort !== "number") return;
@@ -554,8 +811,16 @@ export class CliLauncher {
     if (!data || !Array.isArray(data)) return 0;
 
     let recovered = 0;
+    // W2: every non-archived session the previous server considered alive —
+    // its persisted state was not `exited` (a crash/SIGKILL leaves it that
+    // way) or the graceful shutdown marked it before killing it.
+    const liveBeforeRestart: string[] = [];
     for (const info of data) {
       if (this.sessions.has(info.sessionId)) continue;
+      if (!info.archived && (info.state !== "exited" || info.resumeOnBoot === true)) {
+        liveBeforeRestart.push(info.sessionId);
+      }
+      delete info.resumeOnBoot;
       if (info.backendType === "codex" && Array.isArray(info.rejectedCodexModels)) {
         this.syncRejectedCodexModels(info.sessionId, new Set(info.rejectedCodexModels));
       }
@@ -583,6 +848,52 @@ export class CliLauncher {
             this.sessions.set(info.sessionId, info);
           }
         } else if (info.pid) {
+          if (info.backendType === "codex") {
+            // Host-mode Codex: the app-server PID may still be alive after a
+            // Bun restart, but its proxy/adapter died with Bun, so it can never
+            // talk to the new server — it must be terminated and the session
+            // left `exited` for a browser-triggered --resume. Council review
+            // 2026-09-11 P3-4: gate the SIGTERM behind the SAME identity probe
+            // Claude uses (Codex spawns write the argvSha256 + processStartMs
+            // sidecar, so the argv-hash fallback verifies it), so a reused PID
+            // is NOT collateral-killed. On `match`/`unavailable` we kill; on
+            // `mismatch`/`gone` we skip the kill — but either way the session
+            // ends `exited` and the WS port is released, since our process is
+            // no longer reachable regardless.
+            let expectedStartMs: number | null = null;
+            let expectedArgvSha256: string | null = null;
+            if (this.store) {
+              try {
+                const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
+                if (sidecar.kind === "present") {
+                  expectedStartMs = sidecar.payload.processStartMs;
+                  expectedArgvSha256 = sidecar.payload.argvSha256;
+                }
+              } catch (e) {
+                log.warn("cli-launcher", "runtime sidecar load failed — degrading to two-factor probe", {
+                  event: "boot_probe.sidecar_corrupt",
+                  sessionId: info.sessionId,
+                  error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
+                });
+              }
+            }
+            const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
+            if (verdict.kind === "match" || verdict.kind === "unavailable") {
+              try { process.kill(info.pid, "SIGTERM"); } catch {}
+            } else if (verdict.kind === "mismatch") {
+              log.warn("cli-launcher", "Boot probe rejected PID reuse / argv mismatch (codex)", {
+                event: "boot_probe.mismatch",
+                sessionId: info.sessionId,
+                pid: info.pid,
+                reason: verdict.reason,
+              });
+            }
+            info.pid = undefined;
+            info.state = "exited";
+            this.releaseCodexWsPort(info);
+            this.sessions.set(info.sessionId, info);
+            continue;
+          }
           // PLAN T3 (Phase A) + T7 (Phase D): three-factor identity
           // probe — closes the live symptom where alive subprocesses
           // don't match Map `pid` fields (PID reuse → false-positive
@@ -604,19 +915,22 @@ export class CliLauncher {
           // a one-time boot WARN and we conservatively trust the old
           // liveness-only check — degraded but no worse than today.
           //
-          // Dual-backend contract: the probe's argv factor recognizes only
-          // Claude's `--sdk-url ws/cli/<sessionId>` token. Host-mode Codex
-          // (`app-server`, no `--sdk-url`) would always fail that factor →
-          // false `mismatch` → a live Codex app-server reaped on every
-          // restart (regression vs the prior bare `process.kill`). Route
-          // Codex host-mode through the liveness-only fallback; the identity
-          // probe is Claude-only until a Codex argv/port identity lands.
+          // Dual-backend contract: this fall-through path handles Claude only.
+          // Host-mode Codex uses an app-server plus a Companion-owned proxy;
+          // after a Bun restart the app-server PID may still be alive, but
+          // the proxy/adapter died with Bun, so recovering by PID strands a
+          // session in `starting`. Codex host-mode is handled by the early
+          // branch above — which now runs the SAME `verifyProcessIdentity`
+          // probe before terminating the unreachable app-server (P3-4), then
+          // lets the normal browser-triggered relaunch resume the thread.
           let expectedStartMs: number | null = null;
-          if (this.store && info.backendType !== "codex") {
+          let expectedArgvSha256: string | null = null;
+          if (this.store) {
             try {
               const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
               if (sidecar.kind === "present") {
                 expectedStartMs = sidecar.payload.processStartMs;
+                expectedArgvSha256 = sidecar.payload.argvSha256;
               }
             } catch (e) {
               // Corrupt sidecar — degrade to two-factor probe but log
@@ -630,11 +944,20 @@ export class CliLauncher {
               });
             }
           }
-          const verdict =
-            info.backendType === "codex"
-              ? null
-              : verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+          const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
           if (verdict && verdict.kind === "match") {
+            // WS: the child reconnects to the new server, so wait in "starting".
+            // stdio: its pipes died with the previous server process, so a
+            // surviving PID can never talk to us again — kill it and let the
+            // next message relaunch with --resume rather than stranding a
+            // session that looks alive but is deaf.
+            if (claudeTransportMode() === "stdio") {
+              try { process.kill(info.pid, "SIGTERM"); } catch {}
+              info.pid = undefined;
+              info.state = "exited";
+              this.sessions.set(info.sessionId, info);
+              continue;
+            }
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
             this.sessions.set(info.sessionId, info);
             recovered++;
@@ -685,7 +1008,46 @@ export class CliLauncher {
     if (recovered > 0) {
       console.log(`[cli-launcher] Recovered ${recovered} live session(s) from disk`);
     }
+    // Only sessions restore left `exited` need a boot resume: a `starting`
+    // one (WS transport, live container) is the reconnection watchdog's job.
+    // No `cliSessionId` = no conversation to resume; leave it for a browser.
+    this.bootResumeCandidates = liveBeforeRestart.filter((id) => {
+      const s = this.sessions.get(id);
+      return !!s && !s.archived && s.state === "exited" && !!s.cliSessionId;
+    });
     return recovered;
+  }
+
+  /**
+   * W2: returns (and clears) the sessions that were alive before the restart
+   * and need a proactive `--resume` relaunch. One-shot: a second call returns
+   * an empty list, so the boot resume is scheduled at most once per boot.
+   */
+  takeBootResumeCandidates(): string[] {
+    const out = this.bootResumeCandidates;
+    this.bootResumeCandidates = [];
+    return out;
+  }
+
+  /**
+   * W2: called from graceful shutdown BEFORE the council teardown kills the
+   * pairs. Marks every non-archived session that is alive (state not
+   * `exited`) or listed in `extraIds` (a crashed CLI whose keepalive relaunch
+   * was still pending) — minus `exclude` (user-stopped / intentionally
+   * killed) — and persists synchronously, so the next boot resumes them.
+   * Returns the number of marked sessions.
+   */
+  markLiveForBootResume(extraIds: Iterable<string> = [], exclude: (sessionId: string) => boolean = () => false): number {
+    const extra = new Set(extraIds);
+    let marked = 0;
+    for (const info of this.sessions.values()) {
+      if (info.archived || exclude(info.sessionId)) continue;
+      if (info.state === "exited" && !extra.has(info.sessionId)) continue;
+      info.resumeOnBoot = true;
+      marked++;
+    }
+    this.persistState();
+    return marked;
   }
 
   /**
@@ -713,6 +1075,9 @@ export class CliLauncher {
     const cwd = options.cwd || process.cwd();
     const backendType = options.backendType || "claude";
     let launchModel = options.model;
+    // Task A.2: a Codex slug swap decided below, announced once the session
+    // is registered (so the orchestrator can resolve its backend type).
+    let fallbackAnnouncement: { from: string; to: string } | null = null;
 
     if (backendType === "codex") {
       // Best-effort verified-model selection: when the models cache is present
@@ -725,8 +1090,32 @@ export class CliLauncher {
       const resolved = this.resolveCodexLaunchModel(sessionId, options.model);
       if (resolved.ok) {
         launchModel = resolved.model;
+        if (resolved.fallbackFrom) {
+          fallbackAnnouncement = { from: resolved.fallbackFrom, to: resolved.model };
+        }
       }
       this.syncRejectedCodexModels(sessionId, new Set());
+    } else {
+      // Claude backend: apply pre-spawn substitution for models we know
+      // trip an upstream CLI bug (see `broken-model-substitution.ts`).
+      // The substitution is silent on the spawn — no crash, no gate — but
+      // emits `session:model-substituted` so the orchestrator can surface
+      // a browser toast explaining the override. Persisted on
+      // `info.model` below so subsequent respawns already carry the
+      // substitute and this branch is a no-op on them.
+      const sub = resolveModelSubstitution(launchModel);
+      if (sub) {
+        console.log(
+          `[cli-launcher] Substituting broken model ${sub.from} → ${sub.to} at spawn for session ${sessionId}: ${sub.reason}`,
+        );
+        launchModel = sub.to;
+        companionBus.emit("session:model-substituted", {
+          sessionId,
+          from: sub.from,
+          to: sub.to,
+          reason: sub.reason,
+        });
+      }
     }
 
     const info: SdkSessionInfo = {
@@ -778,12 +1167,37 @@ export class CliLauncher {
     // Council Mode observer spawn config (council review #1 P1#1) is
     // applied uniformly across both backends and reused on relaunch so
     // the council context isn't lost on every non-initial spawn (#4).
-    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, {
-      ...options,
-      model: launchModel,
-    });
+    // Stored whenever the caller resolved flags (routes always do), so the
+    // per-session choice survives relaunch and outranks a later env change.
+    if (options.layers) {
+      info.layers = options.layers;
+    }
+    if (options.kbAutoPrime === true) {
+      info.kbAutoPrime = true;
+    }
+    if (options.autoProceedOnIdle && options.sessionGroupRole === "orchestrator") {
+      info.autoProceedOnIdle = {
+        idleMs: options.autoProceedOnIdle.idleMs,
+        maxIterations: options.autoProceedOnIdle.maxIterations,
+      };
+    }
+    const effectiveOptions = this.applyLayerSpawnOverrides(
+      this.buildObserverSpawnOverrides(sessionId, info, {
+        ...options,
+        model: launchModel,
+      }),
+    );
 
     this.sessions.set(sessionId, info);
+    if (fallbackAnnouncement) {
+      this.announceCodexFallback(
+        sessionId,
+        fallbackAnnouncement.from,
+        fallbackAnnouncement.to,
+        "unavailable",
+        "The requested model is not in this account's launchable Codex model list.",
+      );
+    }
     if (effectiveOptions.env) {
       this.sessionEnvs.set(sessionId, { ...effectiveOptions.env });
     }
@@ -798,7 +1212,11 @@ export class CliLauncher {
     if (backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveOptions);
     } else {
-      this.spawnCLI(sessionId, info, effectiveOptions);
+      if (claudeTransportMode() === "stdio") {
+        this.spawnClaudeStdio(sessionId, info, effectiveOptions);
+      } else {
+        this.spawnCLI(sessionId, info, effectiveOptions);
+      }
     }
     return info;
   }
@@ -882,18 +1300,53 @@ export class CliLauncher {
         ? callerAllowed.filter((t) => OBSERVER_ALLOWED_TOOLS.includes(t))
         : [...OBSERVER_ALLOWED_TOOLS];
       info.permissionMode = OBSERVER_PERMISSION_MODE;
+      // Codex ignores the Claude tool allow/deny lists above and spawns with
+      // approvalPolicy=never + danger-full-access by default — which would
+      // leave the observer prompt as the only guard against writes. The
+      // observer's sole write surface is its final reply message (the server
+      // records the review), so a read-only sandbox loses nothing and makes
+      // the "do not write" rule an enforced boundary (EC-1 at spawn, never
+      // widened by the caller's value).
+      const codexObserverSandbox = info.backendType === "codex"
+        ? { codexSandbox: "read-only" as const }
+        : {};
+      if (info.backendType === "codex") {
+        info.codexSandbox = "read-only";
+      }
       return {
         ...options,
         systemPrompt: composedSystemPrompt,
         allowedTools: intersectedAllowed,
         disallowedTools: [...OBSERVER_DISALLOWED_TOOLS],
         permissionMode: OBSERVER_PERMISSION_MODE,
+        ...codexObserverSandbox,
       };
     } catch (err) {
       throw new Error(
         `observer spawn config load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * aura-meta-diet C3: fold the layer flags into the spawn options — extra
+   * `--disallowedTools` rules (Claude) and the layer directive. Runs AFTER
+   * {@link buildObserverSpawnOverrides}, which replaces `disallowedTools`
+   * wholesale for the observer profile; the layer rules are added on top,
+   * never widening. Default flags → options returned unchanged.
+   */
+  private applyLayerSpawnOverrides(options: LaunchOptions): LaunchOptions {
+    // The observer half is a read-only reviewer with its own prompt — the KB
+    // auto-prime directive is for the agent doing the work only.
+    const layer = buildLayerSpawnConfig(options.layers, {
+      kbAutoPrime: options.kbAutoPrime === true && options.sessionGroupRole !== "observer",
+    });
+    if (layer.disallowedTools.length === 0 && !layer.systemPrompt) return options;
+    return {
+      ...options,
+      disallowedTools: [...(options.disallowedTools ?? []), ...layer.disallowedTools],
+      layerSystemPrompt: layer.systemPrompt,
+    };
   }
 
   /**
@@ -943,6 +1396,15 @@ export class CliLauncher {
         return { ok: false, error: resolved.error };
       }
       validatedCodexModel = resolved.model;
+      if (resolved.fallbackFrom) {
+        this.announceCodexFallback(
+          sessionId,
+          resolved.fallbackFrom,
+          resolved.model,
+          "unavailable",
+          "The requested model is not in this account's launchable Codex model list.",
+        );
+      }
     }
 
     // Kill old process(es) if still alive.
@@ -1042,7 +1504,33 @@ export class CliLauncher {
       info.model = validatedCodexModel;
     }
 
-    const runtimeEnv = this.sessionEnvs.get(sessionId);
+    // Claude: apply pre-spawn substitution here too. Cases this catches
+    // that `launch()` doesn't: (a) session persisted from a bun version
+    // that predates the substitution table, and (b) an explicit
+    // `set_model` from the browser that names a broken model (the
+    // browser doesn't consult this table). Persisting to info.model
+    // means the substitute sticks across future relaunches.
+    if (info.backendType !== "codex") {
+      const sub = resolveModelSubstitution(info.model);
+      if (sub) {
+        console.log(
+          `[cli-launcher] Substituting broken model ${sub.from} → ${sub.to} on relaunch for session ${sessionId}: ${sub.reason}`,
+        );
+        info.model = sub.to;
+        companionBus.emit("session:model-substituted", {
+          sessionId,
+          from: sub.from,
+          to: sub.to,
+          reason: sub.reason,
+        });
+      }
+    }
+
+    const runtimeEnv = reconcileProviderAuthForRelaunch(
+      this.sessionEnvs.get(sessionId),
+      info.backendType,
+      getSettings(),
+    );
 
     // Subprocess P1#4: pass council context back into the relaunch
     // options so the observer prompt + tool restrictions get re-applied
@@ -1063,6 +1551,8 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
+        kbAutoPrime: info.kbAutoPrime,
       }
       : {
         model: info.model,
@@ -1075,6 +1565,8 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
+        kbAutoPrime: info.kbAutoPrime,
       };
     // Council Review 2026-05-15-0820 P2 #7: detect drift in observer
     // prompt provenance across the relaunch boundary. Snapshot captured
@@ -1083,7 +1575,9 @@ export class CliLauncher {
     // gated below (CR-3).
     let effectiveRelaunchOptions: LaunchOptions;
     try {
-      effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
+      effectiveRelaunchOptions = this.applyLayerSpawnOverrides(
+        this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions),
+      );
     } catch (err) {
       info.exitCode = 1;
       // Council Review 2026-05-15-0820 P2 #8 (D4): emit `session:relaunch-failed`
@@ -1166,11 +1660,40 @@ export class CliLauncher {
         this.clearPidAndPersist(sessionId, "observer_prompt_source_drift_refused");
         return { ok: false, error: reason };
       }
+      // Same-source sha drift on a codex observer: spawnCodex resumes the
+      // thread (threadId = info.cliSessionId) and the updated prompt rides
+      // along as developerInstructions on thread/resume — but the resumed
+      // history still contains the OLD instructions plus replies the model
+      // made under them, and the model keeps following that stale contract
+      // (observed live, grp_879b81b6 2026-10-15). Drop the thread so the
+      // fresh spawn goes through thread/start with only the new
+      // instructions in context. Claude is untouched: its observer
+      // relaunch resumes via --resume with the prompt baked at spawn
+      // (CR-3), so a mid-thread instruction swap cannot happen there.
+      if (info.backendType === "codex") {
+        const droppedThreadId = info.cliSessionId;
+        info.cliSessionId = undefined;
+        log.info(
+          "council.observer-prompt.fresh-thread",
+          "observer prompt drifted in place — dropping codex thread for a fresh start",
+          {
+            event: "council.observer-prompt.fresh-thread",
+            sessionGroupId: info.sessionGroupId,
+            sessionId,
+            role: "observer",
+            droppedThreadId,
+          },
+        );
+      }
     }
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);
     } else {
-      this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
+      if (claudeTransportMode() === "stdio") {
+        this.spawnClaudeStdio(sessionId, info, effectiveRelaunchOptions);
+      } else {
+        this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
+      }
     }
     return { ok: true };
   }
@@ -1186,36 +1709,21 @@ export class CliLauncher {
     return Array.from(this.sessions.values()).filter((s) => s.state === "starting");
   }
 
-  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
-    const isContainerized = !!options.containerId;
-
-    // For containerized sessions, the CLI binary lives inside the container.
-    // For host sessions, resolve the binary on the host.
-    let binary = options.claudeBinary || "claude";
-    if (!isContainerized) {
-      const resolved = resolveBinary(binary);
-      if (resolved) {
-        binary = resolved;
-      } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return;
-      }
-    }
-
-    // Allow overriding the host alias used by containerized Claude sessions.
-    // Useful when host.docker.internal is unavailable in a given Docker setup.
-    const containerSdkHost = (process.env.COMPANION_CONTAINER_SDK_HOST || "host.docker.internal").trim()
-      || "host.docker.internal";
-
-    // When running inside a container, the SDK URL should target the host alias
-    // so the CLI can connect back to the Hono server running on the host.
-    const sdkUrl = isContainerized
-      ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
-      : `ws://localhost:${this.port}/ws/cli/${sessionId}`;
-
+  /**
+   * Build the Claude Code argv for either transport.
+   *
+   * `sdkUrl === null` selects the stdio control channel: no `--sdk-url`, no
+   * `-p ""`. Everything else — model, permission mode, tool gates, observer
+   * system prompt, `--resume` — is transport-independent and shared, so the
+   * two spawn paths cannot drift apart.
+   */
+  private buildClaudeArgs(
+    sessionId: string,
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    isContainerized: boolean,
+    sdkUrl: string | null,
+  ): string[] {
     // Claude Code rejects bypassPermissions when running with root/sudo.
     // Container sessions are downgraded by default; host sessions are only
     // downgraded when this server itself runs as root.
@@ -1242,7 +1750,9 @@ export class CliLauncher {
     }
 
     const args: string[] = [
-      "--sdk-url", sdkUrl,
+      // WS transport only. A current CLI (>= 2.1.121) rejects this flag for
+      // any non-Anthropic host, which is why stdio passes null here.
+      ...(sdkUrl ? ["--sdk-url", sdkUrl] : []),
       "--print",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -1281,12 +1791,21 @@ export class CliLauncher {
     // about provenance ("source transitioned" when the model still sees
     // the old prompt). Only the fresh-fallback path (uptime<5000ms
     // cleared cliSessionId → no resume) actually re-applies the prompt.
-    if (
-      options.systemPrompt &&
-      options.sessionGroupRole === "observer" &&
-      !options.resumeSessionId
-    ) {
-      args.push("--append-system-prompt", options.systemPrompt);
+    //
+    // aura-meta-diet C3: the layer-flag directive rides the same flag (one
+    // `--append-system-prompt` — a second occurrence would override the
+    // first) and obeys the same skip-on-resume rule. FIX-C3-1 verified the
+    // skip is safe (Claude Code 2.1.283): the CLI writes a `prompt_snapshot`
+    // attachment into the transcript and a flag-less `--resume` still answers
+    // from the original appended prompt. `--disallowedTools` is re-emitted
+    // below on every spawn. Codex re-sends it on thread/resume instead
+    // (`CodexAdapter.threadInstructionParams`).
+    const appendedSystemPrompt = composeSystemPrompt(
+      options.sessionGroupRole === "observer" ? options.systemPrompt : undefined,
+      options.layerSystemPrompt,
+    );
+    if (appendedSystemPrompt && !options.resumeSessionId) {
+      args.push("--append-system-prompt", appendedSystemPrompt);
     }
     if (options.disallowedTools && options.disallowedTools.length > 0) {
       for (const tool of options.disallowedTools) {
@@ -1294,14 +1813,35 @@ export class CliLauncher {
       }
     }
 
-    // Always pass -p "" for headless mode. When relaunching, also pass --resume
-    // to restore the CLI's conversation context.
+    // Relaunch restores the CLI's conversation context. This is what makes a
+    // session resume where it stopped after the transport (or the server) died.
     if (options.resumeSessionId) {
       args.push("--resume", options.resumeSessionId);
     }
 
-    args.push("-p", "");
+    // WS transport: `-p ""` is what selects headless mode when the prompt
+    // arrives over the socket. stdio MUST NOT pass it — the empty positional
+    // would be consumed as the turn and the CLI would exit before reading
+    // stdin, which is exactly the "spawns then immediately exits" shape.
+    if (sdkUrl) {
+      args.push("-p", "");
+    }
 
+    return args;
+  }
+
+  /**
+   * Build the OS-level spawn command for a Claude CLI session (host or
+   * container). Shared by both transports so the docker-exec shape, PATH
+   * enrichment and env-unset discipline cannot drift between them.
+   */
+  private buildClaudeSpawnCommand(
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    binary: string,
+    args: string[],
+    isContainerized: boolean,
+  ): { spawnCmd: string[]; spawnEnv: Record<string, string | undefined>; spawnCwd: string | undefined } {
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
     let spawnCwd: string | undefined;
@@ -1315,7 +1855,9 @@ export class CliLauncher {
       // Pass env vars via -e flags
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       // Ensure CLAUDECODE is unset inside container
@@ -1344,6 +1886,45 @@ export class CliLauncher {
       };
       spawnCwd = info.cwd;
     }
+
+    return { spawnCmd, spawnEnv, spawnCwd };
+  }
+
+  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
+    const isContainerized = !!options.containerId;
+
+    // For containerized sessions, the CLI binary lives inside the container.
+    // For host sessions, resolve the binary on the host.
+    let binary = options.claudeBinary || "claude";
+    if (!isContainerized) {
+      const resolved = resolveBinary(binary);
+      if (resolved) {
+        binary = resolved;
+      } else {
+        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+        info.state = "exited";
+        info.exitCode = 127;
+        this.persistState();
+        return;
+      }
+    }
+
+    // Allow overriding the host alias used by containerized Claude sessions.
+    // Useful when host.docker.internal is unavailable in a given Docker setup.
+    const containerSdkHost = (process.env.COMPANION_CONTAINER_SDK_HOST || "host.docker.internal").trim()
+      || "host.docker.internal";
+
+    // When running inside a container, the SDK URL should target the host alias
+    // so the CLI can connect back to the Hono server running on the host.
+    const sdkUrl = isContainerized
+      ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
+      : `ws://localhost:${this.port}/ws/cli/${sessionId}`;
+
+    const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, sdkUrl);
+
+    const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
+      info, options, binary, args, isContainerized,
+    );
 
     console.log(
       `[cli-launcher] Spawning session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
@@ -1379,12 +1960,187 @@ export class CliLauncher {
         session.state = "exited";
         session.exitCode = exitCode;
 
-        // If the process exited almost immediately with --resume, the resume likely failed.
-        // Clear cliSessionId so the next relaunch starts fresh.
+        // A fast death while resuming is suspicious but not conclusive — only
+        // discard cliSessionId after RESUME_FAILURE_THRESHOLD consecutive ones,
+        // so a transient/version hiccup doesn't destroy the conversation ref.
         const uptime = Date.now() - spawnedAt;
-        if (uptime < 5000 && options.resumeSessionId) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
+        const resumeThreshold = this.resolveResumeFailureThreshold(session);
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId, resumeThreshold)) {
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x (threshold=${resumeThreshold}). Clearing cliSessionId for fresh start.`);
           session.cliSessionId = undefined;
+        } else if (uptime < 5000 && options.resumeSessionId) {
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), attempt ${session.resumeImmediateFailures}/${resumeThreshold}. Preserving cliSessionId for retry.`);
+        }
+      }
+      this.processes.delete(sessionId);
+      this.persistState();
+      companionBus.emit("session:exited", { sessionId, exitCode });
+    });
+
+    this.persistState();
+  }
+
+
+  /**
+   * Spawn a Claude Code CLI session over its own stdin/stdout pipes.
+   *
+   * This is the transport for a current CLI. Claude Code >= 2.1.121 rejects
+   * `--sdk-url` for any host outside a compiled-in Anthropic allowlist, so the
+   * WebSocket control channel in {@link spawnCLI} cannot be used with it at
+   * all — every spawn dies with `--sdk-url rejected` before emitting a frame.
+   * The stream-json protocol carried over stdio is identical, including
+   * `--resume`, so only the pipe ends differ.
+   *
+   * Trade-off versus the WebSocket transport: pipes die with this process, so
+   * a stdio session cannot survive a server restart and reconnect. The session
+   * record keeps `cliSessionId`, so the next message relaunches it with
+   * `--resume` and the conversation continues where it stopped.
+   */
+  private spawnClaudeStdio(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
+    const isContainerized = !!options.containerId;
+
+    let binary = options.claudeBinary || "claude";
+    if (!isContainerized) {
+      const resolved = resolveBinary(binary);
+      if (resolved) {
+        binary = resolved;
+      } else {
+        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+        info.state = "exited";
+        info.exitCode = 127;
+        this.persistState();
+        return;
+      }
+    }
+
+    // The adapter must be built by the bridge (it owns the idle-clock
+    // closures), so refuse to spawn a child we could not wire up rather than
+    // leaking an orphan that talks to nobody.
+    const opener = this.stdioCliOpener;
+    if (!opener) {
+      console.error(
+        `[cli-launcher] No stdio CLI opener wired; cannot spawn session ${sessionId}`,
+      );
+      info.state = "exited";
+      info.exitCode = 1;
+      this.persistState();
+      return;
+    }
+
+    const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, null);
+    const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
+      info, options, binary, args, isContainerized,
+    );
+
+    console.log(
+      `[cli-launcher] Spawning session ${sessionId} (stdio${isContainerized ? ", container" : ""}): ` +
+      sanitizeSpawnArgsForLog(spawnCmd),
+    );
+
+    const proc = Bun.spawn(spawnCmd, {
+      cwd: spawnCwd,
+      env: spawnEnv,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    info.pid = proc.pid;
+    this.processes.set(sessionId, proc);
+    this.writeRuntimeSidecarForSpawn(sessionId, proc.pid, spawnCmd);
+
+    const stdin = proc.stdin;
+    if (!stdin || typeof stdin === "number") {
+      console.error(`[cli-launcher] Session ${sessionId}: stdin pipe unavailable`);
+      try { proc.kill("SIGTERM"); } catch {}
+      info.state = "exited";
+      info.exitCode = 1;
+      this.processes.delete(sessionId);
+      this.persistState();
+      return;
+    }
+
+    const transport = new StdioCliTransport(stdin, sessionId);
+    // Tell the adapter whether this spawn is resuming a prior transcript so it
+    // can pick the longer init-frame canary deadline. Source of truth is the
+    // real argv we just built — a resume replays the transcript + makes its
+    // first API round-trip before `system.init`, legitimately blowing past the
+    // 30s cold deadline on a large transcript / slow API.
+    const isResume = args.includes("--resume");
+    // Same source of truth for the model this process actually runs: the
+    // bridge baselines model-switch persistence on it (`Session.launcherModel`).
+    const modelIdx = args.indexOf("--model");
+    const spawnModel = modelIdx >= 0 ? args[modelIdx + 1] : undefined;
+    const adapter = opener(sessionId, transport, { resume: isResume, spawnModel });
+
+    // stdout carries the protocol, so it is pumped into the adapter rather
+    // than logged. Line buffering happens inside pumpStdoutLines — a pipe can
+    // split a JSON frame at any byte, unlike a WebSocket message.
+    const stdout = proc.stdout;
+    if (stdout && typeof stdout !== "number") {
+      let sawFirstFrame = false;
+      const stdoutLabel = `cli.stdout:${sessionId.slice(0, 8)}`;
+      void pumpStdoutLines(
+        stdout,
+        (chunk) => {
+          // Transport-open is not liveness here: unlike the WS path, where the
+          // CLI dialling back proves it launched, an open pipe proves only
+          // that fork() succeeded — a CLI that dies on a rejected flag would
+          // still read as "connected". The first frame is the real signal.
+          if (!sawFirstFrame) {
+            sawFirstFrame = true;
+            this.markConnected(sessionId);
+          }
+          try {
+            trackSync(stdoutLabel, () => adapter.handleRawMessage(chunk));
+          } catch (err) {
+            console.error(`[cli-launcher] Session ${sessionId}: handleRawMessage threw:`, err);
+          }
+        },
+        (err) => {
+          console.error(`[cli-launcher] Session ${sessionId}: stdout pump error:`, err);
+        },
+      );
+    }
+
+    // stderr stays diagnostic — this is where `--sdk-url rejected` and other
+    // startup failures surface.
+    const stderr = proc.stderr;
+    if (stderr && typeof stderr !== "number") {
+      this.pipeStream(sessionId, stderr, "stderr");
+    }
+
+    const spawnedAt = Date.now();
+    proc.exited.then((exitCode) => {
+      console.log(`[cli-launcher] Session ${sessionId} exited (code=${exitCode})`);
+      // Writing to a dead pipe throws EPIPE, so mark rather than close.
+      transport.markClosed();
+      adapter.handleTransportClose();
+
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        session.state = "exited";
+        session.exitCode = exitCode;
+
+        // Immediate exit under --resume *may* mean the resume target was
+        // rejected (rolled-over history, deleted jsonl), but it looks identical
+        // to a version/transport mismatch or transient error — most acutely at
+        // the stdio-transport cutover. Only clear cliSessionId after
+        // RESUME_FAILURE_THRESHOLD consecutive fast deaths so one bad spawn
+        // doesn't permanently strand the conversation.
+        const uptime = Date.now() - spawnedAt;
+        const resumeThreshold = this.resolveResumeFailureThreshold(session);
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId, resumeThreshold)) {
+          console.error(
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x (threshold=${resumeThreshold}). ` +
+            `Clearing cliSessionId for fresh start.`,
+          );
+          session.cliSessionId = undefined;
+        } else if (uptime < 5000 && options.resumeSessionId) {
+          console.error(
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), ` +
+            `attempt ${session.resumeImmediateFailures}/${resumeThreshold}. Preserving cliSessionId for retry.`,
+          );
         }
       }
       this.processes.delete(sessionId);
@@ -1415,20 +2171,55 @@ export class CliLauncher {
         const src = join(legacyHome, name);
         const dest = join(codexHome, name);
         if (!existsSync(src)) continue;
-        // auth.json: OAuth refresh tokens are single-use, so a stale
-        // per-session copy fails with "refresh token was already used" after
-        // the user re-logs-in (which only rewrites the legacy file). Re-seed
-        // whenever the legacy copy is newer; never clobber a fresher
-        // session copy (the live CLI may have refreshed it itself).
-        const reseedNewerAuth =
-          name === "auth.json" &&
-          existsSync(dest) &&
-          statSync(src).mtimeMs > statSync(dest).mtimeMs;
-        if (!existsSync(dest) || reseedNewerAuth) {
-          copyFileSync(src, dest);
-          if (reseedNewerAuth) {
-            console.log(`[cli-launcher] Re-seeded ${name} from legacy home (legacy copy is newer)`);
+
+        // auth.json is SHARED, not copied. OAuth refresh tokens are single-use
+        // and rotating: whichever home refreshes writes the new token only into
+        // itself, so any per-session copy inevitably goes stale and fails with
+        // "refresh token was already used" for every subsequently-spawned
+        // session. A symlink to the one legacy file makes fresh spawns read the
+        // current canonical token at open time.
+        //
+        // LIMITATION (empirically confirmed via the codex binary string
+        // "failed to atomically replace secrets file at"): codex refreshes the
+        // token by writing a tmp file and rename(2)-ing it over auth.json.
+        // rename does NOT follow the destination symlink — it REPLACES the
+        // symlink with an independent regular file inside this session's home.
+        // So the symlink does not survive the first in-session refresh, and a
+        // token rotated by one session is NOT propagated to the legacy file.
+        // Full propagation would require a single shared refresher (server- or
+        // legacy-owned); that is deliberate future work, not done here because
+        // it means the server writing the fleet's shared credential on a live
+        // box. What we CAN do safely at spawn is reconverge toward the symlink:
+        if (name === "auth.json") {
+          const destInfo = lstatSync(dest, { throwIfNoEntry: false });
+          if (!destInfo) {
+            // Fresh home → share the canonical token.
+            symlinkSync(resolve(src), dest);
+          } else if (!destInfo.isSymbolicLink()) {
+            // A regular file: either a pre-symlink copy, or a symlink that a
+            // prior in-session refresh replaced via atomic rename.
+            if (statSync(src).mtimeMs >= statSync(dest).mtimeMs) {
+              // Legacy is same-or-newer, so this copy is stale (e.g. a re-login
+              // rewrote legacy). Drop the stale copy and re-share the legacy
+              // file so this home benefits from live legacy reads again. Safe:
+              // no legacy write, and the dropped copy held an older token.
+              unlinkSync(dest);
+              symlinkSync(resolve(src), dest);
+              console.log(`[cli-launcher] Reconverged auth.json to legacy symlink (legacy copy is same-or-newer)`);
+            } else {
+              // dest is strictly newer → it holds a token this session rotated
+              // that legacy does not have. Preserve it (clobbering would strand
+              // the session), and do NOT write the shared legacy file from here.
+              // This is the known non-propagation limitation above.
+              console.warn(`[cli-launcher] Session auth.json is newer than legacy and will NOT propagate (single-shared-refresher not yet implemented)`);
+            }
           }
+          // destInfo.isSymbolicLink() → already shared; leave untouched.
+          continue;
+        }
+
+        if (!existsSync(dest)) {
+          copyFileSync(src, dest);
         }
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name} from legacy home:`, e);
@@ -1501,22 +2292,50 @@ export class CliLauncher {
       }
       proxyConnectPort = mappedPort;
     } else {
+      const pending = { cancelled: false };
+      // A previous spawn of this session still picking its port is superseded.
+      this.cancelPendingCodexWsSpawn(sessionId);
+      this.pendingCodexWsSpawns.set(sessionId, pending);
       try {
         proxyConnectPort = await findFreePort(
           4500,
           4600,
           (port) => this.claimedCodexWsPorts.has(port),
         );
-        this.claimCodexWsPort(proxyConnectPort);
-        // Set immediately after claiming so any downstream failure can release it.
-        info.codexWsPort = proxyConnectPort;
       } catch (err) {
         console.error(`[cli-launcher] Failed to find free port for Codex WS: ${err}`);
         info.state = "exited";
         info.exitCode = 1;
         this.persistState();
         return;
+      } finally {
+        if (this.pendingCodexWsSpawns.get(sessionId) === pending) this.pendingCodexWsSpawns.delete(sessionId);
       }
+      // P4/FIX-AUTOHEAL-2: killed, superseded, archived or deleted while the
+      // port was being picked — spawning now would leave an orphan no one
+      // tracks. Everything below up to the process registration is sync.
+      const deleted = this.sessions.get(sessionId) !== info;
+      if (pending.cancelled || deleted || info.archived) {
+        log.warn("cli-launcher", "Codex WS spawn cancelled before the process started", {
+          event: "codex.spawn_cancelled",
+          sessionId,
+          sessionGroupId: info.sessionGroupId,
+          role: info.sessionGroupRole,
+          reason: pending.cancelled ? "cancelled" : deleted ? "deleted" : "archived",
+        });
+        // The port was never claimed. A superseding relaunch owns `info` now
+        // (its own spawn pending or running) — leave its state alone.
+        if (!deleted && !this.pendingCodexWsSpawns.has(sessionId) && !this.processes.has(sessionId)) {
+          info.state = "exited";
+          info.exitCode = -1;
+          info.pid = undefined;
+          this.persistState();
+        }
+        return;
+      }
+      this.claimCodexWsPort(proxyConnectPort);
+      // Set immediately after claiming so any downstream failure can release it.
+      info.codexWsPort = proxyConnectPort;
       codexListenPort = proxyConnectPort;
     }
 
@@ -1528,7 +2347,9 @@ export class CliLauncher {
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
-    args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // snake_case key: codex 0.162 treats camelCase `tools.webSearch` as an
+    // unrecognized setting (warning notification + web search silently off).
+    args.push("-c", `tools.web_search=${internetEnabled ? "true" : "false"}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1546,7 +2367,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-d"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");
@@ -1651,7 +2474,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -1668,7 +2491,15 @@ export class CliLauncher {
 
     // Handle init errors
     adapter.onInitError((error) => {
-      console.error(`[cli-launcher] Codex WS session ${sessionId} init failed: ${error}`);
+      // Council review 2026-09-08 #7: structured EC-9-shaped init-failure log.
+      log.error("cli-launcher", "Codex WS init failed", {
+        event: "codex.init_failed",
+        sessionId,
+        sessionGroupId: info.sessionGroupId,
+        role: info.sessionGroupRole,
+        transport: "ws",
+        error,
+      });
       try { proxyProc.kill("SIGTERM"); } catch {}
       try { proc.kill("SIGTERM"); } catch {}
       // P1 #1 generation guard: a newer spawn already owns this session's
@@ -1685,6 +2516,7 @@ export class CliLauncher {
           this.markCodexModelRejected(sessionId, session.model);
           const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
           if (resolved.ok && resolved.model !== session.model) {
+            this.announceCodexFallback(sessionId, session.model, resolved.model, "rejected", error);
             session.state = "starting";
             session.exitCode = undefined;
             session.cliSessionId = undefined;
@@ -1798,7 +2630,9 @@ export class CliLauncher {
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
-    args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // snake_case key: codex 0.162 treats camelCase `tools.webSearch` as an
+    // unrecognized setting (warning notification + web search silently off).
+    args.push("-c", `tools.web_search=${internetEnabled ? "true" : "false"}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1816,7 +2650,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-i"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");
@@ -1896,18 +2732,33 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
     });
 
     // Handle init errors — mark session as exited so UI shows failure.
     // Also clear cliSessionId so the next relaunch starts a fresh thread
     // instead of trying to resume one whose rollout may be missing.
     adapter.onInitError((error) => {
-      console.error(`[cli-launcher] Codex session ${sessionId} init failed: ${error}`);
+      // Council review 2026-09-08 #7: structured, EC-9-shaped log so a
+      // council-observer init failure is greppable by sessionGroupId/role —
+      // this whole two-PR scope exists because that failure was invisible.
+      log.error("cli-launcher", "Codex stdio init failed", {
+        event: "codex.init_failed",
+        sessionId,
+        sessionGroupId: info.sessionGroupId,
+        role: info.sessionGroupRole,
+        transport: "stdio",
+        error,
+      });
+      // #6: kill the app-server subprocess unconditionally, mirroring the WS
+      // variant. The generic-failure branch below only flips state to
+      // `exited`; without this the OS process keeps running (holding memory
+      // and the app-server connection) while Companion believes it is dead —
+      // an orphan that only a later relaunch or a server restart reaps.
+      try { proc.kill("SIGTERM"); } catch {}
       // P1 #1 generation guard: a newer spawn already owns this session;
       // the old init-error must not respawn or mark the live session exited.
       if (this.isSupersededGeneration(sessionId, proc)) {
-        try { proc.kill("SIGTERM"); } catch {}
         return;
       }
       const session = this.sessions.get(sessionId);
@@ -1916,7 +2767,7 @@ export class CliLauncher {
           this.markCodexModelRejected(sessionId, session.model);
           const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
           if (resolved.ok && resolved.model !== session.model) {
-            try { proc.kill("SIGTERM"); } catch {}
+            this.announceCodexFallback(sessionId, session.model, resolved.model, "rejected", error);
             session.state = "starting";
             session.exitCode = undefined;
             session.cliSessionId = undefined;
@@ -1963,6 +2814,29 @@ export class CliLauncher {
 
   /**
    * Mark a session as connected (called when CLI establishes WS connection).
+   *
+   * Force-init-probe on spawn: when the session has a persisted
+   * `cliSessionId` from a prior successful init (the `--resume` case
+   * — which is EVERY auto-relaunch after the first spawn), emit
+   * `session:cli-id-received` immediately on transport-attach.
+   *
+   * Why: the Claude CLI in `--print --input-format stream-json` mode
+   * may delay its `system.init` frame emission until it receives its
+   * first stdin input, so the adapter's `handleSystemInit` — which
+   * normally fires the bus event — can be silent for minutes after
+   * spawn. Post-grace council recovery
+   * (`session-orchestrator.ts:session:cli-id-received` handler) then
+   * never triggers, leaving groups stuck in `degraded` even though
+   * both halves are alive at PID level. Verified 2026-09-10:
+   * "написал агенту → поднялось" — user's first user_message drove
+   * the CLI to emit init, which triggered recovery.
+   *
+   * The emit is safe on double-fire: the natural init from the CLI
+   * eventually triggers the same event again with the same
+   * cliSessionId; downstream handlers are idempotent
+   * (`setCLISessionId` writes the same value, post-grace recovery
+   * checks group.status which is already `active` on the second
+   * fire).
    */
   markConnected(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -1970,6 +2844,17 @@ export class CliLauncher {
       session.state = "connected";
       console.log(`[cli-launcher] Session ${sessionId} connected via WebSocket`);
       this.persistState();
+
+      if (session.cliSessionId) {
+        // Force-init-probe: transport-attach on a --resume respawn
+        // is proof enough for post-grace recovery. Don't wait for
+        // the CLI's next system.init frame, which may be user-input
+        // gated.
+        companionBus.emit("session:cli-id-received", {
+          sessionId,
+          cliSessionId: session.cliSessionId,
+        });
+      }
     }
   }
 
@@ -1986,9 +2871,26 @@ export class CliLauncher {
   }
 
   /**
+   * Update the persisted model id for a session. Called by the
+   * orchestrator's `session:model-fallback` handler after a rate-limit-
+   * class detection, so the next spawn/relaunch uses the downgraded
+   * model. No-op when the session is missing. Persists synchronously
+   * so a crash-between-set-and-relaunch still gets the intended model
+   * on boot recovery.
+   */
+  setModel(sessionId: string, model: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.model = model;
+      this.persistState();
+    }
+  }
+
+  /**
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {
+    const cancelledSpawn = this.cancelPendingCodexWsSpawn(sessionId);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}
@@ -2021,7 +2923,7 @@ export class CliLauncher {
         this.persistState();
         return true;
       }
-      return !!proxy;
+      return !!proxy || cancelledSpawn;
     }
 
     proc.kill("SIGTERM");
@@ -2071,6 +2973,36 @@ export class CliLauncher {
   }
 
   /**
+   * Sweep-orphans Task 7 — after a tracked-kill on an archived-leak /
+   * stale-session sweep candidate, force the record to a DEFINITIVE terminal
+   * state (pid nulled, `state="exited"`) and flush `launcher.json`
+   * SYNCHRONOUSLY (atomic tmp+fsync+rename via `saveLauncher`, no debounce)
+   * BEFORE the sweep response returns. `kill()`'s in-process branch leaves
+   * `info.pid` set (harmless for reconnect since boot-recovery gates on
+   * `state !== "exited"`), but this closes the "archived + stale pid" record
+   * shape so a future boot never re-attaches/relaunches a dead or recycled
+   * PID (closes `project_archived_sessions_leak_live_cli_processes`).
+   *
+   * Also flips `archived = true`: a swept record must DROP OUT of the sweep
+   * candidate set, otherwise `computeSweepCandidates` re-lists it on the very
+   * next preview (the stale-session gate keys on `!archived && state==="exited"`
+   * and the archived-leak gate on a live pid) and the result count claims a
+   * reclamation that keeps reappearing. Archiving is the definitive terminal
+   * acknowledgement — idempotent for the archived-leak case (already archived),
+   * and it removes the now-dead record from the active list for stale-session.
+   * Idempotent + safe on an unknown/already-terminal session.
+   */
+  markSweptTerminal(sessionId: string): void {
+    const info = this.sessions.get(sessionId);
+    if (!info) return;
+    info.pid = undefined;
+    info.state = "exited";
+    info.archived = true;
+    if (info.exitCode == null) info.exitCode = -1;
+    this.persistState();
+  }
+
+  /**
    * List all sessions (active + recently exited).
    */
   listSessions(): SdkSessionInfo[] {
@@ -2107,6 +3039,7 @@ export class CliLauncher {
    * Remove a session from the internal map (after kill or cleanup).
    */
   removeSession(sessionId: string) {
+    this.cancelPendingCodexWsSpawn(sessionId);
     this.releaseCodexWsPort(this.sessions.get(sessionId));
     this.sessions.delete(sessionId);
     this.processes.delete(sessionId);

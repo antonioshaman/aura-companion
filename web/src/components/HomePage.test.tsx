@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // Polyfill scrollIntoView for jsdom
@@ -29,6 +29,7 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     listPrompts: vi.fn(),
     listLinearConnections: vi.fn(),
     listSandboxes: vi.fn(),
+    getIsolationPreview: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -176,6 +177,63 @@ describe("HomePage", () => {
     mockApi.listSandboxes.mockResolvedValue([]);
     mockApi.getImageStatus.mockResolvedValue({ status: "idle" });
     mockApi.pullImage.mockResolvedValue({ ok: true });
+    // Default: nobody else works in /repo → no isolation choice shown.
+    mockApi.getIsolationPreview.mockResolvedValue({
+      isGitRepo: true, repoRoot: "/repo", liveSessions: [], recommended: "shared",
+      worktreesBaseDir: "/home/ubuntu/.companion/worktrees", warnings: [], repoServiceUnits: [],
+    });
+  });
+
+  // ── Worktree isolation (another live session already uses this tree) ──
+  describe("worktree isolation choice", () => {
+    const busyPreview = {
+      isGitRepo: true, repoRoot: "/repo",
+      liveSessions: [{ sessionId: "other-1", name: "Deploy fix", backendType: "codex" }],
+      recommended: "isolate", worktreesBaseDir: "/home/ubuntu/.companion/worktrees",
+      warnings: [], repoServiceUnits: [],
+    };
+
+    async function sendPrompt() {
+      createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
+      const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.change(textarea, { target: { value: "Build a feature" } });
+      fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+      await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    }
+
+    it("lone session in the repo: no choice shown, server default (auto) sent", async () => {
+      render(<HomePage />);
+      await waitFor(() => expect(mockApi.getIsolationPreview).toHaveBeenCalledWith("/repo"));
+      expect(screen.queryByTestId("worktree-isolation-choice")).not.toBeInTheDocument();
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "auto" }),
+        expect.any(Function),
+      );
+    });
+
+    it("live sibling: isolated worktree is the default and sends auto", async () => {
+      mockApi.getIsolationPreview.mockResolvedValue(busyPreview);
+      render(<HomePage />);
+      const isolated = await screen.findByRole("radio", { name: /isolated worktree/i });
+      expect(isolated).toBeChecked();
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "auto" }),
+        expect.any(Function),
+      );
+    });
+
+    it("opting out ('work in the same tree') sends isolation=shared", async () => {
+      mockApi.getIsolationPreview.mockResolvedValue(busyPreview);
+      render(<HomePage />);
+      fireEvent.click(await screen.findByRole("radio", { name: /work in the same tree/i }));
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "shared" }),
+        expect.any(Function),
+      );
+    });
   });
 
   it("auto-sets branch from selected mapped Linear issue", async () => {
@@ -406,6 +464,179 @@ describe("HomePage", () => {
 
   // ─── Model dropdown interaction ─────────────────────────────────────────────
 
+  // ─── Saved model preference on first render (minor #4) ───────────────────
+
+  it("starts on the saved anthropicModel preference, not the static default", async () => {
+    // Before: the initial state used getDefaultModel() and the sticky
+    // preference only applied after toggling the backend. Now the first
+    // render already reflects the user's saved choice.
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-sonnet-4-6";
+    mockStoreGetState.mockReturnValue(buildStoreMock({ anthropicModel: "claude-sonnet-4-6" }));
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument();
+      expect(screen.queryByText(DEFAULT_MODEL_LABEL)).not.toBeInTheDocument();
+    } finally {
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+    }
+  });
+
+  it("applies a preference that hydrates AFTER mount, unless the user already picked a model", async () => {
+    // Settings hydrate asynchronously: the preference can arrive after the
+    // first render. It must be applied then — but never override a model the
+    // user explicitly chose in the meantime.
+    const { rerender } = render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    expect(screen.getByText(DEFAULT_MODEL_LABEL)).toBeInTheDocument();
+
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-sonnet-4-6";
+    try {
+      rerender(<HomePage />);
+      await waitFor(() => expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument());
+
+      // User picks Haiku; a later preference update must not clobber it.
+      fireEvent.click(screen.getByText(SECOND_MODEL_LABEL));
+      fireEvent.click(screen.getByText(THIRD_MODEL_LABEL));
+      (mockStoreState as Record<string, unknown>).anthropicModel = "claude-opus-4-8";
+      rerender(<HomePage />);
+      expect(screen.getByText(THIRD_MODEL_LABEL)).toBeInTheDocument();
+    } finally {
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+    }
+  });
+
+  it("new-session model dropdown: disables retired/blocked models and hints untested ones", async () => {
+    // Same honesty as the in-session switcher: a model the server marks
+    // blocked (e.g. via the broken-model table) can't be picked for a new
+    // session, and registry-unknown models say "Untested".
+    mockStoreState.dynamicBackendModels = {
+      claude: [
+        { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+        { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+        { value: "claude-opus-4-7", label: "Opus 4.7", icon: "", status: "blocked", replacement: "claude-opus-4-8" },
+      ],
+    };
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText("Opus 4.8"));
+      const blocked = screen.getByRole("button", { name: /Opus 4\.7/ });
+      expect(blocked).toBeDisabled();
+      expect(blocked).toHaveAttribute("title", expect.stringMatching(/blocked/i));
+      const untested = screen.getByRole("button", { name: /Opus 5/ });
+      expect(within(untested).getByText("Untested")).toBeInTheDocument();
+      expect(untested).not.toBeDisabled();
+    } finally {
+      mockStoreState.dynamicBackendModels = {};
+    }
+  });
+
+  it("new-session model dropdown: caps its height, scrolls, and brings the selected row into view", async () => {
+    // Owner bug 2026-10-18: the dynamic Claude list grew to 14 rows. The
+    // dropdown opens upward with no height cap, so on a short viewport its
+    // first rows (Opus 5.5, Opus 5) were pushed above the screen edge where
+    // nothing could scroll to them — the owner "didn't see Opus 5.5" even
+    // though the server listed it first. The list must be capped relative to
+    // the viewport and scrollable (like ModelSwitcher), and the selected row
+    // must be nudged into view on open so a bottom-of-list choice such as
+    // Fable 5.1 isn't hidden below the cap either.
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const fourteen = [
+      "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+      "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-sonnet-5-5", "claude-sonnet-5",
+      "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-5-5",
+      "claude-haiku-4-5-20251001", "claude-fable-5-1", "claude-fable-5",
+    ].map((value) => ({ value, label: value, icon: "" }));
+    mockStoreState.dynamicBackendModels = { claude: fourteen };
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-fable-5-1";
+    mockStoreGetState.mockReturnValue(buildStoreMock({ anthropicModel: "claude-fable-5-1" }));
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText("claude-fable-5-1"));
+
+      const list = screen.getByTestId("new-session-model-list");
+      // Every row is rendered — nothing is filtered out server- or client-side.
+      expect(within(list).getAllByRole("button")).toHaveLength(14);
+      expect(within(list).getByRole("button", { name: /claude-opus-5-5/ })).toBeInTheDocument();
+      // Capped + scrollable. The CSS cap is the static fallback; on open the
+      // effect measures the room above the trigger (jsdom: zero rects → the
+      // helper returns null and the CSS cap stands, so no inline height here).
+      expect(list.className).toMatch(/overflow-y-auto/);
+      expect(list.className).toMatch(/max-h-\[24rem\]/);
+      expect(list.style.maxHeight).toBe("");
+      // Selected row is nudged into view exactly once per open.
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.instances[0]).toHaveAttribute("data-selected", "true");
+      expect(scrollIntoView.mock.instances[0]).toHaveTextContent("claude-fable-5-1");
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      mockStoreState.dynamicBackendModels = {};
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+      mockStoreGetState.mockReturnValue(buildStoreMock());
+    }
+  });
+
+  it("new-session model dropdown: caps the list to the measured room above the trigger", async () => {
+    // Owner bug 2026-10-18, second round: even `max-h-[min(24rem,70vh)]`
+    // overflowed the page's scroll container (it starts below the top bar),
+    // so Opus 5.5 was still clipped on a 525px-tall window. The open effect
+    // must set an inline max-height from the trigger's measured position.
+    const spy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      // Only the picker wrapper reports a position; everything else (incl.
+      // any scroll container) sits at the viewport top.
+      const top = this.getAttribute("data-testid") === "new-session-model-picker" ? 300 : 0;
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText(DEFAULT_MODEL_LABEL));
+      const list = screen.getByTestId("new-session-model-list");
+      // 300px trigger top − 0 container top − 8px gap
+      expect(list.style.maxHeight).toBe("292px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("Claude fetch rejected: static fallback offers Opus 5.5 and a retry hint re-fetches", async () => {
+    // Owner bug 2026-10-16: a failed /v1/models fetch left the dropdown on a
+    // stale static list topping out at Opus 4.8 with no way to recover.
+    // Now the fallback lists the fresh models and a hint
+    // under the card offers a manual retry.
+    mockStoreState.dynamicBackendModelsStatus = { claude: "rejected", codex: "idle" };
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      expect(screen.getByText("Список моделей не загрузился — показан базовый.")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Opus 4.8"));
+      const opus55 = screen.getByRole("button", { name: /Opus 5\.5/ });
+      expect(opus55).not.toBeDisabled();
+      // 2026-10-17: Opus 5.5 is registry-verified now — no "Untested" hint;
+      // the still-unverified Sonnet 5 keeps it.
+      expect(within(opus55).queryByText("Untested")).not.toBeInTheDocument();
+      const sonnet5 = screen.getByRole("button", { name: /Sonnet 5/ });
+      expect(within(sonnet5).getByText("Untested")).toBeInTheDocument();
+
+      mockStoreState.loadBackendModels.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      expect(mockStoreState.loadBackendModels).toHaveBeenCalledWith("claude");
+    } finally {
+      mockStoreState.dynamicBackendModelsStatus = { claude: "idle", codex: "idle" };
+    }
+  });
+
+  it("no fallback hint while the Claude model list loads normally", async () => {
+    render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    expect(screen.queryByText("Список моделей не загрузился — показан базовый.")).not.toBeInTheDocument();
+  });
+
   it("opens and selects from the model dropdown", async () => {
     // Verifies users can open the model picker and change the selected model.
     render(<HomePage />);
@@ -558,6 +789,24 @@ describe("HomePage", () => {
 
     // The "Branch from session" button should disappear (only for claude)
     expect(screen.queryByRole("button", { name: /branch from session/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the sign-in badge for the selected backend when the server reports authState", async () => {
+    // The /backends auth status must reach the New Session screen for the
+    // currently-selected backend (Claude here). An expired Claude OAuth token
+    // surfaces as a visible warning with a re-auth CTA.
+    mockApi.getBackends.mockResolvedValue([
+      { id: "claude", name: "Claude", available: true, authState: "expired", authMethod: "oauth" },
+      { id: "codex", name: "Codex", available: true, authState: "authorized", authMethod: "oauth" },
+    ]);
+    mockApi.getBackendModels.mockResolvedValue([]);
+
+    render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+    // Claude is the default backend → its expired badge shows.
+    expect(await screen.findByText(/Claude token expired/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-authenticate/i })).toBeInTheDocument();
   });
 
   it("disables unavailable backends in the toggle", async () => {
@@ -717,7 +966,9 @@ describe("HomePage", () => {
     // `backend === "claude"` at submit, the create payload would still carry
     // councilMode/councilPairing and the server would spawn an orchestrator+
     // observer PAIR instead of the requested mono Codex session.
-    localStorage.setItem("cc-council-enabled", "true");
+    // Council-on now comes from the server default (Settings → Default session mode),
+    // not from a sticky localStorage flag.
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
     const storeMock = buildStoreMock();
     mockStoreGetState.mockReturnValue(storeMock);
     mockApi.getBackends.mockResolvedValue([
@@ -1707,6 +1958,61 @@ describe("HomePage", () => {
   // both the POST body and the CouncilToggle trigger.  The raw stored preference
   // must NOT be overwritten (non-destructive).
 
+  describe("Solo-by-default session mode", () => {
+    // aura-diet 2026-10: new sessions are SOLO unless the server-side
+    // `defaultSessionMode` setting says "council" or the user flips the
+    // toggle for this one session. The old sticky localStorage flag must
+    // no longer turn every later session into a paid pair.
+    async function submitClaude(prompt = "Ship it") {
+      const storeMock = buildStoreMock();
+      mockStoreGetState.mockReturnValue(storeMock);
+      createSessionStreamMock.mockResolvedValue({ sessionId: "solo-1", state: "starting", cwd: "/repo" });
+      const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.change(textarea, { target: { value: prompt } });
+      fireEvent.click(screen.getByTitle("Send message"));
+      await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+      return createSessionStreamMock.mock.calls[0][0] as Record<string, unknown>;
+    }
+
+    it("creates a solo session (no council fields) by default, ignoring the legacy sticky flag", async () => {
+      // Legacy key from the old sticky toggle — must be ignored and cleared.
+      localStorage.setItem("cc-council-enabled", "true");
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "solo" });
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(localStorage.getItem("cc-council-enabled")).toBeNull();
+      const args = await submitClaude();
+      expect(args.councilMode).toBeUndefined();
+      expect(args.councilPairing).toBeUndefined();
+    });
+
+    it("starts the toggle ON when Settings default is council", async () => {
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
+      render(<HomePage />);
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    });
+
+    it("an explicit toggle click is not overridden by a late settings response", async () => {
+      // Settings resolve AFTER the user opts in; the user's choice must win.
+      let resolveSettings!: (v: unknown) => void;
+      mockApi.getSettings.mockReturnValue(new Promise((r) => { resolveSettings = r; }));
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      await act(async () => {
+        resolveSettings({ linearApiKeyConfigured: true, defaultSessionMode: "solo" });
+      });
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      const args = await submitClaude();
+      expect(args.councilMode).toBe("council");
+    });
+  });
+
   describe("Council Mode pairing coercion", () => {
     // Helper: sets up a council-enabled session with the given backend capability
     // flags and localStorage pairing, then submits and returns the call args.
@@ -1719,7 +2025,9 @@ describe("HomePage", () => {
       codexAvailable: boolean;
       codexObserverReviewAvailable: boolean;
     }) {
-      localStorage.setItem("cc-council-enabled", "true");
+      // Council-on now comes from the server default (Settings → Default session mode),
+      // not from a sticky localStorage flag.
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
       localStorage.setItem("cc-council-pairing", storedPairing);
 
       mockApi.getBackends.mockResolvedValue([
@@ -1826,7 +2134,9 @@ describe("HomePage", () => {
       codexObserverReviewAvailable: boolean;
       councilObserverReviewReason?: string;
     }) {
-      localStorage.setItem("cc-council-enabled", "true");
+      // Council-on now comes from the server default (Settings → Default session mode),
+      // not from a sticky localStorage flag.
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
       mockApi.getBackends.mockResolvedValue([
         { id: "claude", name: "Claude", available: true },
         {

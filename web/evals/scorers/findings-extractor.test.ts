@@ -9,7 +9,8 @@
 
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
-import { extractFindings } from "./findings-extractor.js";
+import { readFileSync } from "node:fs";
+import { extractFindings, extractFindingsFromDocs } from "./findings-extractor.js";
 
 const FX = join(__dirname, "..", "__fixtures__");
 
@@ -52,5 +53,22 @@ describe("extractFindings", () => {
     const ids2 = again.findings.map((f) => f.id).sort();
     expect(ids2).toEqual(ids);
     expect(ids[0]).toMatch(/^efnd_[0-9a-f]{12}$/);
+  });
+});
+
+// B3: the recording exporter feeds review TEXT (recovered from frames) through
+// extractFindingsFromDocs. It must produce byte-identical findings — above all
+// identical efnd_ ids — to the on-disk path, or labels would not join.
+describe("extractFindingsFromDocs", () => {
+  it("matches extractFindings on the same review content, ids included", () => {
+    const path = join(FX, "review-basic.md");
+    const fromDisk = extractFindings([path]);
+    const fromText = extractFindingsFromDocs([{ name: "review-basic.md", text: readFileSync(path, "utf8") }]);
+    expect(fromText).toEqual(fromDisk);
+  });
+
+  it("counts an unreadable path as skipped on the disk path only", () => {
+    expect(extractFindings([join(FX, "does-not-exist.md")]).skipped).toBe(1);
+    expect(extractFindingsFromDocs([]).skipped).toBe(0);
   });
 });

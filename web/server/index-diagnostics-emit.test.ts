@@ -25,7 +25,22 @@ const indexSrc = (() => {
   return readFileSync(join(here, "index.ts"), "utf8");
 })();
 
+// Diagnostics plan Task 5: the snapshot payload moved into one builder shared
+// by the 5-minute log line and the Diagnostics Backend card. The payload keys
+// are pinned THERE now (same key list, re-anchored — not weakened); the
+// memory-pressure WARN stays in index.ts and is still pinned against it.
+const snapshotSrc = (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readFileSync(join(here, "diagnostics", "runtime-snapshot.ts"), "utf8");
+})();
+
 describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
+  // The log call itself must stay in index.ts and log the shared builder's payload.
+  it("index.ts logs the shared runtime snapshot payload", () => {
+    expect(indexSrc).toMatch(/log\.info\("diagnostics", "Runtime snapshot", runtime\.payload\)/);
+    expect(indexSrc).toMatch(/buildRuntimeSnapshot\(/);
+  });
+
   // The five cleanup-counter projection field names. Each MUST appear
   // literally at the emit site so log-line consumers see the
   // documented key. The plan brief enumerates these explicitly.
@@ -35,6 +50,7 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
     "drainedPendingLastHour",
     "recordingsSoftArchivedLastHour",
     "recordingsHardDeletedLastHour",
+    "archivedProcessReclaimedLastHour",
   ] as const;
 
   it.each(COUNTER_KEYS)("emits cleanup counter key '%s' literally in the diagnostic snapshot", (key) => {
@@ -43,7 +59,7 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
     // EC-19 — anchored on the field name, not its expected value, so
     // a cosmetic edit of the value doesn't weaken the canary.
     const pattern = new RegExp(`\\b${key}\\b`);
-    expect(indexSrc).toMatch(pattern);
+    expect(snapshotSrc).toMatch(pattern);
   });
 
   // Reclamation plan T8: PTY-terminal observability fields. `terminalCount`
@@ -53,7 +69,7 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
 
   it.each(TERMINAL_KEYS)("emits terminal observability key '%s' literally in the diagnostic snapshot", (key) => {
     const pattern = new RegExp(`\\b${key}\\b`);
-    expect(indexSrc).toMatch(pattern);
+    expect(snapshotSrc).toMatch(pattern);
   });
 
   // The three sweep-status fields surfaced from Phase C's cleanup-
@@ -66,7 +82,7 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
 
   it.each(SWEEP_STATUS_KEYS)("emits sweep-status key '%s' literally in the diagnostic snapshot", (key) => {
     const pattern = new RegExp(`\\b${key}\\b`);
-    expect(indexSrc).toMatch(pattern);
+    expect(snapshotSrc).toMatch(pattern);
   });
 
   // The memory-pressure WARN event name + structured payload keys.

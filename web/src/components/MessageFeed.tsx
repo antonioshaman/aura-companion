@@ -16,6 +16,9 @@ import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ResumeIndicator } from "./chat/ResumeIndicator.js";
+import { CollapsedSystemMarkers } from "./chat/CollapsedSystemMarkers.js";
+import { ObserverProbeMessage } from "./council/ObserverProbeMessage.js";
+import { probeMessageIds } from "../utils/observer-probe.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -53,10 +56,35 @@ interface SubagentGroup {
   children: FeedEntry[];
 }
 
+/**
+ * A run of consecutive restart/drift-recovery system markers (see
+ * `chat/CollapsedSystemMarkers.tsx`). `groupToolMessages` only ever builds
+ * one of these for 2+ adjacent markers — a lone marker stays a plain
+ * `{ kind: "message" }` entry so it renders unchanged via `MessageBubble`.
+ */
+interface SystemMarkerGroup {
+  kind: "system_marker_group";
+  items: ChatMessage[];
+  firstId: string;
+}
+
 type FeedEntry =
   | { kind: "message"; msg: ChatMessage }
   | ToolMsgGroup
-  | SubagentGroup;
+  | SubagentGroup
+  | SystemMarkerGroup;
+
+/**
+ * Restart (`resume-interrupted`) and drift-recovery (`drift-recovery`)
+ * system messages are the two variants `MessageFeed` folds into one
+ * collapsed row when 2+ land back to back — see `chat/CollapsedSystemMarkers.tsx`.
+ */
+function isCollapsibleSystemMarker(msg: ChatMessage): boolean {
+  return (
+    msg.role === "system" &&
+    (msg.systemVariant === "resume-interrupted" || msg.systemVariant === "drift-recovery")
+  );
+}
 
 /**
  * Get the dominant tool name if this message is "tool-only"
@@ -119,6 +147,16 @@ function groupToolMessages(messages: ChatMessage[]): FeedEntry[] {
   const entries: FeedEntry[] = [];
 
   for (const msg of messages) {
+    if (isCollapsibleSystemMarker(msg)) {
+      const last = entries[entries.length - 1];
+      if (last?.kind === "system_marker_group") {
+        last.items.push(msg);
+        continue;
+      }
+      entries.push({ kind: "system_marker_group", items: [msg], firstId: msg.id });
+      continue;
+    }
+
     const toolName = getToolOnlyName(msg);
 
     if (toolName) {
@@ -371,7 +409,7 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[] }) {
+function FeedEntries({ entries, toolActivity, isObserverSession = false, probeIds }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean; probeIds?: ReadonlySet<string> }) {
   return (
     <>
       {entries.map((entry, i) => {
@@ -381,7 +419,35 @@ function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActi
         if (entry.kind === "subagent") {
           return <SubagentContainer key={entry.taskToolUseId} group={entry} />;
         }
+        if (entry.kind === "system_marker_group") {
+          // A run of exactly one marker renders unchanged, same as any
+          // other single system message — only 2+ adjacent markers collapse.
+          if (entry.items.length === 1) {
+            const only = entry.items[0];
+            return (
+              <div key={only.id}>
+                <MessageBubble message={only} isObserverSession={isObserverSession} />
+              </div>
+            );
+          }
+          return (
+            <CollapsedSystemMarkers
+              key={entry.firstId}
+              items={entry.items.map((m) => ({
+                id: m.id,
+                content: m.content,
+                timestamp: m.timestamp,
+                systemVariant: m.systemVariant as "resume-interrupted" | "drift-recovery",
+              }))}
+            />
+          );
+        }
         const msg = entry.msg;
+        // Observer rigor: a liveness probe and the observer's reply are probe
+        // traffic — a collapsed row, never prose between the findings cards.
+        if (probeIds?.has(msg.id) && (msg.role === "user" || msg.role === "assistant")) {
+          return <ObserverProbeMessage key={msg.id} role={msg.role} text={msg.content} />;
+        }
         const toolUseIds = getToolUseIdsFromMessage(msg);
         const matchingActivity = toolActivity && toolUseIds.length > 0
           ? toolActivity.filter((a) => toolUseIds.includes(a.toolUseId))
@@ -390,7 +456,7 @@ function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActi
         const allComplete = matchingActivity.length > 0 && matchingActivity.every((a) => a.completedAt);
         return (
           <div key={msg.id}>
-            <MessageBubble message={msg} />
+            <MessageBubble message={msg} isObserverSession={isObserverSession} />
             {allComplete && <ToolTurnSummary entries={matchingActivity} />}
           </div>
         );
@@ -579,6 +645,14 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
     s.streamingOutputTokens.get(sessionId),
   );
   const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
+  // Provenance for the observer-findings card renderer: only the council
+  // pair's OBSERVER session may card-render a findings-shaped JSON reply
+  // (an ordinary assistant answering "[]" must stay plain markdown).
+  const isObserverSession = useStore((s) => {
+    const groupId = s.groupBySessionId?.get(sessionId);
+    const group = groupId ? s.groups?.get(groupId) : undefined;
+    return group?.observerSessionId === sessionId;
+  });
   const toolProgress = useStore((s) => s.toolProgress.get(sessionId));
   const toolActivity = useStore((s) => s.toolActivity.get(sessionId));
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -630,6 +704,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const grouped = useMemo(
     () => groupMessages(mergedMessages),
     [mergedMessages],
+  );
+  const probeIds = useMemo(
+    () => (isObserverSession ? probeMessageIds(mergedMessages) : undefined),
+    [isObserverSession, mergedMessages],
   );
 
   // Reset paging/transcript state when switching sessions.
@@ -892,7 +970,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} probeIds={probeIds} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

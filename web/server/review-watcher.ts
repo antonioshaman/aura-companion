@@ -15,6 +15,8 @@
  * was killed, restarted, re-emitted on re-read).
  */
 
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat, watch } from "node:fs/promises";
 import { join } from "node:path";
 import { type ObserverReviewPayload, parseObserverReviewPayload } from "./council-types.js";
@@ -56,6 +58,7 @@ export const OBSERVER_REVIEW_FILE_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}
 export function buildObserverReviewFilename(
   phase: string,
   provider: "claude" | "codex",
+  sessionGroupId?: string,
 ): string {
   if (typeof phase !== "string" || phase.length === 0 || phase.length > 64) {
     throw new RangeError(
@@ -67,13 +70,216 @@ export function buildObserverReviewFilename(
       `buildObserverReviewFilename: provider must be "claude" or "codex" (got ${JSON.stringify(provider)})`,
     );
   }
-  const filename = `${phase}-${provider}-observer.md`;
+  // Council review 2026-09-08 #1: the group-id segment scopes the review file
+  // so pairs sharing a workspace don't collide on `<phase>-<provider>-...`.
+  // Optional for backward compatibility — an observer running the pre-#1
+  // prompt still writes the group-less name, which the pattern below (and the
+  // reader) both accept; the group segment is just extra prefix characters.
+  const filename = sessionGroupId
+    ? `${fitPhaseBesideGroup(phase, sessionGroupId)}-${sessionGroupId}-${provider}-observer.md`
+    : `${phase}-${provider}-observer.md`;
   if (!OBSERVER_REVIEW_FILE_PATTERN.test(filename)) {
     throw new RangeError(
-      `buildObserverReviewFilename: constructed name ${JSON.stringify(filename)} fails OBSERVER_REVIEW_FILE_PATTERN — phase token has illegal characters`,
+      `buildObserverReviewFilename: constructed name ${JSON.stringify(filename)} fails OBSERVER_REVIEW_FILE_PATTERN — phase or group token has illegal characters, or the combined prefix exceeds 64 chars`,
     );
   }
   return filename;
+}
+
+/** Room the pattern's 64-char prefix leaves beside `-<group>`; hash suffix length. */
+const PHASE_HASH_LEN = 8;
+
+/**
+ * FIX-B1-1: a valid phase (≤64) plus `-grp_<32hex>` can overflow the pattern's
+ * 64-char prefix — any phase over 27 chars did, and the throw lost the review.
+ * When it would overflow, shorten the phase deterministically to
+ * `<head>.<sha256(phase)[:8]>` so the name still fits, stays stable for the
+ * same phase, and distinct phases sharing a head do not collide. Readers match
+ * reviews by the payload's `checkpoint_id`, never by the phase in the name, so
+ * shortening is invisible to them. Phases that already fit are untouched.
+ */
+function fitPhaseBesideGroup(phase: string, sessionGroupId: string): string {
+  const room = 64 - 1 - sessionGroupId.length;
+  if (phase.length <= room) return phase;
+  const headLen = room - 1 - PHASE_HASH_LEN;
+  // A group id too long to leave a head falls through unchanged; the pattern
+  // check below then throws with the "combined prefix" diagnostic.
+  if (headLen < 1) return phase;
+  const hash = createHash("sha256").update(phase).digest("hex").slice(0, PHASE_HASH_LEN);
+  return `${phase.slice(0, headLen)}.${hash}`;
+}
+
+/** Token appended to the group id in a second-opinion review's file name. */
+export const SECOND_REVIEW_NAME_TOKEN = "second";
+
+/**
+ * W15 multi-model review: canonical file name of the host-run SECOND-OPINION
+ * review (`second-reviewer.ts`) of a checkpoint:
+ * `<phase>-<group>-second-<provider>-observer.md`.
+ *
+ * Distinct from the observer's `<phase>-<group>-<provider>-observer.md` even
+ * when both reviewers run on the same provider (claude observer + claude
+ * second opinion), so neither overwrites the other. It still matches
+ * {@link OBSERVER_REVIEW_FILE_PATTERN}, so the REST bootstrap and the
+ * auto-proceed hold restore read it like any other review of the group.
+ */
+export function buildSecondReviewFilename(
+  phase: string,
+  provider: "claude" | "codex",
+  sessionGroupId: string,
+): string {
+  if (typeof sessionGroupId !== "string" || sessionGroupId.length === 0) {
+    throw new RangeError("buildSecondReviewFilename: sessionGroupId is required");
+  }
+  return buildObserverReviewFilename(phase, provider, `${sessionGroupId}-${SECOND_REVIEW_NAME_TOKEN}`);
+}
+
+/** True when `file` is the group's second-opinion review name ({@link buildSecondReviewFilename}). */
+export function isSecondReviewFilename(file: string, sessionGroupId: string): boolean {
+  if (!OBSERVER_REVIEW_FILE_PATTERN.test(file)) return false;
+  const scope = `${sessionGroupId}-${SECOND_REVIEW_NAME_TOKEN}`;
+  return file.endsWith(`-${scope}-claude-observer.md`) || file.endsWith(`-${scope}-codex-observer.md`);
+}
+
+/**
+ * Synchronously scan a reviews directory for a review answering `checkpointId`.
+ *
+ * `watchReviews` is the live path, but a single dropped `fs.watch` event is
+ * unrecoverable: nothing else ever re-reads `.council/reviews/`. Checkpoints
+ * already have the mirror-image failsafe (`scanForMissedObserverWakes` re-reads
+ * `.council/checkpoints/` from disk on a tick); reviews had no equivalent, so a
+ * lost event degraded the pair AND discarded the findings permanently. This is
+ * the read half of that missing failsafe — EC-8's sentinel-before-sweep applied
+ * to the wake→review watchdog: look at the disk before declaring absence.
+ *
+ * Deliberately synchronous. The caller is a `setTimeout` watchdog whose degrade
+ * decision must stay in one turn; the directory holds a handful of small files.
+ *
+ * Returns the FIRST matching payload, or null when no file on disk answers the
+ * checkpoint. Per-file read/parse failures are skipped, not thrown — a single
+ * corrupt sibling must not mask a valid review.
+ */
+export function findReviewForCheckpointSync(opts: {
+  directory: string;
+  checkpointId: string;
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
+}): { payload: ObserverReviewPayload; file: string; reviewedAt?: number } | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(opts.directory).filter((f) => OBSERVER_REVIEW_FILE_PATTERN.test(f));
+  } catch {
+    return null;
+  }
+  for (const file of entries) {
+    const path = join(opts.directory, file);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch {
+      continue;
+    }
+    if (opts.normalizeRaw) {
+      const provider = OBSERVER_REVIEW_FILE_PATTERN.exec(file)?.[1] as "claude" | "codex" | undefined;
+      if (provider) {
+        try {
+          raw = opts.normalizeRaw(raw, provider);
+        } catch {
+          continue;
+        }
+      }
+    }
+    const payload = parseObserverReviewPayload(raw);
+    if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
+    // W15: a second-opinion review is never the OBSERVER's answer.
+    if (payload.reviewer_role === "second") continue;
+    let reviewedAt: number | undefined;
+    try {
+      reviewedAt = statSync(path).mtimeMs;
+    } catch {
+      reviewedAt = undefined;
+    }
+    return { payload, file, reviewedAt };
+  }
+  return null;
+}
+
+/**
+ * True when `file` is a review name scoped to `sessionGroupId`, i.e. the shape
+ * {@link buildObserverReviewFilename} produces WITH a group id:
+ * `<phase>-<group>-<provider>-observer.md`.
+ *
+ * A group-less `<phase>-<provider>-observer.md` (observed from Codex observers
+ * that ignore the reply-only contract, AuraBench BENCH-H) is NOT group-scoped:
+ * in a workspace shared by several pairs every pair's observer can write the
+ * same name, so the name alone cannot say whose review it is. Only the host
+ * that woke the observer can attribute it (see `ObserverReplyCapture`'s
+ * adoption path), so the per-group watcher never consumes such a file.
+ */
+export function isGroupScopedReviewFilename(file: string, sessionGroupId: string): boolean {
+  if (!OBSERVER_REVIEW_FILE_PATTERN.test(file)) return false;
+  return file.endsWith(`-${sessionGroupId}-claude-observer.md`) || file.endsWith(`-${sessionGroupId}-codex-observer.md`);
+}
+
+/**
+ * Suffix appended to a group-less review file once the host has adopted it
+ * under the canonical group-scoped name. The result no longer ends in `.md`,
+ * so no watcher, rescan or bootstrap reader ({@link OBSERVER_REVIEW_FILE_PATTERN})
+ * can pick it up again — in particular not another pair sharing the directory.
+ */
+export function adoptedReviewAsideName(file: string, sessionGroupId: string, atMs: number): string {
+  return `${file}.adopted-${sessionGroupId}-${atMs}`;
+}
+
+/**
+ * Like {@link findReviewForCheckpointSync}, but only returns a review OWNED by
+ * `sessionGroupId` (payload `session_group_id` matches), preferring the
+ * group-scoped file name over a group-less one when both answer the
+ * checkpoint. A foreign pair's same-checkpoint file never masks ours (the
+ * first-match helper above returns whatever readdir lists first).
+ */
+export function findOwnReviewForCheckpointSync(opts: {
+  directory: string;
+  checkpointId: string;
+  sessionGroupId: string;
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
+}): { payload: ObserverReviewPayload; file: string; groupScoped: boolean; reviewedAt?: number } | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(opts.directory).filter((f) => OBSERVER_REVIEW_FILE_PATTERN.test(f));
+  } catch {
+    return null;
+  }
+  let groupless: { payload: ObserverReviewPayload; file: string; groupScoped: boolean; reviewedAt?: number } | null = null;
+  for (const file of entries) {
+    const path = join(opts.directory, file);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+      if (opts.normalizeRaw) {
+        const provider = OBSERVER_REVIEW_FILE_PATTERN.exec(file)?.[1] as "claude" | "codex" | undefined;
+        if (provider) raw = opts.normalizeRaw(raw, provider);
+      }
+    } catch {
+      continue;
+    }
+    const payload = parseObserverReviewPayload(raw);
+    if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
+    if (payload.session_group_id !== opts.sessionGroupId) continue;
+    // W15: a second-opinion review is never the OBSERVER's answer — without
+    // this, a fast second review would make the reply capture stand down
+    // (`skipped_existing`) and Gate 0b skip the observer's wake.
+    if (payload.reviewer_role === "second") continue;
+    let reviewedAt: number | undefined;
+    try {
+      reviewedAt = statSync(path).mtimeMs;
+    } catch {
+      reviewedAt = undefined;
+    }
+    const groupScoped = isGroupScopedReviewFilename(file, opts.sessionGroupId);
+    if (groupScoped) return { payload, file, groupScoped, reviewedAt };
+    groupless ??= { payload, file, groupScoped, reviewedAt };
+  }
+  return groupless;
 }
 
 export type ReviewDropReason =
@@ -125,6 +331,15 @@ export interface ReviewWatcherOptions {
    * before the timer fires" removes the real-fs.watch timing flake.
    */
   debounceMs?: number;
+  /**
+   * The pair this watcher serves. When set, only review files named for THIS
+   * group ({@link isGroupScopedReviewFilename}) are read; group-less and other
+   * groups' files are skipped without a drop event (they are not this pair's
+   * to consume — a group-less file is adopted, if at all, by the host that
+   * woke its author). Unset = legacy single-tenant behaviour (every
+   * pattern-matching file is read), kept for tests and external callers.
+   */
+  sessionGroupId?: string;
 }
 
 /**
@@ -167,6 +382,11 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
         onDropped("invalid-filename", file);
         continue;
       }
+      // A second-opinion file (`<phase>-<group>-second-<provider>-observer.md`)
+      // is not group-scoped here on purpose: the host that wrote it ingests it
+      // directly (`second-reviewer.ts` → `ingestReview`), so the watcher never
+      // delivers it a second time.
+      if (opts.sessionGroupId !== undefined && !isGroupScopedReviewFilename(file, opts.sessionGroupId)) continue;
 
       // Capture the current mtime as the key for THIS debounce window. If
       // a second event arrives with the same mtime, it's a duplicate FS
@@ -280,9 +500,10 @@ async function readAndEmit(
     onDropped("invalid-schema", file);
     return;
   }
-  // Dedup by (checkpoint_id, observer_provider) — two reviews for the
-  // same checkpoint from different providers should both surface.
-  const dedupKey = `${payload.checkpoint_id}::${payload.observer_provider}`;
+  // Dedup by (checkpoint_id, observer_provider, reviewer role) — two reviews
+  // for the same checkpoint from different providers should both surface, and
+  // so should the observer's review and a same-provider second opinion (W15).
+  const dedupKey = `${payload.checkpoint_id}::${payload.observer_provider}${payload.reviewer_role === "second" ? "::second" : ""}`;
   if (seen.has(dedupKey)) {
     onDropped("duplicate-review", file, dedupKey);
     return;

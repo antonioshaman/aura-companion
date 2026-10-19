@@ -38,6 +38,12 @@ beforeEach(() => {
     updateChannel: "stable",
     dockerAutoUpdate: false,
     telemetryEnabled: false,
+    defaultSessionMode: "solo" as const,
+    kbAutoPrime: false,
+    autoResumeAfterLimit: true,
+    councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: false,
     updatedAt: 0,
   });
 });
@@ -82,6 +88,12 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -133,6 +145,12 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -213,6 +231,12 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
+      autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -252,5 +276,18 @@ describe("generateSessionTitle", () => {
     const [, req] = mockFetch.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(req.body)) as { max_tokens: number };
     expect(body.max_tokens).toBe(256);
+  });
+
+  it("does not send deprecated temperature in the Anthropic request body", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "Title" }] }),
+    });
+
+    await generateSessionTitle("Fix login", "ignored");
+
+    const [, req] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(req.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("temperature");
   });
 });

@@ -1,0 +1,55 @@
+# AuraBench task mined from PR #176 ("feat(server): pre-spawn substitution for known-broken Claude models").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: known-broken-claude-model-substitution
+title: "Sessions never launch on a Claude model known to break the CLI's stdout stream"
+start_commit: c55cdc518f7780cddf0ee254693c6881f030f1e5
+prompt: |
+  With Claude CLI 2.1.265, sessions started with `--model claude-opus-5` answer
+  (the CLI's own jsonl gets assistant turns and tokens are spent) but nothing
+  ever arrives on stdout, so the chat panel stays silent. Switching the same
+  session to `claude-opus-4-8` works instantly.
+
+  Add a closed substitution table for such known-broken models in a new module
+  `web/server/broken-model-substitution.ts`:
+  - `BROKEN_MODEL_SUBSTITUTIONS` — entries `{ from, to, reason }`, first entry
+    `claude-opus-5` → `claude-opus-4-8`, with a human-readable reason that names
+    the trigger ("Claude CLI 2.1.265 …");
+  - `resolveModelSubstitution(model)` → the matching entry, or `null` for any
+    other model, unknown ids, and empty/null/undefined; every `to` must be a
+    real model id the Claude CLI accepts.
+  Apply it before spawning a Claude CLI on both fresh launch and relaunch, and
+  persist the substituted model on the session so later respawns already use it.
+expected_files:
+  - web/server/broken-model-substitution.ts
+  - web/server/cli-launcher.ts
+  - web/server/event-bus-types.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/broken-model-substitution.test.ts
+failure_modes:
+  - "Codex sessions are affected"
+  - "the substitution is applied only on fresh launch, not relaunch"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 176
+  merge_commit: d5c4905ef52b46dd6cd295b46e9e1d6872d0753d
+  class: feature
+  hidden_tests:
+    - web/server/broken-model-substitution.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:43:22.461Z"

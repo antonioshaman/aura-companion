@@ -14,7 +14,7 @@ if (typeof globalThis.Bun === "undefined") {
   };
 }
 
-import { parseNDJSON, isDuplicateCLIMessage, type CLIDedupState } from "./ws-bridge-cli-ingest.js";
+import { parseNDJSON, isDuplicateCLIMessage, assistantDeliveryKey, type CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import type { CLIMessage } from "./session-types.js";
 
 function makeDedupState(): CLIDedupState {
@@ -62,6 +62,11 @@ describe("parseNDJSON", () => {
 
   it("handles multi-line NDJSON with trailing newline", () => {
     const input = '{"a":1}\n{"b":2}\n';
+    expect(parseNDJSON(input)).toEqual(['{"a":1}', '{"b":2}']);
+  });
+
+  it("trims whitespace around frames before parsing", () => {
+    const input = '  {"a":1}  \n\t{"b":2}\r\n';
     expect(parseNDJSON(input)).toEqual(['{"a":1}', '{"b":2}']);
   });
 });
@@ -298,5 +303,25 @@ describe("isDuplicateCLIMessage", () => {
       expect(isDuplicateCLIMessage({ type: "assistant" } as CLIMessage, assistantLine, state, 100)).toBe(true);
       expect(isDuplicateCLIMessage(streamMsg, "", state, 100)).toBe(true);
     });
+  });
+});
+
+describe("assistantDeliveryKey", () => {
+  // Identity used by the drift recovery to deliver a jsonl-only reply exactly
+  // once. The CLI emits one assistant frame per content block, all sharing the
+  // API message id — so the id alone must NOT collapse a message's blocks, and
+  // object key order (jsonl record vs stdout frame) must not split one block.
+  it("distinguishes blocks of one message and ignores key order", () => {
+    const thinking = { id: "msg_1", content: [{ type: "thinking", thinking: "", signature: "s" }] };
+    const toolUse = { id: "msg_1", content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } }] };
+    expect(assistantDeliveryKey(thinking)).not.toBe(assistantDeliveryKey(toolUse));
+    const reordered = { content: [{ input: { command: "ls" }, name: "Bash", id: "toolu_1", type: "tool_use" }], id: "msg_1" };
+    expect(assistantDeliveryKey(reordered)).toBe(assistantDeliveryKey(toolUse));
+  });
+
+  it("different message ids with identical content are different deliveries", () => {
+    const a = { id: "msg_a", content: [{ type: "text", text: "ok" }] };
+    const b = { id: "msg_b", content: [{ type: "text", text: "ok" }] };
+    expect(assistantDeliveryKey(a)).not.toBe(assistantDeliveryKey(b));
   });
 });

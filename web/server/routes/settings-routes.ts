@@ -1,8 +1,21 @@
 import type { Hono } from "hono";
-import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel } from "../settings-manager.js";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type DefaultSessionMode, type UpdateChannel } from "../settings-manager.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
+import { COMPANION_HOME } from "../paths.js";
+import { companionBus } from "../event-bus.js";
+import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
+import { parseKbAnalysisSettings, type KbAnalysisSettings } from "../diagnostics/kb-analysis-settings.js";
+import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "../second-reviewer-config.js";
+
+/** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
+function codexModelsCachePath(): string {
+  return join(homedir(), ".codex", "models_cache.json");
+}
 
 export function registerSettingsRoutes(api: Hono): void {
   api.get("/settings", (c) => {
@@ -29,6 +42,13 @@ export function registerSettingsRoutes(api: Hono): void {
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
+      telemetryEnabled: settings.telemetryEnabled,
+      defaultSessionMode: settings.defaultSessionMode,
+      kbAutoPrime: settings.kbAutoPrime,
+      autoResumeAfterLimit: settings.autoResumeAfterLimit,
+      councilSecondReviewer: settings.councilSecondReviewer,
+      kbAnalysis: settings.kbAnalysis,
+      diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
     });
   });
 
@@ -103,6 +123,42 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.dockerAutoUpdate !== undefined && typeof body.dockerAutoUpdate !== "boolean") {
       return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
     }
+    if (body.telemetryEnabled !== undefined && typeof body.telemetryEnabled !== "boolean") {
+      return c.json({ error: "telemetryEnabled must be a boolean" }, 400);
+    }
+    if (body.defaultSessionMode !== undefined && body.defaultSessionMode !== "solo" && body.defaultSessionMode !== "council") {
+      return c.json({ error: "defaultSessionMode must be 'solo' or 'council'" }, 400);
+    }
+    if (body.kbAutoPrime !== undefined && typeof body.kbAutoPrime !== "boolean") {
+      return c.json({ error: "kbAutoPrime must be a boolean" }, 400);
+    }
+    if (body.autoResumeAfterLimit !== undefined && typeof body.autoResumeAfterLimit !== "boolean") {
+      return c.json({ error: "autoResumeAfterLimit must be a boolean" }, 400);
+    }
+    // W15: `councilSecondReviewer: { reviewer, scope? }` — strict (EC-5): a
+    // malformed value is a 400, never silently "off".
+    let councilSecondReviewer: SecondReviewerConfig | undefined;
+    if (body.councilSecondReviewer !== undefined) {
+      const raw = body.councilSecondReviewer;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        return c.json({ error: "councilSecondReviewer must be an object { reviewer, scope? }" }, 400);
+      }
+      const reviewer = parseSecondReviewerSetting((raw as Record<string, unknown>).reviewer);
+      if (!reviewer.ok) return c.json({ error: reviewer.error }, 400);
+      const rawScope = (raw as Record<string, unknown>).scope;
+      const scope = rawScope === undefined ? { ok: true as const, value: getSettings().councilSecondReviewer.scope } : parseSecondReviewScope(rawScope);
+      if (!scope.ok) return c.json({ error: scope.error }, 400);
+      councilSecondReviewer = { reviewer: reviewer.value, scope: scope.value };
+    }
+    let kbAnalysis: KbAnalysisSettings | undefined;
+    if (body.kbAnalysis !== undefined) {
+      const parsed = parseKbAnalysisSettings(body.kbAnalysis);
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      kbAnalysis = parsed.value;
+    }
+    if (body.diagnosticsMemoryReport !== undefined && typeof body.diagnosticsMemoryReport !== "boolean") {
+      return c.json({ error: "diagnosticsMemoryReport must be a boolean" }, 400);
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -116,7 +172,14 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.aiValidationAutoDeny !== undefined
       || body.publicUrl !== undefined
       || body.updateChannel !== undefined
-      || body.dockerAutoUpdate !== undefined;
+      || body.dockerAutoUpdate !== undefined
+      || body.telemetryEnabled !== undefined
+      || body.defaultSessionMode !== undefined
+      || body.kbAutoPrime !== undefined
+      || body.autoResumeAfterLimit !== undefined
+      || councilSecondReviewer !== undefined
+      || kbAnalysis !== undefined
+      || body.diagnosticsMemoryReport !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -210,7 +273,34 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.dockerAutoUpdate === "boolean"
           ? body.dockerAutoUpdate
           : undefined,
+      telemetryEnabled:
+        typeof body.telemetryEnabled === "boolean"
+          ? body.telemetryEnabled
+          : undefined,
+      defaultSessionMode:
+        body.defaultSessionMode === "solo" || body.defaultSessionMode === "council"
+          ? (body.defaultSessionMode as DefaultSessionMode)
+          : undefined,
+      kbAutoPrime:
+        typeof body.kbAutoPrime === "boolean"
+          ? body.kbAutoPrime
+          : undefined,
+      autoResumeAfterLimit:
+        typeof body.autoResumeAfterLimit === "boolean"
+          ? body.autoResumeAfterLimit
+          : undefined,
+      councilSecondReviewer,
+      kbAnalysis,
+      diagnosticsMemoryReport:
+        typeof body.diagnosticsMemoryReport === "boolean"
+          ? body.diagnosticsMemoryReport
+          : undefined,
     });
+    if (typeof body.autoResumeAfterLimit === "boolean") {
+      // Lets the orchestrator drop pending auto-resumes the moment the user
+      // switches the feature off (otherwise banners linger until fire time).
+      companionBus.emit("settings:auto-resume-changed", { enabled: settings.autoResumeAfterLimit });
+    }
 
     const connectionsAfterUpdate = listConnections();
     return c.json({
@@ -234,6 +324,13 @@ export function registerSettingsRoutes(api: Hono): void {
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
+      telemetryEnabled: settings.telemetryEnabled,
+      defaultSessionMode: settings.defaultSessionMode,
+      kbAutoPrime: settings.kbAutoPrime,
+      autoResumeAfterLimit: settings.autoResumeAfterLimit,
+      councilSecondReviewer: settings.councilSecondReviewer,
+      kbAnalysis: settings.kbAnalysis,
+      diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
     });
   });
 
@@ -266,5 +363,87 @@ export function registerSettingsRoutes(api: Hono): void {
     } finally {
       clearTimeout(timer);
     }
+  });
+
+  // Operator-triggered model-list refresh. The GET /backends/:id/models
+  // handler is deliberately cache-honest (Hunt R4 — no `?force=1` escape
+  // hatch), so an explicit refresh is a distinct POST intent: force a fresh
+  // Anthropic /v1/models fetch (repopulating the server cache) so the next
+  // GET returns the latest catalogue. Codex has no server-side cache to bust
+  // — its list is read straight from the CLI's own models_cache.json on
+  // every GET — so we only report whether that file is present.
+  api.post("/settings/models/refresh", async (c) => {
+    const settings = getSettings();
+    const key = settings.anthropicApiKey.trim();
+    let claude: "ok" | "no-key" | "unavailable";
+    if (!key) {
+      claude = "no-key";
+    } else {
+      const result = await getAnthropicModels(key, {
+        forceRefresh: true,
+        parentSignal: c.req.raw.signal,
+      });
+      claude = result.kind === "ok" ? "ok" : result.kind === "no-key" ? "no-key" : "unavailable";
+    }
+    const codex = existsSync(codexModelsCachePath()) ? "ok" : "absent";
+    return c.json({ claude, codex });
+  });
+
+  // Config/cache diagnostics for the Settings panel. Surfaces WHICH
+  // COMPANION_HOME the running server reads (so a key saved under a diverging
+  // home is diagnosable, not a mystery) and the freshness of both model
+  // caches. This is an authenticated operator-only response body — the raw
+  // home path is the feature's whole point here, not a log-line leak (EC-23
+  // governs logs, not this response).
+  api.get("/settings/diagnostics", (c) => {
+    const settings = getSettings();
+    const anthropicMeta = readAnthropicCacheFileMeta();
+
+    const codexPath = codexModelsCachePath();
+    let codex:
+      | { present: false }
+      | {
+          present: true;
+          fetchedAt: string | null;
+          clientVersion: string | null;
+          listedModelCount: number | null;
+        };
+    if (!existsSync(codexPath)) {
+      codex = { present: false };
+    } else {
+      try {
+        const parsed = JSON.parse(readFileSync(codexPath, "utf-8")) as {
+          fetched_at?: unknown;
+          client_version?: unknown;
+          models?: unknown;
+        };
+        const listedModelCount = Array.isArray(parsed.models)
+          ? parsed.models.filter(
+              (m): m is { visibility?: unknown } =>
+                typeof m === "object" && m !== null && (m as { visibility?: unknown }).visibility === "list",
+            ).length
+          : null;
+        codex = {
+          present: true,
+          fetchedAt: typeof parsed.fetched_at === "string" ? parsed.fetched_at : null,
+          clientVersion: typeof parsed.client_version === "string" ? parsed.client_version : null,
+          listedModelCount,
+        };
+      } catch {
+        codex = { present: true, fetchedAt: null, clientVersion: null, listedModelCount: null };
+      }
+    }
+
+    return c.json({
+      companionHome: COMPANION_HOME,
+      anthropic: {
+        keyConfigured: !!settings.anthropicApiKey.trim(),
+        cachePresent: anthropicMeta.present,
+        // epoch ms (server clock at last successful fetch); null when absent.
+        cacheFetchedAt: anthropicMeta.fetchedAt,
+        cacheModelCount: anthropicMeta.modelCount,
+      },
+      codex,
+    });
   });
 }

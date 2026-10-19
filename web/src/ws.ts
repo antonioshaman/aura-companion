@@ -1,14 +1,28 @@
+import { decodeContextAdvisory } from "./utils/context-advisory.js";
 import { useStore } from "./store.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
+import { isResumeInterruptedResult } from "./utils/resume-interrupted.js";
+import { isDriftRecoveryMessage } from "./utils/drift-recovery-message.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
 
 const WS_RECONNECT_DELAY_MS = 2000;
+/**
+ * If no frame (including the server's 25s `keep_alive`) arrives within this
+ * window, the socket is assumed dead and force-closed to trigger the normal
+ * reconnect path. Covers the half-open-socket case: when the server restarts
+ * behind a proxy/VPN (Tailscale/nginx), the client's TCP can stay OPEN so
+ * `onclose`/`onerror` never fire and nothing recovers until the user sends.
+ * 60s tolerates two missed 25s heartbeats plus margin.
+ */
+const WS_HEARTBEAT_TIMEOUT_MS = 60_000;
 const sockets = new Map<string, WebSocket>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Per-session liveness watchdog; reset on every incoming frame. */
+const heartbeatWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 /**
  * Tracks sessionIds that are mid-reconnect. Set on `ws.onclose`,
  * cleared on the replacement socket's `ws.onopen`. Required because
@@ -25,6 +39,78 @@ const streamingDraftMessageIdBySession = new Map<string, string>();
 const pendingOutgoingBySession = new Map<string, BrowserOutgoingMessage[]>();
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = new Map<string, Set<string>>();
+
+// ─── Context-window occupancy tracking ──────────────────────────────────────
+// The Claude context meter must reflect how full the model's window is RIGHT
+// NOW — and, critically, it must DROP after a /compact. The result frame's
+// `modelUsage` counters accumulate over the whole session (cache-read alone can
+// reach several times the window), so they can only ever climb and are useless
+// for this. Instead we derive the numerator from each `assistant` frame's
+// per-turn `usage` (fresh input + cache-read + cache-write = the real tokens
+// fed to the model that turn), which falls the instant the context is compacted.
+// The denominator (the model's declared context window) is only present on the
+// result frame's `modelUsage`, so we capture it there and combine the two.
+/** Last known per-turn context occupancy (input + cache_read + cache_creation). */
+const contextTokensBySession = new Map<string, number>();
+/** Model-declared context window, captured from result-frame `modelUsage`. */
+const contextWindowBySession = new Map<string, number>();
+
+/** Per-turn tokens actually resident in the model's context window. */
+function contextTokensFromUsage(u: {
+  input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): number {
+  return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+}
+
+/**
+ * Capture the model's declared context window from a result frame's
+ * `modelUsage`. Takes the largest window across models so a small-window
+ * side-model (e.g. a title-generation Haiku) can't shrink the denominator
+ * below the main model's window.
+ */
+function captureContextWindow(
+  sessionId: string,
+  modelUsage?: Record<string, { contextWindow?: number }>,
+): void {
+  if (!modelUsage) return;
+  let maxWindow = 0;
+  for (const u of Object.values(modelUsage)) {
+    if (typeof u.contextWindow === "number" && u.contextWindow > maxWindow) {
+      maxWindow = u.contextWindow;
+    }
+  }
+  if (maxWindow > 0) contextWindowBySession.set(sessionId, maxWindow);
+}
+
+/**
+ * Recompute and store `context_used_percent` from the last per-turn occupancy
+ * and the declared window. No-op until BOTH are known — the assistant frame
+ * (numerator) and the result frame (denominator) can arrive in either order
+ * within a turn, and a partial value would flash a wrong reading.
+ */
+function recomputeContextPct(sessionId: string): void {
+  const window = contextWindowBySession.get(sessionId);
+  const tokens = contextTokensBySession.get(sessionId);
+  if (!window || window <= 0 || tokens == null) return;
+  const pct = Math.max(0, Math.min(Math.round((tokens / window) * 100), 100));
+  useStore.getState().updateSession(sessionId, { context_used_percent: pct });
+}
+
+/** Record a per-turn usage sample and refresh the meter if the window is known. */
+function trackContextUsage(
+  sessionId: string,
+  usage?: {
+    input_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  },
+): void {
+  if (!usage) return;
+  contextTokensBySession.set(sessionId, contextTokensFromUsage(usage));
+  recomputeContextPct(sessionId);
+}
 
 /**
  * PR #68 friedman fix-pass — when ANY session WebSocket reconnects (a
@@ -444,10 +530,34 @@ const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "set_ai_validation",
 ]);
 
+/**
+ * A stable, anonymous per-browser id persisted in localStorage. Sent on every
+ * browser WS connect so the server can dedupe "one human with N sessions open"
+ * (N sockets) down to a single presence headcount. Carries no PII — a random
+ * UUID scoped to this browser profile. Survives reloads; a fresh profile or a
+ * cleared storage simply starts a new anonymous id.
+ */
+function getClientId(): string {
+  const KEY = "companion_client_id";
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    // Storage unavailable (private mode / disabled) — fall back to an ephemeral
+    // id so the socket still connects; it just won't dedupe across reloads.
+    return "eph-" + Math.random().toString(36).slice(2);
+  }
+}
+
 function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const token = localStorage.getItem("companion_auth_token") || "";
-  return `${proto}//${location.host}/ws/browser/${sessionId}?token=${encodeURIComponent(token)}`;
+  const clientId = getClientId();
+  return `${proto}//${location.host}/ws/browser/${sessionId}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`;
 }
 
 function getLastSeqStorageKey(sessionId: string): string {
@@ -569,6 +679,23 @@ function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): Ch
   };
 }
 
+/**
+ * Flag the last user/assistant message as the end of a turn (the `result`
+ * frame closed it). System notices appended by the result handler itself are
+ * skipped. Returns the same array when there is nothing to mark.
+ */
+function markTurnEnd(messages: ChatMessage[]): ChatMessage[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "system" || m.isStreaming) continue;
+    if (m.turnEnd) return messages;
+    const next = [...messages];
+    next[i] = { ...m, turnEnd: true };
+    return next;
+  }
+  return messages;
+}
+
 function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
   const store = useStore.getState();
   const existing = store.messages.get(sessionId) || [];
@@ -592,6 +719,28 @@ function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
  * in-flight marker, no revert).
  */
 export type ModelRuntimeFailure = "retired" | "blocked" | "overloaded";
+
+/**
+ * The chat line for an errored result frame, or null when the frame carries no
+ * error text. The bookkeeping frame closing a turn cut off by a restart or a
+ * user Stop (`isResumeInterruptedResult`) becomes a muted "resume-interrupted" note
+ * instead of a red error; everything else stays a real "error". Shared by the
+ * live and history-replay paths so both render a frame identically.
+ */
+export function resultErrorMessage(
+  r: { is_error?: boolean; terminal_reason?: string; errors?: string[] },
+  id: string,
+  timestamp: number,
+): ChatMessage | null {
+  if (!r.is_error || !r.errors?.length) return null;
+  return {
+    id,
+    role: "system",
+    content: `Error: ${r.errors.join(", ")}`,
+    timestamp,
+    systemVariant: isResumeInterruptedResult(r) ? "resume-interrupted" : "error",
+  };
+}
 
 export function classifyModelRuntimeError(status: number | undefined): ModelRuntimeFailure | null {
   if (status === 404) return "retired";
@@ -657,9 +806,12 @@ function logRegistryDisagreementIfActive(
  * status; the `overloaded` arm exists only for parity with the reactive copy
  * and is never produced by the proactive gate.
  */
-function substitutionNoticeReason(reason: string): "retired" | "blocked" | "overloaded" {
+function substitutionNoticeReason(reason: string): "retired" | "blocked" | "overloaded" | "cli-incompatible" {
   if (reason === "blocked") return "blocked";
   if (reason === "overloaded") return "overloaded";
+  // Broken-model table (claude-adapter set_model gate) — the CLI, not the
+  // model's lifecycle, is the cause.
+  if (reason === "cli-incompatible") return "cli-incompatible";
   return "retired";
 }
 
@@ -672,9 +824,16 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     return;
   }
 
-  // Promote to "connected" on first valid message (proves subscription succeeded)
+  // Any frame — including the 25s `keep_alive` — proves the server is alive, so
+  // re-arm the liveness watchdog. Without this, a half-open socket is never
+  // detected and the dialog never auto-restores after a server restart.
+  resetHeartbeatWatchdog(sessionId);
+
+  // Promote to "connected" on any valid message. A stale close/recovery path can
+  // leave the UI marked disconnected even after a replacement socket starts
+  // receiving frames; a parseable frame proves the subscription is live.
   const store = useStore.getState();
-  if (store.connectionStatus.get(sessionId) === "connecting") {
+  if (store.connectionStatus.get(sessionId) !== "connected") {
     store.setConnectionStatus(sessionId, "connected");
   }
 
@@ -746,6 +905,17 @@ function handleParsedMessage(
 
     case "session_update": {
       store.updateSession(sessionId, data.session);
+      const runtimeState = (data.session as { state?: string }).state;
+      if (
+        runtimeState === "connected" ||
+        runtimeState === "running"
+      ) {
+        store.setCliConnected(sessionId, true);
+        store.setCliReconnecting(sessionId, false);
+      } else if (runtimeState === "exited") {
+        store.setCliConnected(sessionId, false);
+        store.setCliReconnecting(sessionId, false);
+      }
       break;
     }
 
@@ -854,6 +1024,21 @@ function handleParsedMessage(
       // tool_use) and streaming deltas create new drafts between them.
       clearStreamingDraftMessage(sessionId);
       upsertAssistantMessage(sessionId, chatMsg);
+      // Refresh the context meter from this turn's real occupancy so it drops
+      // immediately after a /compact (see contextTokensFromUsage rationale).
+      // WS-3 A-3 (prompt-cache audit C-7): the server synthesizes an
+      // interrupted-stream assistant frame with usage {0,0,0,0} — tracking it
+      // zeroed the meter until the next real turn. Skip synthetic/empty usage.
+      const u = msg.usage;
+      const usageIsEmpty =
+        !u ||
+        ((u.input_tokens ?? 0) === 0 &&
+          (u.output_tokens ?? 0) === 0 &&
+          (u.cache_read_input_tokens ?? 0) === 0 &&
+          (u.cache_creation_input_tokens ?? 0) === 0);
+      if (data.streamStatus !== "interrupted" && !usageIsEmpty) {
+        trackContextUsage(sessionId, msg.usage);
+      }
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
       // Reset streaming text accumulators so subsequent deltas in the same
@@ -966,6 +1151,12 @@ function handleParsedMessage(
       // within a single turn. Preserves memory in long-running sessions.
       processedToolUseIds.delete(sessionId);
 
+      {
+        const current = useStore.getState().messages.get(sessionId) || [];
+        const marked = markTurnEnd(current);
+        if (marked !== current) store.setMessages(sessionId, marked);
+      }
+
       const r = data.data;
 
       // Resolve any in-flight Claude in-session model switch. ModelSwitcher
@@ -999,6 +1190,15 @@ function handleParsedMessage(
                 sdk.sessionId === sessionId ? { ...sdk, model: revertedTo } : sdk,
               ),
             );
+          }
+          // Task A.2: the system message scrolls away — also raise the
+          // persistent fallback banner (from→to + why) until dismissed.
+          if (revertedTo) {
+            store.setModelSubstitutionNotice(sessionId, {
+              requested: requestedModel,
+              applied: revertedTo,
+              reason: runtimeFailure,
+            });
           }
           const revertNotice = modelFailureNotice(runtimeFailure, requestedModel, revertedTo);
           store.appendMessage(sessionId, {
@@ -1046,18 +1246,13 @@ function handleParsedMessage(
       if (typeof r.total_lines_removed === "number") {
         sessionUpdates.total_lines_removed = r.total_lines_removed;
       }
-      // Compute context % from modelUsage if available
-      if (r.modelUsage) {
-        for (const usage of Object.values(r.modelUsage)) {
-          if (usage.contextWindow > 0) {
-            const pct = Math.round(
-              ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
-            );
-            sessionUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-          }
-        }
-      }
       store.updateSession(sessionId, sessionUpdates);
+      // Capture the declared context window here (only the result frame carries
+      // it), then recompute the meter from the last per-turn occupancy. We do
+      // NOT derive the percentage from `modelUsage`'s counters — they accumulate
+      // over the whole session and never fall after a /compact.
+      captureContextWindow(sessionId, r.modelUsage);
+      recomputeContextPct(sessionId);
       clearStreamingDraftMessage(sessionId);
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
@@ -1065,20 +1260,19 @@ function handleParsedMessage(
       store.setStreamingStats(sessionId, null);
       store.clearToolProgress(sessionId);
       store.setSessionStatus(sessionId, "idle");
+      // The --resume bookkeeping frame closes a turn a restart already cut
+      // off — nothing finished just now, so it must not ping the user.
+      const resumeInterrupted = isResumeInterruptedResult(r);
       // Play notification sound if enabled and tab is not focused
-      if (!document.hasFocus() && store.notificationSound) {
+      if (!resumeInterrupted && !document.hasFocus() && store.notificationSound) {
         playNotificationSound();
       }
-      if (!document.hasFocus() && store.notificationDesktop) {
+      if (!resumeInterrupted && !document.hasFocus() && store.notificationDesktop) {
         sendBrowserNotification("Session completed", "Claude finished the task", sessionId);
       }
-      if (r.is_error && r.errors?.length) {
-        store.appendMessage(sessionId, {
-          id: nextId(),
-          role: "system",
-          content: `Error: ${r.errors.join(", ")}`,
-          timestamp: Date.now(),
-        });
+      const resultError = resultErrorMessage(r, nextId(), Date.now());
+      if (resultError) {
+        store.appendMessage(sessionId, resultError);
       }
       break;
     }
@@ -1161,6 +1355,7 @@ function handleParsedMessage(
         role: "user",
         content: data.content,
         timestamp: data.timestamp || Date.now(),
+        ...(data.origin === "auto_resume" ? { origin: "auto_resume" as const } : {}),
       });
       store.clearPromptSuggestions(sessionId);
       break;
@@ -1217,11 +1412,40 @@ function handleParsedMessage(
       // message (session-orchestrator.ts:3267 and :3302 fire
       // legacy "Session keeps crashing" alongside session:relaunch-exhausted).
       if (store.cliFailures.has(sessionId)) break;
+      // Context-overflow handoff (>= 5 MB): rendered as the in-chat
+      // ContextAdvisoryNotice banner with a one-click "Continue in a new
+      // session", not as a plain line. The server also records it on the
+      // session state (session_update / session_init); seed it here too in
+      // case this frame wins the race or the update was missed.
+      if (data.advisory?.kind === "context_advisory" && data.advisory.action === "continue_in_new") {
+        // The frame is only sent for the bytes ladder (Claude); a Codex
+        // percent advisory arrives solely via session_update. Legacy frames
+        // carry `milestoneBytes` only; newer ones also `milestone` + `signal`.
+        const incoming = decodeContextAdvisory(data.advisory);
+        const current = store.sessions.get(sessionId)?.context_advisory;
+        if (!current || decodeContextAdvisory(current).milestone < incoming.milestone) {
+          store.updateSession(sessionId, {
+            context_advisory: {
+              signal: incoming.signal,
+              milestone: incoming.milestone,
+              milestoneBytes: data.advisory.milestoneBytes,
+              message: data.message,
+              action: "continue_in_new",
+              at: Date.now(),
+            },
+          });
+        }
+        break;
+      }
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
         content: data.message,
         timestamp: Date.now(),
+        // Tags the drift-recovery notice so MessageFeed can fold a run of
+        // them (and the --resume bookkeeping note) into one collapsed row
+        // instead of one muted line per recovery (W16).
+        systemVariant: isDriftRecoveryMessage(data.message) ? "drift-recovery" : undefined,
       });
       break;
     }
@@ -1361,6 +1585,7 @@ function handleParsedMessage(
             role: "user",
             content: histMsg.content,
             timestamp: histMsg.timestamp,
+            ...(histMsg.origin === "auto_resume" ? { origin: "auto_resume" as const } : {}),
           });
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;
@@ -1382,6 +1607,9 @@ function handleParsedMessage(
           } else {
             chatMessages[existingIndex] = mergeAssistantMessage(chatMessages[existingIndex], assistantMsg);
           }
+          // Track per-turn context occupancy during replay so the restored
+          // meter matches the live one (drops after a /compact, not cumulative).
+          trackContextUsage(sessionId, msg.usage);
           // Also extract tasks, changed files, and background processes from history
           if (msg.content?.length) {
             const baseTimestamp = histMsg.timestamp || Date.now();
@@ -1421,13 +1649,11 @@ function handleParsedMessage(
           }
         } else if (histMsg.type === "result") {
           const r = histMsg.data;
-          if (r.is_error && r.errors?.length) {
-            chatMessages.push({
-              id: `hist-error-${i}`,
-              role: "system",
-              content: `Error: ${r.errors.join(", ")}`,
-              timestamp: Date.now(),
-            });
+          const marked = markTurnEnd(chatMessages);
+          if (marked !== chatMessages) chatMessages.splice(0, chatMessages.length, ...marked);
+          const resultError = resultErrorMessage(r, `hist-error-${i}`, Date.now());
+          if (resultError) {
+            chatMessages.push(resultError);
           }
           // Track cost/turns from history result, same as the live result handler
           const resultUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
@@ -1440,16 +1666,11 @@ function handleParsedMessage(
           if (typeof r.total_lines_removed === "number") {
             resultUpdates.total_lines_removed = r.total_lines_removed;
           }
-          if (r.modelUsage) {
-            for (const usage of Object.values(r.modelUsage)) {
-              if ((usage as { contextWindow: number; inputTokens: number; outputTokens: number }).contextWindow > 0) {
-                const u = usage as { contextWindow: number; inputTokens: number; outputTokens: number };
-                const pct = Math.round(((u.inputTokens + u.outputTokens) / u.contextWindow) * 100);
-                resultUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-              }
-            }
-          }
           store.updateSession(sessionId, resultUpdates);
+          // Capture the declared window from replay, then recompute from the
+          // last per-turn occupancy — mirrors the live result path.
+          captureContextWindow(sessionId, r.modelUsage as Record<string, { contextWindow?: number }> | undefined);
+          recomputeContextPct(sessionId);
         } else if (histMsg.type === "system_event") {
           const summary = summarizeSystemEvent(histMsg.event);
           if (!summary) continue;
@@ -1601,6 +1822,13 @@ function handleParsedMessage(
       // with REST-bootstrapped findings without double-render.
       import("./api.js").then(({ api }) => {
         api.fetchGroupFindings(data.sessionGroupId).then((res) => {
+          // FIX-AP-4: an incomplete hold restore may have no parseable review
+          // at all, so the pause is reported before the reviewCount check.
+          store.setAutoProceedRestoreGaps(res.sessionGroupId, res.autoProceedRestoreGaps ?? []);
+          // Observer rigor: "без ревью" / "не проверено" rows from disk.
+          if (Array.isArray(res.checkpointCoverage)) {
+            store.setCheckpointCoverage(res.sessionGroupId, res.checkpointCoverage);
+          }
           if (res.reviewCount === 0) return; // nothing to bootstrap
           // Bootstrap calls appendObserverReview with a synthetic
           // checkpoint envelope per review — slice already dedups by
@@ -1679,6 +1907,8 @@ function handleParsedMessage(
         ...(data.supersededCheckpointIds !== undefined
           ? { supersededCheckpointIds: data.supersededCheckpointIds }
           : {}),
+        ...(data.verification === "unverified" ? { verification: "unverified" as const } : {}),
+        ...(data.reviewerRole === "second" ? { reviewerRole: "second" as const } : {}),
       });
       break;
     }
@@ -1692,6 +1922,11 @@ function handleParsedMessage(
         cycleNumber: data.cycleNumber,
         convergenceThreshold: data.convergenceThreshold,
         convergenceState: data.convergenceState,
+        // P3/CONV-HONEST: only a `not-counted` frame carries a reason; any
+        // other transition clears the "not counted" note.
+        ...(data.transition === "not-counted" && data.notCountedReason
+          ? { notCountedReason: data.notCountedReason }
+          : {}),
       });
       break;
     }
@@ -1720,6 +1955,8 @@ export function connectSession(sessionId: string) {
   ws.onopen = () => {
     // Stay in "connecting" until we receive the first message from the server,
     // proving the subscription succeeded. handleMessage promotes to "connected".
+    // Arm the liveness watchdog now; every incoming frame re-arms it.
+    resetHeartbeatWatchdog(sessionId);
     const lastSeq = getLastSeq(sessionId);
     ws.send(JSON.stringify({ type: "session_subscribe", last_seq: lastSeq }));
     flushQueuedOutgoing(sessionId, ws);
@@ -1749,7 +1986,13 @@ export function connectSession(sessionId: string) {
     // Guard against stale close events from a replaced socket.
     if (sockets.get(sessionId) !== ws) return;
     sockets.delete(sessionId);
-    useStore.getState().setConnectionStatus(sessionId, "disconnected");
+    clearHeartbeatWatchdog(sessionId);
+    // Reflect the drop honestly: the composer gates on `cliConnected`, so
+    // without this the tab looks connected (and silently can't reach the CLI)
+    // until the user types. The reconnect path restores it from `session_init`.
+    const store = useStore.getState();
+    store.setConnectionStatus(sessionId, "disconnected");
+    store.setCliConnected(sessionId, false);
     // Mark this session as mid-reconnect BEFORE scheduling the timer.
     // The replacement socket's onopen reads this flag (and clears it)
     // to decide whether to fire the post-reconnect group refetch. We
@@ -1762,6 +2005,36 @@ export function connectSession(sessionId: string) {
   ws.onerror = () => {
     ws.close();
   };
+}
+
+/**
+ * (Re)arm the liveness watchdog for a session's socket. Called on connect and
+ * on every incoming frame. If it fires, the server has gone silent past
+ * {@link WS_HEARTBEAT_TIMEOUT_MS} (not even a `keep_alive` arrived) — the socket
+ * is almost certainly half-open, so force-close it. The `onclose` handler then
+ * runs the normal reconnect, which re-subscribes and re-hydrates the dialog.
+ */
+function resetHeartbeatWatchdog(sessionId: string) {
+  const existing = heartbeatWatchdogs.get(sessionId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    heartbeatWatchdogs.delete(sessionId);
+    const ws = sockets.get(sessionId);
+    if (!ws) return;
+    // readyState may still read OPEN on a half-open socket — that is exactly
+    // the case we recover from. Closing triggers onclose → scheduleReconnect.
+    console.warn(`[ws] No heartbeat for ${WS_HEARTBEAT_TIMEOUT_MS}ms on session ${sessionId}; forcing reconnect.`);
+    try { ws.close(); } catch {}
+  }, WS_HEARTBEAT_TIMEOUT_MS);
+  heartbeatWatchdogs.set(sessionId, timer);
+}
+
+function clearHeartbeatWatchdog(sessionId: string) {
+  const timer = heartbeatWatchdogs.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    heartbeatWatchdogs.delete(sessionId);
+  }
 }
 
 function scheduleReconnect(sessionId: string) {
@@ -1786,6 +2059,7 @@ export function disconnectSession(sessionId: string) {
     reconnectTimers.delete(sessionId);
   }
   reconnectingSessions.delete(sessionId);
+  clearHeartbeatWatchdog(sessionId);
   const ws = sockets.get(sessionId);
   if (ws) {
     ws.close();

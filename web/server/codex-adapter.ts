@@ -25,6 +25,10 @@ import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
+import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
+import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
+import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
+import type { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -188,14 +192,16 @@ export interface CodexAdapterOptions {
   /** Runtime cwd for Codex RPC calls. Falls back to `cwd` when omitted. */
   executionCwd?: string;
   approvalMode?: string;
-  sandbox?: "workspace-write" | "danger-full-access";
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** If provided, resume an existing thread instead of starting a new one. */
   threadId?: string;
   /** Optional recorder for raw message capture. */
   recorder?: RecorderManager;
   /** Callback to kill the underlying process/connection on disconnect. */
   killProcess?: () => Promise<void> | void;
-  /** Optional system prompt injected into thread/start as instructions (e.g. Linear context). */
+  /** Optional system prompt (observer role prompt, layer-flag directive)
+   *  sent as `developerInstructions` on thread/start AND thread/resume —
+   *  see `threadInstructionParams`. */
   systemPrompt?: string;
 }
 
@@ -439,6 +445,14 @@ export class StdioTransport implements ICodexTransport {
 // ─── Codex Adapter ────────────────────────────────────────────────────────────
 
 export class CodexAdapter implements IBackendAdapter {
+  /** Epoch ms of the last inbound notification/request from codex (0 = none yet). */
+  private lastCliFrameReceivedMs = 0;
+
+  /** See {@link IBackendAdapter.getLastCliFrameReceivedMs}. */
+  getLastCliFrameReceivedMs(): number {
+    return this.lastCliFrameReceivedMs;
+  }
+
   private transport: ICodexTransport;
   private sessionId: string;
   private options: CodexAdapterOptions;
@@ -446,11 +460,38 @@ export class CodexAdapter implements IBackendAdapter {
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
   private sessionMetaCb: ((meta: { cliSessionId?: string; model?: string; cwd?: string }) => void) | null = null;
   private disconnectCb: (() => void) | null = null;
-  private initErrorCb: ((error: string) => void) | null = null;
+  /**
+   * Init-error subscribers. A LIST, not a single slot (prod 2026-09-08):
+   * `cli-launcher` registers its handler at spawn — the one that SIGTERMs
+   * the codex procs, releases the WS port, marks the session `exited` and
+   * performs the model-rejection fallback respawn — and then emits
+   * `backend:codex-adapter-created`, which makes `WsBridge.attachAdapter`
+   * register its own. With a single slot the bridge's registration silently
+   * replaced the launcher's, so on a real init failure nothing cleaned up:
+   * the app-server subprocess kept running, the session stayed `connected`,
+   * and every server-initiated send dropped as `socket_disconnected` (a
+   * council observer in that state never wakes). `cli-launcher.test.ts`
+   * exercises the launcher's handler directly, so the unit tests kept
+   * passing while the wiring was dead.
+   */
+  private initErrorCbs: ((error: string) => void)[] = [];
 
   // State
   private threadId: string | null = null;
   private currentTurnId: string | null = null;
+  /** W6: per-turn usage accumulated from thread/tokenUsage/updated. */
+  private readonly turnUsage = new CodexTurnUsageAccumulator();
+  /** Set once a v2 thread/tokenUsage/updated arrives; legacy token_count is then ignored. */
+  private sawV2TokenUsage = false;
+  /**
+   * Main-thread `thread/compacted` notifications seen on the CURRENT thread.
+   * Persisted on session state as `codex_compactions` and read by the
+   * context-size advisory: Codex rollouts on disk are tiny and the
+   * context-window percent is cyclic (falls after every compaction), so the
+   * count of compactions is the one monotonic "the window overflowed" signal.
+   * Reset to 0 when the adapter starts a fresh thread.
+   */
+  private compactions = 0;
   private observerTurnState: "idle" | "in-flight" = "idle";
   private observerWakeTurnId: string | null = null;
   /** Same-chunk race buffer: a `turn/completed` whose id arrived BEFORE the
@@ -459,6 +500,31 @@ export class CodexAdapter implements IBackendAdapter {
   private observerPendingCompletedTurnId: string | null = null;
   /** Backstop timer that force-releases a stranded in-flight wake slot. */
   private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * W14: fires when an in-flight wake turn delivers NO inbound frame for
+   * `OBSERVER_WAKE_SILENCE_MS` (see `observer-wake-silence.ts`). First
+   * verdict → interrupt + re-send the same wake on a fresh thread; second →
+   * release the slot and report `observer:wake-failed` (reason `silent`) so
+   * the orchestrator degrades + auto-heals the observer.
+   */
+  private readonly observerWakeSilence: SilentStdioWatchdog = createObserverWakeSilenceWatchdog(
+    ({ sinceMs }) => this.handleObserverWakeSilent(sinceMs),
+  );
+  /** W14: text of the in-flight wake, kept for the one fresh-thread retry. */
+  private observerWakeContent: string | null = null;
+  /** W14: the in-flight wake already used its fresh-thread retry. */
+  private observerWakeSilentRetried = false;
+  /** W14: bumped per wake so an async retry can tell its wake was replaced. */
+  private observerWakeGeneration = 0;
+  /**
+   * W14 (review WARN): commandExecution items open in the current wake turn.
+   * A command (rg over a big tree, a buffered test run) emits `item/started`
+   * and then nothing until `item/completed` — `outputDelta` only arrives when
+   * there is output. While any is open the silence deadline is held open at
+   * HELD_TIMEOUT_MULTIPLIER x, mirroring the Claude session watchdog's
+   * tool_use hold.
+   */
+  private readonly observerOpenCommandIds = new Set<string>();
   /**
    * #12: idle-kill activity hook, wired by the bridge at attach time.
    * `sendUserFrameFromServer` calls it unconditionally so a checkpoint-driven
@@ -476,6 +542,11 @@ export class CodexAdapter implements IBackendAdapter {
    *  resetForReconnect so that a stale in-flight initialize() can detect that
    *  a newer one has been triggered and bail out early. */
   private initEpoch = 0;
+  /** In-flight recovery from a "Not initialized" error. Concurrent turns that
+   *  each hit the error coalesce onto this single promise instead of each
+   *  bumping the epoch and clobbering the running initialize()'s in-progress
+   *  flag (which would let an extra initialize() slip past the guard). */
+  private reinitPromise: Promise<void> | null = null;
   /** Guard against multiple cleanupAndDisconnect() calls firing disconnectCb twice. */
   private disconnectFired = false;
 
@@ -535,6 +606,8 @@ export class CodexAdapter implements IBackendAdapter {
     timeout: ReturnType<typeof setTimeout>;
   }>(); // request_id -> pending dynamic tool call metadata
 
+  /** Dedup key (turn id) of the last `session:usage-limit` emit. */
+  private usageLimitEmittedKey: string | null = null;
   // Codex account rate limits (fetched after init, updated via notification)
   private _rateLimits: {
     primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
@@ -885,6 +958,19 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     this.observerTurnState = "in-flight";
+    this.observerWakeGeneration++;
+    this.observerWakeContent = content;
+    this.observerWakeSilentRetried = false;
+    this.sendObserverWakeTurn(content);
+    return { kind: "sent" };
+  }
+
+  /**
+   * Send (or, for the W14 silent retry, re-send) the in-flight wake as a
+   * `turn/start` on the CURRENT thread. Arms both the completion backstop
+   * and the silence watchdog.
+   */
+  private sendObserverWakeTurn(content: string): void {
     this.observerWakeTurnId = null;
     this.observerPendingCompletedTurnId = null;
     this.armObserverWakeWatchdog();
@@ -892,6 +978,8 @@ export class CodexAdapter implements IBackendAdapter {
     void this.startTurn(input, {
       origin: "server:council-wake",
       onSuccess: (turnId) => {
+        // The turn/start reply is itself an inbound frame.
+        this.observerWakeSilence.onFrame();
         this.currentTurnId = turnId;
         this.observerWakeTurnId = turnId;
         // Same-chunk race: a turn/completed for this id may already have been
@@ -912,7 +1000,130 @@ export class CodexAdapter implements IBackendAdapter {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-    return { kind: "sent" };
+  }
+
+  /**
+   * W14: the in-flight wake turn produced no inbound frame for
+   * `OBSERVER_WAKE_SILENCE_MS`. Prod 2026-10-16 12:01: turn/start replied
+   * `inProgress`, then nothing for 13 min although the app-server finished
+   * the turn in 27 s. First verdict per wake → {@link retryObserverWakeOnFreshThread};
+   * second (or no retry possible) → {@link failSilentObserverWake}.
+   */
+  private handleObserverWakeSilent(sinceMs: number): void {
+    if (this.observerTurnState !== "in-flight") return;
+    const retry = !this.observerWakeSilentRetried && this.observerWakeContent !== null;
+    log.warn("codex-adapter", "observer wake turn silent — no frame from codex", {
+      event: "council.observer_wake_silent",
+      sessionId: this.sessionId,
+      threadId: this.threadId,
+      turnId: this.observerWakeTurnId,
+      sinceMs,
+      action: retry ? "interrupt_and_retry_fresh_thread" : "give_up",
+    });
+    if (!retry) {
+      this.failSilentObserverWake(sinceMs, "silent after fresh-thread retry");
+      return;
+    }
+    this.observerWakeSilentRetried = true;
+    void this.retryObserverWakeOnFreshThread(this.observerWakeGeneration, this.observerWakeContent!, sinceMs);
+  }
+
+  /**
+   * W14 (a): interrupt the silent turn (best effort) and re-send the SAME wake
+   * on a FRESH thread — a long-lived resumed thread is the cheapest thing to
+   * discard. If the transport itself is deaf, `thread/start` times out and we
+   * fall through to {@link failSilentObserverWake}, whose degrade triggers the
+   * orchestrator's observer auto-heal (relaunch = fresh proxy + app-server).
+   */
+  private async retryObserverWakeOnFreshThread(generation: number, content: string, sinceMs: number): Promise<void> {
+    const stillOurs = () => this.observerTurnState === "in-flight" && this.observerWakeGeneration === generation;
+    const previousThreadId = this.threadId;
+    const silentTurnId = this.observerWakeTurnId ?? this.currentTurnId;
+    // The retry RPCs carry their own timeouts; pause the silence verdict.
+    this.observerWakeSilence.disarm();
+    // Detach the silent turn from the wake slot BEFORE interrupting it: its
+    // late `turn/completed` (status interrupted) must not resolve the slot
+    // and abort the retry. With the id cleared it is only stashed, and the
+    // retry's own turn/start reply never matches it.
+    this.observerWakeTurnId = null;
+    if (previousThreadId && silentTurnId) {
+      try {
+        await this.transport.call("turn/interrupt", { threadId: previousThreadId, turnId: silentTurnId });
+      } catch (err) {
+        log.warn("codex-adapter", "silent observer wake: turn/interrupt failed", {
+          event: "council.observer_wake_silent.interrupt_failed",
+          sessionId: this.sessionId,
+          threadId: previousThreadId,
+          turnId: silentTurnId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (!stillOurs()) return;
+    let freshThreadId: string;
+    try {
+      const fresh = await this.transport.call("thread/start", {
+        model: this.options.model,
+        cwd: this.getExecutionCwd(),
+        approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
+        sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
+        ...this.threadInstructionParams(),
+      }) as { thread: { id: string } };
+      freshThreadId = fresh.thread.id;
+    } catch (err) {
+      if (!stillOurs()) return;
+      this.failSilentObserverWake(
+        sinceMs,
+        `fresh thread/start failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    if (!stillOurs()) return;
+    this.threadId = freshThreadId;
+    // A fresh thread starts with an empty window: its compaction count is its own.
+    this.compactions = 0;
+    this.emit({ type: "session_update", session: { codex_compactions: 0 } });
+    // A later relaunch must resume the fresh thread, not the silent one.
+    this.options.threadId = freshThreadId;
+    this.sessionMetaCb?.({ cliSessionId: freshThreadId, model: this.options.model, cwd: this.options.cwd });
+    log.warn("codex-adapter", "silent observer wake re-sent on a fresh thread", {
+      event: "council.observer_wake_silent.retried",
+      sessionId: this.sessionId,
+      previousThreadId,
+      threadId: freshThreadId,
+    });
+    companionBus.emit("observer:wake-retried", {
+      sessionId: this.sessionId,
+      reason: "silent",
+      previousThreadId,
+      threadId: freshThreadId,
+    });
+    this.sendObserverWakeTurn(content);
+  }
+
+  /** W14: hold the wake silence deadline open while a command item runs. */
+  private trackObserverCommandHold(method: string, params: Record<string, unknown>): void {
+    if (method !== "item/started" && method !== "item/completed") return;
+    const item = params.item as { type?: string; id?: string } | undefined;
+    if (item?.type !== "commandExecution" || typeof item.id !== "string") return;
+    if (method === "item/started") this.observerOpenCommandIds.add(item.id);
+    else this.observerOpenCommandIds.delete(item.id);
+    this.observerWakeSilence.setHeld(this.observerOpenCommandIds.size > 0);
+  }
+
+  /** Council observer turn-state (see `IBackendAdapter.getObserverTurnState`). */
+  getObserverTurnState(): "idle" | "in-flight" {
+    return this.observerTurnState;
+  }
+
+  /** W14: give up on a silent wake — release the slot and report it. */
+  private failSilentObserverWake(sinceMs: number, detail: string): void {
+    this.resolveObserverTurn({ emitDrain: false });
+    companionBus.emit("observer:wake-failed", {
+      sessionId: this.sessionId,
+      error: `observer wake silent for ${Math.round(sinceMs / 1000)}s (${detail})`,
+      reason: "silent",
+    });
   }
 
   /**
@@ -942,6 +1153,9 @@ export class CodexAdapter implements IBackendAdapter {
 
   private armObserverWakeWatchdog(): void {
     this.clearObserverWakeWatchdog();
+    // arm() resets the hold; start the new delivery with no open commands.
+    this.observerOpenCommandIds.clear();
+    this.observerWakeSilence.arm("observer_wake");
     const timer = setTimeout(() => {
       log.warn("codex-adapter", "observer wake turn never terminated — force-releasing slot", {
         event: "council.observer_wake_completion_watchdog",
@@ -955,6 +1169,8 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   private clearObserverWakeWatchdog(): void {
+    this.observerWakeSilence.disarm();
+    this.observerOpenCommandIds.clear();
     if (this.observerWakeWatchdog) {
       clearTimeout(this.observerWakeWatchdog);
       this.observerWakeWatchdog = null;
@@ -1080,7 +1296,7 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   onInitError(cb: (error: string) => void): void {
-    this.initErrorCb = cb;
+    this.initErrorCbs.push(cb);
   }
 
   isConnected(): boolean {
@@ -1123,6 +1339,24 @@ export class CodexAdapter implements IBackendAdapter {
   /** Max retries for thread/start or thread/resume during initialization. */
   private static readonly INIT_THREAD_MAX_RETRIES = 3;
   private static readonly INIT_THREAD_RETRY_BASE_MS = 500;
+  /**
+   * Backoff base for the `Not initialized` handshake race (prod 2026-09-08,
+   * got-050): we send the `initialized` notification and `thread/start` in the
+   * same tick, and codex app-server occasionally services the request before
+   * the notification → JSON-RPC -32600 "Not initialized". The server IS up and
+   * a re-sent `initialized` + short pause is enough; no need for the 500ms
+   * transport-drop backoff. 3 of 21 codex observer spawns hit this in 3h and
+   * every one stayed dead (initFailed) because only "Transport closed" retried.
+   */
+  private static readonly INIT_NOT_INITIALIZED_RETRY_BASE_MS = 100;
+  /**
+   * Council review 2026-09-08 #14: the `Not initialized` handshake race gets
+   * its OWN retry budget, separate from the transport-drop budget above. A
+   * spawn that flaps between both error classes must not have one class eat
+   * the other's allowance, and the two backoff curves (500ms vs 100ms base)
+   * are tuned independently, so each carries its own attempt counter.
+   */
+  private static readonly INIT_NOT_INITIALIZED_MAX_RETRIES = 3;
 
   private async initialize(): Promise<void> {
     if (this.initInProgress) {
@@ -1139,7 +1373,7 @@ export class CodexAdapter implements IBackendAdapter {
       // Step 1: Send initialize request
       await this.transport.call("initialize", {
         clientInfo: {
-          name: "thecompanion",
+          name: "aura-companion",
           title: "Aura Companion",
           version: "1.0.0",
         },
@@ -1167,8 +1401,15 @@ export class CodexAdapter implements IBackendAdapter {
       // different Codex API fields by design.
       let threadStarted = false;
       let lastThreadError: unknown;
-
-      for (let attempt = 0; attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES; attempt++) {
+      // Council review 2026-09-08 #14: independent per-class retry budgets.
+      // `transportAttempts` counts `Transport closed`, `notInitAttempts`
+      // counts the `Not initialized` handshake race — each capped by its own
+      // constant so a mixed-failure sequence gets the full allowance of each
+      // class rather than draining one shared budget. The loop is bounded by
+      // the sum of both caps, so it always terminates.
+      let transportAttempts = 0;
+      let notInitAttempts = 0;
+      for (;;) {
         // Bail out early if superseded by a newer init cycle
         if (myEpoch !== this.initEpoch) {
           console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded during thread start, aborting`);
@@ -1190,6 +1431,7 @@ export class CodexAdapter implements IBackendAdapter {
                 cwd: this.getExecutionCwd(),
                 approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
                 sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
+                ...this.threadInstructionParams(),
               }) as { thread: { id: string } };
               this.threadId = resumeResult.thread.id;
             } catch (resumeErr) {
@@ -1206,7 +1448,7 @@ export class CodexAdapter implements IBackendAdapter {
                 cwd: this.getExecutionCwd(),
                 approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
                 sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
-                ...(this.options.systemPrompt ? { instructions: this.options.systemPrompt } : {}),
+                ...this.threadInstructionParams(),
               }) as { thread: { id: string } };
               this.threadId = freshResult.thread.id;
               // Update options.threadId so subsequent resetForReconnect calls
@@ -1225,7 +1467,7 @@ export class CodexAdapter implements IBackendAdapter {
               cwd: this.getExecutionCwd(),
               approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
               sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
-              ...(this.options.systemPrompt ? { instructions: this.options.systemPrompt } : {}),
+              ...this.threadInstructionParams(),
             }) as { thread: { id: string } };
             this.threadId = threadResult.thread.id;
           }
@@ -1234,11 +1476,48 @@ export class CodexAdapter implements IBackendAdapter {
         } catch (threadErr) {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
-          if (!isTransportClosed || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
-            break; // Non-transient error or last attempt — give up
+          const isNotInitialized = this.isNotInitializedError(threadErr);
+          if (!isTransportClosed && !isNotInitialized) {
+            break; // Non-transient error — give up
           }
-          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
-          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Transport closed), retrying in ${delay}ms`);
+          if (isNotInitialized) {
+            notInitAttempts++;
+            if (notInitAttempts >= CodexAdapter.INIT_NOT_INITIALIZED_MAX_RETRIES) {
+              break; // Handshake race persisted past its budget — give up
+            }
+            // Handshake race (got-050): app-server saw thread/start before our
+            // `initialized` notification. Re-send the notification so the
+            // server's state is definitely past the barrier, then retry after
+            // a short pause. The turn-time `callAfterNotInitializedRetry` path
+            // re-runs the whole initialize(); doing that from INSIDE
+            // initialize() would recurse, so this in-loop retry is the
+            // init-path equivalent.
+            const delay = CodexAdapter.INIT_NOT_INITIALIZED_RETRY_BASE_MS * Math.pow(2, notInitAttempts - 1);
+            console.warn(`[codex-adapter] thread start Not-initialized retry ${notInitAttempts} — re-sending initialized, retrying in ${delay}ms`);
+            // #13: the re-send can itself reject if the transport dropped in
+            // the window after the failed thread/start. An unguarded await
+            // here escapes the whole retry loop into the outer catch and
+            // burns zero of the budget — the exact "stayed dead" failure
+            // got-050 set out to remove. Classify a notify failure as a
+            // transport error and consume a transport slot instead.
+            try {
+              await this.transport.notify("initialized", {});
+            } catch (notifyErr) {
+              lastThreadError = notifyErr;
+              transportAttempts++;
+              if (transportAttempts >= CodexAdapter.INIT_THREAD_MAX_RETRIES) break;
+              await new Promise((r) => setTimeout(r, CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, transportAttempts - 1)));
+              continue;
+            }
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          transportAttempts++;
+          if (transportAttempts >= CodexAdapter.INIT_THREAD_MAX_RETRIES) {
+            break; // Transport kept dropping past its budget — give up
+          }
+          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, transportAttempts - 1);
+          console.warn(`[codex-adapter] thread start Transport-closed retry ${transportAttempts}, retrying in ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -1278,6 +1557,7 @@ export class CodexAdapter implements IBackendAdapter {
         total_cost_usd: 0,
         num_turns: 0,
         context_used_percent: 0,
+        codex_compactions: 0,
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
@@ -1310,14 +1590,30 @@ export class CodexAdapter implements IBackendAdapter {
       }
       this.initInProgress = false;
       const errorMsg = `Codex initialization failed: ${err}`;
-      console.error(`[codex-adapter] ${errorMsg}`);
+      // Council review 2026-09-08 #7: structured init-failure log. The adapter
+      // layer has only sessionId (group/role live in cli-launcher's record),
+      // but an `event`-keyed line is still greppable and correlatable.
+      log.error("codex-adapter", "Codex initialization failed", {
+        event: "codex.init_failed",
+        sessionId: this.sessionId,
+        error: errorMsg,
+      });
       this.initFailed = true;
       this.connected = false;
       // Discard any messages queued during the failed init attempt
       if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
       this.pendingOutgoing.length = 0;
       this.emit({ type: "error", message: errorMsg });
-      this.initErrorCb?.(errorMsg);
+      // Every subscriber runs, and one that throws must not swallow the
+      // others — the launcher's cleanup and the bridge's user-facing error
+      // frame are independent responsibilities.
+      for (const cb of [...this.initErrorCbs]) {
+        try {
+          cb(errorMsg);
+        } catch (cbErr) {
+          console.error(`[codex-adapter] onInitError subscriber threw: ${cbErr}`);
+        }
+      }
     }
   }
 
@@ -1448,7 +1744,10 @@ export class CodexAdapter implements IBackendAdapter {
   ): Promise<void> {
     const turnParams = this.buildTurnStartParams(input);
     try {
-      const result = await this.transport.call("turn/start", turnParams, undefined, opts?.origin) as { turn: { id: string } };
+      const result = await this.callAfterNotInitializedRetry(
+        "turn/start",
+        () => this.transport.call("turn/start", turnParams, undefined, opts?.origin) as Promise<{ turn: { id: string } }>,
+      );
       opts?.onSuccess?.(result.turn.id);
     } catch (error) {
       opts?.onFailure?.();
@@ -1611,8 +1910,14 @@ export class CodexAdapter implements IBackendAdapter {
 
   private async handleOutgoingMcpGetStatus(): Promise<void> {
     try {
-      const statusEntries = await this.listAllMcpServerStatuses();
-      const configMap = await this.readMcpServersConfig();
+      const statusEntries = await this.callAfterNotInitializedRetry(
+        "mcp_get_status",
+        () => this.listAllMcpServerStatuses(),
+      );
+      const configMap = await this.callAfterNotInitializedRetry(
+        "mcp_get_status",
+        () => this.readMcpServersConfig(),
+      );
 
       const names = new Set<string>([
         ...statusEntries.map((s) => s.name),
@@ -1727,6 +2032,10 @@ export class CodexAdapter implements IBackendAdapter {
   // ── Incoming notification handlers ──────────────────────────────────────
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
+    this.lastCliFrameReceivedMs = Date.now();
+    // W14: any inbound frame proves the wake turn's stream is alive.
+    this.observerWakeSilence.onFrame();
+    this.trackObserverCommandHold(method, params);
     // Debug: log all significant notifications to understand Codex event flow
     if (method.startsWith("item/") || method.startsWith("turn/") || method.startsWith("thread/")) {
       const item = params.item as { type?: string; id?: string } | undefined;
@@ -1800,6 +2109,15 @@ export class CodexAdapter implements IBackendAdapter {
       case "thread/started":
         // Thread started after init — nothing to emit.
         break;
+      case "thread/name/updated":
+      case "thread/settings/updated":
+      case "thread/goal/cleared":
+      case "thread/goal/updated":
+        // Thread metadata changed upstream; Aura keeps its own session labels.
+        break;
+      case "thread/compacted":
+        this.handleThreadCompacted(params);
+        break;
       case "thread/status/changed":
         this.handleThreadStatusChanged(params);
         break;
@@ -1808,10 +2126,28 @@ export class CodexAdapter implements IBackendAdapter {
         break;
       case "account/updated":
       case "account/login/completed":
+      case "authStatusChange":
+      case "loginChatGptComplete":
         // Auth events
         break;
       case "account/rateLimits/updated":
         this.updateRateLimits(params);
+        break;
+      case "app/list/updated":
+      case "configWarning":
+      case "deprecationNotice":
+      case "fuzzyFileSearch/sessionUpdated":
+      case "mcpServer/oauthLogin/completed":
+      case "mcpServer/startupStatus/updated":
+      case "remoteControl/status/changed":
+      case "sessionConfigured":
+      case "skills/changed":
+      // Generic per-thread warning (codex-cli 0.162+), e.g. "Codex is
+      // ignoring 1 unrecognized configuration setting". Operational noise
+      // for the launcher config, not user-actionable in the session.
+      case "warning":
+      case "windows/worldWritableWarning":
+        // Informational app-server notifications; not user-actionable here.
         break;
       // Legacy codex/event/* notifications forwarded by newer Codex runtimes.
       // token_count is still useful for metrics, but the streaming deltas are
@@ -1837,7 +2173,7 @@ export class CodexAdapter implements IBackendAdapter {
       case "codex/event/task_started":
       case "codex/event/task_complete":
       case "codex/event/mcp_startup_complete":
-      case "codex/event/context_compacted":
+      case "codex/event/context_compacted": // counted once via v2 `thread/compacted`
       case "codex/event/agent_reasoning":
       case "codex/event/agent_reasoning_delta":
       case "codex/event/agent_reasoning_section_break":
@@ -1918,11 +2254,45 @@ export class CodexAdapter implements IBackendAdapter {
 
     console.error(`[codex-adapter] Codex error notification: ${message}`);
     this.emit({ type: "error", message });
+    if (!willRetry) {
+      this.maybeEmitUsageLimit(baseMessage, error?.codexErrorInfo, typeof params.turnId === "string" ? params.turnId : null);
+    }
+  }
+
+  /**
+   * Auto-resume detection: a terminal Codex error that is a usage limit
+   * (`codexErrorInfo: "usageLimitExceeded"`, "You've hit your usage limit…",
+   * legacy `usage_limit_reached`) → `session:usage-limit` with the reset from
+   * the latest `account/rateLimits` snapshot (preferred), the error body, or
+   * the "Try again at …" text. The v2 `error` notification and the failed
+   * `turn/completed` both describe the same failure — emitted once per turn.
+   */
+  private maybeEmitUsageLimit(message: string, codexErrorInfo: unknown, turnId: string | null): void {
+    const resolved = resolveCodexUsageLimit({
+      message,
+      codexErrorInfo,
+      rateLimits: this._rateLimits,
+      now: Date.now(),
+    });
+    if (!resolved) return;
+    const key = turnId ?? `reset:${resolved.resetAt}`;
+    if (this.usageLimitEmittedKey === key) return;
+    this.usageLimitEmittedKey = key;
+    companionBus.emit("session:usage-limit", {
+      sessionId: this.sessionId,
+      backend: "codex",
+      model: this.options.model || null,
+      resetAt: resolved.resetAt,
+      resetSource: resolved.resetSource,
+      limitType: resolved.limitType,
+    });
   }
 
   // ── Incoming request handlers (approval requests) ───────────────────────
 
   private handleRequest(method: string, id: number, params: Record<string, unknown>): void {
+    this.lastCliFrameReceivedMs = Date.now();
+    this.observerWakeSilence.onFrame();
     try {
       switch (method) {
         case "item/commandExecution/requestApproval":
@@ -2815,10 +3185,24 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   private handleTurnCompleted(params: Record<string, unknown>): void {
-    const turn = params.turn as { id: string; status: string; error?: { message: string } } | undefined;
+    const turn = params.turn as { id: string; status: string; error?: { message: string; codexErrorInfo?: unknown } } | undefined;
     const completedTurnId = typeof turn?.id === "string" ? turn.id : null;
+    if (turn && turn.status !== "completed" && turn.error && typeof turn.error.message === "string") {
+      this.maybeEmitUsageLimit(turn.error.message, turn.error.codexErrorInfo, completedTurnId);
+    }
 
     // Synthesize a CLIResultMessage-like structure
+    // W6: real per-turn usage from the turn's thread/tokenUsage/updated
+    // notifications, normalised to Claude's shape (codex-turn-usage.ts). A
+    // turn with no notification (interrupted pre-request, duplicate
+    // completion) keeps zeros — ws-bridge flags those as non-countable.
+    // Only the MAIN thread's usage belongs to this result; collab subagent
+    // threads keep their own buckets in the (thread-keyed) accumulator.
+    const completedThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    const isMainTurn = this.isMainThread(completedThreadId);
+    const turnUsage = isMainTurn
+      ? this.turnUsage.takeForTurn(completedTurnId, completedThreadId)
+      : null;
     const result: CLIResultMessage = {
       type: "result",
       subtype: turn?.status === "completed" ? "success" : "error_during_execution",
@@ -2829,7 +3213,10 @@ export class CodexAdapter implements IBackendAdapter {
       num_turns: 1,
       total_cost_usd: 0,
       stop_reason: turn?.status || "end_turn",
-      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      usage: turnUsage ?? { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      // A child (collab subagent) thread's completion is not the main turn's
+      // outcome — flag it so main-turn consumers can skip it.
+      ...(isMainTurn ? {} : { subagent_turn: true as const }),
       uuid: randomUUID(),
       session_id: this.sessionId,
     };
@@ -2898,7 +3285,45 @@ export class CodexAdapter implements IBackendAdapter {
     // `last` is the most recent turn — its inputTokens reflects what's actually in context.
     const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
     if (!tokenUsage) return;
+    this.sawV2TokenUsage = true;
+    // Per-thread accounting (main + collab subagents) for the turn result.
+    this.turnUsage.onTokenUsage(params);
+    // Session-level context state describes the MAIN conversation only: a
+    // subagent thread's prompt/totals must not move the meter, the cache
+    // hint's last_context_tokens, or codex_token_details.
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (!this.isMainThread(threadId)) return;
+    this.applyMainThreadTokenUsage(tokenUsage);
+  }
 
+  /**
+   * True when `threadId` is the session's main conversation thread. A frame
+   * without a threadId is treated as main (older app-server shapes). Before
+   * the main thread id is known, anything not registered as a collab
+   * subagent thread counts as main.
+   */
+  private isMainThread(threadId: string | undefined): boolean {
+    if (threadId === undefined) return true;
+    if (this.threadId) return threadId === this.threadId;
+    return !this.parentToolUseByThreadId.has(threadId);
+  }
+
+  /**
+   * `thread/compacted` — Codex compacted the thread's context. Counted for the
+   * MAIN thread only (a collab subagent compacting says nothing about the
+   * session's own window) and forwarded as `codex_compactions` so the
+   * context-size advisory can offer a handoff after repeated compactions.
+   * The legacy `codex/event/context_compacted` duplicate is ignored so one
+   * compaction is never counted twice.
+   */
+  private handleThreadCompacted(params: Record<string, unknown>): void {
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (!this.isMainThread(threadId)) return;
+    this.compactions += 1;
+    this.emit({ type: "session_update", session: { codex_compactions: this.compactions } });
+  }
+
+  private applyMainThreadTokenUsage(tokenUsage: Record<string, unknown>): void {
     const total = tokenUsage.total as Record<string, number> | undefined;
     const last = tokenUsage.last as Record<string, number> | undefined;
     const contextWindow = tokenUsage.modelContextWindow as number | undefined;
@@ -2910,6 +3335,12 @@ export class CodexAdapter implements IBackendAdapter {
       const usedInContext = (last.inputTokens || 0) + (last.outputTokens || 0);
       const pct = Math.round((usedInContext / contextWindow) * 100);
       updates.context_used_percent = Math.max(0, Math.min(pct, 100));
+    }
+
+    // Full prompt of the last model request (cached included) — what a cold
+    // cache would have to write again; drives the cache-rewrite UI hint.
+    if (last && typeof last.inputTokens === "number" && last.inputTokens > 0) {
+      updates.last_context_tokens = last.inputTokens;
     }
 
     // Forward cumulative token breakdown for display in the UI
@@ -2937,6 +3368,11 @@ export class CodexAdapter implements IBackendAdapter {
     const msg = this.asRecord(params.msg);
     const info = this.asRecord(msg?.info);
     if (!info) return;
+    // Legacy frames carry no threadId/turnId, so they can't be attributed to
+    // a thread or turn: they never touch the per-turn accumulator (its
+    // duplicate detector is per thread). When v2 notifications are flowing
+    // they are authoritative and legacy frames are ignored entirely.
+    if (this.sawV2TokenUsage) return;
 
     const toUsage = (raw: unknown): Record<string, number> => {
       const usage = this.asRecord(raw);
@@ -2952,12 +3388,10 @@ export class CodexAdapter implements IBackendAdapter {
       };
     };
 
-    this.handleTokenUsageUpdated({
-      tokenUsage: {
-        total: toUsage(info.total_token_usage),
-        last: toUsage(info.last_token_usage),
-        modelContextWindow: Number(info.model_context_window || 0),
-      },
+    this.applyMainThreadTokenUsage({
+      total: toUsage(info.total_token_usage),
+      last: toUsage(info.last_token_usage),
+      modelContextWindow: Number(info.model_context_window || 0),
     });
   }
 
@@ -3174,12 +3608,88 @@ export class CodexAdapter implements IBackendAdapter {
 
   /** Map permission mode to SandboxPolicy object (for turn/start's sandboxPolicy field). */
   private mapSandboxPolicyObject(_mode?: string): { type: string } {
-    // Always full access — matches approvalPolicy: "never" for full autonomy.
+    // An explicit spawn-time sandbox restriction (council observer profile)
+    // must survive at the turn level too — thread/start's `sandbox` string
+    // alone is not enough, a turn-level dangerFullAccess would override it.
+    // SandboxPolicy variants are camelCase per the app-server JSON schema
+    // (`readOnly`, `workspaceWrite`, `dangerFullAccess`); networkAccess
+    // defaults to false for readOnly, which is what the observer wants.
+    if (this.options.sandbox === "read-only") {
+      return { type: "readOnly" };
+    }
+    // Otherwise full access — matches approvalPolicy: "never" for full autonomy.
     return { type: "dangerFullAccess" };
   }
 
   private mapCollaborationMode(kind: "default" | "plan"): { mode: "default" | "plan"; settings: { model: string } } {
     return { mode: kind, settings: { model: this.options.model || "" } };
+  }
+
+  /**
+   * aura-meta-diet FIX-C3-1: the system prompt rides `developerInstructions`
+   * — the field Codex app-server's ThreadStartParams/ThreadResumeParams
+   * actually define (verified against `codex app-server
+   * generate-json-schema`, codex-cli 0.142.5). The previous `instructions`
+   * key is not in the schema and was dropped silently: prod rollouts of
+   * Codex observers carried neither the observer prompt nor a developer
+   * message with it. Sent on resume too — a server restart resumes the
+   * thread, and a thread started before this fix never received the prompt.
+   * `developerInstructions` (not `baseInstructions`) so Codex keeps its own
+   * base prompt.
+   */
+  private threadInstructionParams(): { developerInstructions?: string } {
+    return this.options.systemPrompt ? { developerInstructions: this.options.systemPrompt } : {};
+  }
+
+  private isNotInitializedError(err: unknown): boolean {
+    // Substring match, not equality: Codex has emitted this both as a bare
+    // "Not initialized" and wrapped (e.g. "Error: Not initialized"). This is a
+    // brittle string contract with the CLI — if Codex ever renames the message
+    // the retry silently stops firing. There is no structured error code to key
+    // on today; revisit if the JSON-RPC error surface gains one.
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.includes("Not initialized");
+  }
+
+  private async reinitializeAfterNotInitialized(label: string): Promise<void> {
+    // Coalesce concurrent recoveries: if a reinit is already running, await it
+    // rather than starting a second one. Two turns hitting "Not initialized"
+    // back-to-back would otherwise each bump initEpoch and reset initInProgress,
+    // letting a stale initialize() reset the flag out from under a live one.
+    if (this.reinitPromise) {
+      await this.reinitPromise;
+      return;
+    }
+    if (!this.transport.isConnected()) {
+      throw new Error("Transport closed");
+    }
+    const run = (async () => {
+      console.warn(`[codex-adapter] Session ${this.sessionId}: ${label} hit Not initialized — re-running Codex initialize handshake`);
+      this.initEpoch++;
+      this.initialized = false;
+      this.initFailed = false;
+      this.initInProgress = false;
+      if (!this.options.threadId && this.threadId) {
+        this.options.threadId = this.threadId;
+      }
+      await this.initialize();
+    })();
+    this.reinitPromise = run;
+    try {
+      await run;
+    } finally {
+      this.reinitPromise = null;
+    }
+  }
+
+  private async callAfterNotInitializedRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!this.isNotInitializedError(err)) throw err;
+      await this.reinitializeAfterNotInitialized(label);
+      return await fn();
+    }
   }
 
   private async listAllMcpServerStatuses(): Promise<CodexMcpServerStatus[]> {

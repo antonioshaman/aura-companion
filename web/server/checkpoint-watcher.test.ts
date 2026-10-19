@@ -184,4 +184,54 @@ describe("watchCheckpoints", () => {
     ac.abort();
     await watcherDone;
   });
+
+  // EC-4 regression (finding #11): two DISTINCT checkpoint payloads
+  // (different checkpoint_id/sequence, same phase → same inode) that land on
+  // the SAME path within the debounce window would previously collapse to one
+  // read — the earlier checkpoint_id was silently lost when the second
+  // atomic-write overwrote the first rename's bytes before the watcher read
+  // them. The watcher now keys the debounce entry by `(file, mtimeNs)` and
+  // logs the loss via `onDropped("superseded", ...)` so the coalesce EC-4
+  // forbids becomes visible. The surviving (second) payload still surfaces.
+  // Mirrors the identical review-watcher regression test.
+  it("logs `superseded` when two distinct checkpoints land on the same path inside the debounce window", async () => {
+    const ac = new AbortController();
+    const seen: string[] = [];
+    const dropped: Array<{ reason: string; file: string }> = [];
+    // Raise the debounce far above the inter-write gap (test seam). This
+    // decouples "time for the first fs.watch event to be observed" from "time
+    // before the debounce timer flushes": the first event is reliably seen at
+    // chk-Z1's mtime, the timer does not fire mid-gap, and the second write's
+    // distinct mtime deterministically triggers `superseded`.
+    const SUPERSEDE_DEBOUNCE_MS = 600;
+    const watcherDone = watchCheckpoints({
+      directory: dir,
+      signal: ac.signal,
+      debounceMs: SUPERSEDE_DEBOUNCE_MS,
+      onCheckpoint: (p) => {
+        seen.push(p.checkpoint_id);
+      },
+      onDropped: (reason, file) => {
+        dropped.push({ reason, file });
+      },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    const path = join(dir, "plan.json");
+    // Distinct checkpoint_id AND sequence so this is unambiguously two logical
+    // checkpoints, not a re-emit (which the dedup LRU handles separately).
+    writeAtomicJson(path, makePayload({ checkpoint_id: "chk-Z1", sequence: 0 }));
+    // Gap >> fs.watch delivery latency (single/double-digit ms) so the first
+    // event is processed at chk-Z1's mtime, yet << the debounce so the timer
+    // has not flushed when the distinct second write lands.
+    await new Promise((r) => setTimeout(r, 250));
+    writeAtomicJson(path, makePayload({ checkpoint_id: "chk-Z2", sequence: 1 }));
+    // Wait out the (rearmed) debounce so the surviving chk-Z2 read flushes.
+    await new Promise((r) => setTimeout(r, SUPERSEDE_DEBOUNCE_MS + 300));
+    // The second payload still surfaces; the first is no longer silently
+    // coalesced — onDropped("superseded") records the loss.
+    expect(seen).toEqual(["chk-Z2"]);
+    expect(dropped.some((d) => d.reason === "superseded" && d.file === "plan.json")).toBe(true);
+    ac.abort();
+    await watcherDone;
+  });
 });

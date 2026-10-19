@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { WorktreeIsolationChoice, type IsolationChoice } from "./home/WorktreeIsolationChoice.js";
 import { useStore } from "../store.js";
 import {
   api,
@@ -17,17 +18,21 @@ import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
-import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import { getModelsForBackend, getModesForBackend, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import { availableHeightAbove } from "../utils/dropdown-fit.js";
+import { ModelListFallbackHint, useModelListAutoRefresh } from "./ModelListFallbackHint.js";
+import type { ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
+import { BackendAuthBadge } from "./home/BackendAuthBadge.js";
 import { CouncilToggle, coerceCouncilPairing } from "./council/index.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
-import type { SavedPrompt } from "../api.js";
+import type { SavedPrompt, IsolationPreview } from "../api.js";
 import type { SdkSessionInfo } from "../types.js";
 
 type ResumeCandidate = {
@@ -97,9 +102,26 @@ export function HomePage() {
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   );
   const [backends, setBackends] = useState<BackendInfo[]>([]);
-  const [model, setModel] = useState(() => getDefaultModel(
-    (localStorage.getItem("cc-backend") as BackendType) || "claude",
-  ));
+  // Seed from the SAME precedence switchBackend uses (saved preference >
+  // safe dynamic default > static default). Previously the first render used
+  // the static default and the saved preference only applied after toggling
+  // the backend.
+  const [model, setModel] = useState(() => {
+    const initialBackend = (localStorage.getItem("cc-backend") as BackendType) || "claude";
+    const snapshot = useStore.getState() as {
+      dynamicBackendModels?: Partial<Record<BackendType, ModelOption[]>>;
+      anthropicModel?: string | null;
+    };
+    return pickSessionDefaultModel(
+      initialBackend,
+      snapshot.dynamicBackendModels?.[initialBackend],
+      initialBackend === "claude" ? snapshot.anthropicModel : null,
+    );
+  });
+  // Set once the user explicitly picks a model, so a late-hydrating saved
+  // preference never overrides a deliberate choice.
+  const modelTouchedRef = useRef(false);
+  const savedAnthropicModel = useStore((s) => s.anthropicModel);
   const [mode, setMode] = useState(() => getDefaultMode(
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   ));
@@ -130,12 +152,16 @@ export function HomePage() {
     return true;
   });
 
-  // Council Mode controls — persisted toggle + pairing so the user's last
-  // choice survives a page refresh without resurrecting the council session
-  // itself (the server is the truth for live groups).
-  const [councilEnabled, setCouncilEnabled] = useState<boolean>(
-    () => localStorage.getItem("cc-council-enabled") === "true",
-  );
+  // Council Mode controls. New sessions are SOLO by default (aura-diet,
+  // 2026-10: AuraBench measured the observer at +0pp for 2.4x cost, full
+  // council at −6pp for 2.9x). The toggle starts from the server-side
+  // `defaultSessionMode` setting (default "solo") — NOT from the last
+  // choice, so turning council on for one risky change does not silently
+  // make every later session a paid pair. The pairing stays sticky.
+  const [councilEnabled, setCouncilEnabled] = useState<boolean>(false);
+  // Set once the user flips the toggle, so a late settings response never
+  // overrides an explicit choice.
+  const councilTouchedRef = useRef(false);
   const [councilPairing, setCouncilPairing] = useState<"claude+claude" | "claude+codex">(
     () => (localStorage.getItem("cc-council-pairing") as "claude+claude" | "claude+codex") || "claude+claude",
   );
@@ -191,6 +217,10 @@ export function HomePage() {
 
   // Dropdown states
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  // Owner bug 2026-10-18: the capped, scrollable model list opens with its
+  // scrollTop at 0, so a selected row near the bottom (e.g. Fable 5.1 in a
+  // 14-row list) would be hidden until the user scrolls. Nudge it into view
+  // once per open — never on every render, so it can't fight user scrolling.
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBranchingControls, setShowBranchingControls] = useState(false);
@@ -206,6 +236,9 @@ export function HomePage() {
   // Git branch state (owned here, driven by BranchPicker + LinearSection)
   const [gitRepoInfo, setGitRepoInfo] = useState<GitRepoInfo | null>(null);
   const [useWorktree, setUseWorktree] = useState(false);
+  // Worktree isolation (default when another live session uses this tree)
+  const [isolationPreview, setIsolationPreview] = useState<IsolationPreview | null>(null);
+  const [isolationChoice, setIsolationChoice] = useState<IsolationChoice>("isolate");
   const [selectedBranch, setSelectedBranch] = useState("");
   const [isNewBranch, setIsNewBranch] = useState(false);
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
@@ -220,6 +253,23 @@ export function HomePage() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  // The list opens upward, so its cap is the measured room above the trigger
+  // (see `availableHeightAbove`) — a viewport-relative cap still clipped the
+  // first rows on a short window. jsdom measures nothing → keep the CSS cap.
+  const modelListRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    const list = modelListRef.current;
+    const wrapper = modelDropdownRef.current;
+    if (list && wrapper) {
+      const cap = availableHeightAbove(wrapper);
+      if (cap !== null) list.style.maxHeight = `${cap}px`;
+    }
+    list
+      ?.querySelector<HTMLElement>('[data-selected="true"]')
+      // jsdom doesn't implement scrollIntoView; production browsers always do.
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [showModelDropdown]);
   const modeDropdownRef = useRef<HTMLDivElement>(null);
   const envDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -260,7 +310,11 @@ export function HomePage() {
     api.getBackends().then(setBackends).catch(() => {});
     api.getSettings().then((s) => {
       setLinearConfigured(s.linearApiKeyConfigured);
+      if (!councilTouchedRef.current) setCouncilEnabled(s.defaultSessionMode === "council");
     }).catch(() => {});
+    // Legacy key: the toggle used to persist its last value here, which made
+    // one opt-in sticky forever. Drop it so it can't resurface.
+    localStorage.removeItem("cc-council-enabled");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When backend changes, reset model and mode to defaults
@@ -299,6 +353,18 @@ export function HomePage() {
   useEffect(() => {
     void loadBackendModels(backend);
   }, [backend, loadBackendModels]);
+  // A failed fetch is retried with backoff by the slice; on top of that,
+  // coming back to the tab re-fetches while the list is still on fallback.
+  useModelListAutoRefresh(backend);
+
+  // Settings hydrate asynchronously: apply the saved Claude preference when it
+  // arrives after mount, unless the user already chose a model here.
+  useEffect(() => {
+    if (backend !== "claude" || modelTouchedRef.current) return;
+    if (typeof savedAnthropicModel === "string" && savedAnthropicModel.length > 0) {
+      setModel(savedAnthropicModel);
+    }
+  }, [backend, savedAnthropicModel]);
 
   useEffect(() => {
     if (backend !== "codex") return;
@@ -382,8 +448,26 @@ export function HomePage() {
     });
   }, [cwd]);
 
+  // Ask the server whether a new session here would share a working tree
+  // with another live session (Claude or Codex). Reset to the safe default
+  // (isolate) whenever the folder changes.
+  useEffect(() => {
+    setIsolationChoice("isolate");
+    if (!cwd || !gitRepoInfo) {
+      setIsolationPreview(null);
+      return;
+    }
+    let cancelled = false;
+    api.getIsolationPreview(cwd)
+      .then((p) => { if (!cancelled) setIsolationPreview(p); })
+      .catch(() => { if (!cancelled) setIsolationPreview(null); });
+    return () => { cancelled = true; };
+  }, [cwd, gitRepoInfo]);
+
+  // A saved preference no longer in the list is still what will launch, so
+  // show it verbatim rather than mislabelling the button as MODELS[0].
   const selectedModel = MODELS.find((m) => m.value === model)
-    || (backend === "codex" && model
+    || (model
       ? { value: model, label: model, icon: "" }
       : MODELS[0]);
   const selectedMode = MODES.find((m) => m.value === mode) || MODES[0];
@@ -707,6 +791,9 @@ export function HomePage() {
           branch: effectiveBranch,
           createBranch: effectiveCreateBranch ? true : undefined,
           useWorktree: effectiveUseWorktree ? true : undefined,
+          // Server default is `auto` (isolate only if another live session
+          // uses this tree); the user can explicitly opt out.
+          isolation: isolationChoice === "shared" ? "shared" : "auto",
           backend,
           codexInternetAccess: backend === "codex" ? true : undefined,
           resumeSessionAt: effectiveResumeSessionAt,
@@ -1008,7 +1095,7 @@ export function HomePage() {
           {/* ── Toolbar: all controls in one bar ── */}
           <div className="flex items-center gap-1 px-2.5 sm:px-3 py-2 flex-wrap">
             {/* Model selector */}
-            <div className="relative" ref={modelDropdownRef}>
+            <div className="relative" ref={modelDropdownRef} data-testid="new-session-model-picker">
               <button
                 onClick={() => {
                   if (backend === "codex" && MODELS.length === 0) return;
@@ -1028,19 +1115,53 @@ export function HomePage() {
                 </svg>
               </button>
               {showModelDropdown && (
-                <div className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                  {MODELS.map((m) => (
-                    <button
-                      key={m.value}
-                      onClick={() => { setModel(m.value); setShowModelDropdown(false); }}
-                      className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${
-                        m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"
-                      }`}
-                    >
-                      <span>{m.icon}</span>
-                      {m.label}
-                    </button>
-                  ))}
+                // Owner bug 2026-10-18: with 14 Claude models the un-capped list
+                // grew taller than a short viewport and, opening upward, pushed
+                // its first rows (Opus 5.5, Opus 5) above the screen edge where
+                // nothing can scroll to them. Cap + scroll like ModelSwitcher,
+                // and keep the cap below the viewport so no row is unreachable.
+                <div
+                  ref={modelListRef}
+                  data-testid="new-session-model-list"
+                  className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 max-h-[24rem] overflow-y-auto"
+                >
+                  {MODELS.map((m) => {
+                    // Same honesty as ModelSwitcher: retired/blocked (incl. the
+                    // broken-model table) can't start a session; registry-unknown
+                    // models carry a subtle "Untested" hint.
+                    const unavailable = m.status === "retired" || m.status === "blocked";
+                    const untested = m.untested === true && !unavailable;
+                    const title = unavailable
+                      ? m.replacement
+                        ? `${m.label} is ${m.status} — use ${m.replacement} instead`
+                        : `${m.label} is ${m.status} and can't be selected`
+                      : untested
+                        ? `${m.label} — no session has run on this model on this Aura install yet; it may fail on your plan`
+                        : undefined;
+                    return (
+                      <button
+                        key={m.value}
+                        data-selected={m.value === model ? "true" : undefined}
+                        disabled={unavailable}
+                        title={title}
+                        onClick={() => { modelTouchedRef.current = true; setModel(m.value); setShowModelDropdown(false); }}
+                        className={`w-full px-3 py-2 text-xs text-left transition-colors flex items-center gap-2 ${
+                          unavailable
+                            ? "opacity-60 cursor-not-allowed text-cc-muted"
+                            : `hover:bg-cc-hover cursor-pointer ${m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"}`
+                        }`}
+                      >
+                        <span>{m.icon}</span>
+                        <span className="flex-1 truncate">{m.label}</span>
+                        {untested && <span className="shrink-0 text-[10px] italic text-cc-muted">Untested</span>}
+                        {unavailable && (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted">
+                            {m.status === "retired" ? "Retired" : "Blocked"}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1324,6 +1445,7 @@ export function HomePage() {
                 : "No verified Codex models are available yet. Run codex once or refresh the account, then try again."}
             </div>
           )}
+          <ModelListFallbackHint backend={backend} className="px-4 pb-3" />
         </div>
 
         {/* ── Below-card controls ── */}
@@ -1360,19 +1482,46 @@ export function HomePage() {
             </div>
           )}
 
+          {/* Sign-in status for the selected backend — reassures when
+              authorized, and routes to Settings → Providers when the CLI
+              isn't usable (expired / not signed in). */}
+          {(() => {
+            const sel = backends.find((b) => b.id === backend);
+            if (!sel?.available) return null;
+            return (
+              <BackendAuthBadge
+                backendName={sel.name}
+                authState={sel.authState}
+                onFix={() => { window.location.hash = "#/settings"; }}
+              />
+            );
+          })()}
+
           {/* Council Mode toggle — subordinate to the create button.
-              Off by default; ON reveals a provider-pairing dropdown via
-              height-transition. Backend wiring of the new createSession
-              fields is deferred to a later Phase F backend commit; the
-              client persists the user's choice so it survives a refresh. */}
+              Starts from Settings → "Default session mode" (solo unless
+              changed); ON reveals a provider-pairing dropdown via
+              height-transition. */}
+          {!useWorktree && (
+            <WorktreeIsolationChoice
+              preview={isolationPreview}
+              choice={isolationChoice}
+              onChange={setIsolationChoice}
+              disabledReason={
+                backend === "claude" && councilEnabled
+                  ? "Council pairs share one workspace by design; isolation is not applied to a pair."
+                  : undefined
+              }
+            />
+          )}
+
           {backend === "claude" && (
             <div className="max-w-md mx-auto">
               <CouncilToggle
                 enabled={councilEnabled}
                 pairing={effectiveCouncilPairing}
                 onEnabledChange={(v) => {
+                  councilTouchedRef.current = true;
                   setCouncilEnabled(v);
-                  localStorage.setItem("cc-council-enabled", v ? "true" : "false");
                 }}
                 onPairingChange={(p) => {
                   setCouncilPairing(p);

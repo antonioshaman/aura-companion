@@ -46,6 +46,29 @@ export const AUTO_PROCEED_DIRECTIVE_PREFIX = "[auto-proceed:idle-timeout v1]";
 export const AUTO_PROCEED_MAX_ITERATIONS_CEILING = 10;
 
 /**
+ * aura-meta-diet AP-WIRE: operator-side ceiling from
+ * `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING`. It can only LOWER the
+ * hard cap — a value in [1, 10] wins; absent → 10. Fail-closed: anything else
+ * (non-integer, 0, > 10, garbage) keeps the hard cap and returns a warning,
+ * never raises the cap.
+ */
+export function resolveAutoProceedIterationCeiling(
+  env: Record<string, string | undefined>,
+): { ceiling: number; warning?: string } {
+  const raw = env.COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING;
+  if (raw === undefined || raw.trim() === "") return { ceiling: AUTO_PROCEED_MAX_ITERATIONS_CEILING };
+  const trimmed = raw.trim();
+  const n = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
+  if (!isBoundedInteger(n, 1, AUTO_PROCEED_MAX_ITERATIONS_CEILING)) {
+    return {
+      ceiling: AUTO_PROCEED_MAX_ITERATIONS_CEILING,
+      warning: `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING=${JSON.stringify(raw)} is not an integer in [1, ${AUTO_PROCEED_MAX_ITERATIONS_CEILING}]; using ${AUTO_PROCEED_MAX_ITERATIONS_CEILING}`,
+    };
+  }
+  return { ceiling: n };
+}
+
+/**
  * Closed-enum set of directives the v1 envelope carries. New directives
  * MUST be added here AND in the skill's recognition clause in the same
  * commit — the canary fails until both move together.

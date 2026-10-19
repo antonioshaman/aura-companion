@@ -1,7 +1,7 @@
 // Typed event map for the Companion internal event bus.
 // Each key is a namespaced event name; values are the payload passed to handlers.
 
-import type { BrowserIncomingMessage } from "./session-types.js";
+import type { BrowserIncomingMessage, ModelFallbackReason } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
@@ -109,6 +109,140 @@ export interface CompanionEventMap {
     trigger: string;
   };
 
+  /**
+   * Backend went silent while a user-driven turn was in flight — the
+   * subprocess is alive (transport open, `state=connected`, pid running),
+   * but zero stream-json frames arrived on stdout for {@link
+   * SILENT_STDIO_TIMEOUT_MS} after we dispatched the user message. This
+   * matches the 2026-09-09 pathology where the claude CLI kept burning
+   * API tokens (its own `~/.claude/projects/*.jsonl` grew) while the
+   * pipe to bun silently stopped delivering frames.
+   *
+   * The `session-orchestrator` handler SIGTERMs the subprocess and lets
+   * the existing keepalive-relaunch machinery bring it back with fresh
+   * pipes via `--resume`, so the conversation continues where it stopped.
+   */
+  "session:backend-silent": {
+    sessionId: string;
+    /** Actual elapsed ms since last stdout frame. */
+    sinceMs: number;
+    /** Free-form label from the watchdog arm site, for logs + UI copy. */
+    reason: string;
+  };
+
+  /**
+   * Rate-limit-class error detected in a CLI response, and a downgrade
+   * target exists in the {@link CLAUDE_MODEL_FALLBACK_CHAIN}. The
+   * orchestrator handler updates the session's stored `model`, SIGTERMs
+   * the subprocess, and the existing keepalive path relaunches with
+   * `--model <fallback>` + `--resume`. If no next model exists in the
+   * chain, no event fires — a bare-metal 429 with no downgrade target
+   * flows through as a normal error and the user picks up manually.
+   */
+  "session:model-fallback": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available";
+  };
+
+  /**
+   * The session's turn stopped because the account hit a usage limit
+   * (Claude 5-hour / weekly / extra-usage window, Codex usage limit).
+   * Emitted by the adapters on every limit-terminated turn with the reset
+   * time already resolved (structured fields preferred over text, fallback
+   * cap when unknown — see `usage-limit-parse.ts`). The orchestrator feeds
+   * it to the auto-resume scheduler, which dedups repeats of the same limit.
+   */
+  /** The global "auto-resume after usage limit" setting was changed via the settings API. */
+  "settings:auto-resume-changed": { enabled: boolean };
+
+  "session:usage-limit": {
+    sessionId: string;
+    backend: "claude" | "codex";
+    model: string | null;
+    resetAt: number;
+    resetSource: import("./usage-limit-parse.js").UsageLimitResetSource;
+    limitType: string | null;
+  };
+
+  /**
+   * The session's ACTIVE model changed after spawn — the user ran `/model`
+   * inside the CLI or picked a new model in the composer, and the MAIN
+   * assistant frame (`parent_tool_use_id === null`) now reports a different
+   * model. The orchestrator handler persists it to the launcher's stored
+   * `info.model` so a later relaunch (`--resume`) re-spawns on the CURRENT
+   * model instead of the frozen spawn-time `--model`. Without this, any
+   * relaunch — transport drop, server restart, idle-kill — silently reverts
+   * the session to the model it was first spawned with. Distinct from
+   * `session:model-fallback` (that is an automatic downgrade; this is the
+   * user's own choice). Sourced from the authoritative main assistant frame,
+   * never a subagent frame or a token-dominance guess, and never for an
+   * observer (its model is fixed at spawn — EC-1).
+   */
+  "session:model-active-changed": {
+    sessionId: string;
+    /** The model now in effect (the value a relaunch should spawn with). */
+    model: string;
+    /** Where we learned about the change, for logs. */
+    source: "assistant";
+  };
+
+  /**
+   * Pre-spawn substitution of a `--model` argument to work around a
+   * known upstream CLI bug (see `broken-model-substitution.ts` for the
+   * substitution table + rationale). Fires at spawn time when
+   * `resolveModelSubstitution` matches — the orchestrator handler
+   * surfaces a browser toast so the user knows their model choice was
+   * overridden (silent substitution would be user-hostile). One event
+   * per spawn.
+   */
+  "session:model-substituted": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: string;
+  };
+
+  /**
+   * The launcher moved a session to a different model for a reason OTHER
+   * than the broken-model table (today: a Codex model the account/app-server
+   * rejected, or a requested Codex slug that is not launchable). The
+   * orchestrator records it on the session state so the browser renders a
+   * persistent fallback notice with a "switch back" action.
+   */
+  "session:model-fell-back": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: ModelFallbackReason;
+    detail?: string;
+  };
+
+  /**
+   * A spawned CLI subprocess never produced its `system.init` frame
+   * within the health-canary deadline (see `INIT_FRAME_TIMEOUT_MS`
+   * in `claude-adapter.ts`). Different failure class from the
+   * silent-stdio watchdog: THAT fires 60s after a user_message,
+   * expecting a running turn to respond. This one fires on spawn +
+   * transport-open with NO user activity at all — the CLI opened
+   * its side of the stdio pipe but the very first protocol frame
+   * (init) never crossed. Historically this is the earliest
+   * observable signature of an upstream CLI regression in
+   * stream-json emit (see the 2026-09-09/10 CLI 2.1.265 incident
+   * and `feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md`).
+   *
+   * The orchestrator handler logs at WARN and broadcasts a browser
+   * toast so the operator hears about the regression on the FIRST
+   * failed spawn, not after the watchdog has burned through
+   * `MAX_AUTO_RELAUNCHES` and the group has fallen to `degraded`.
+   */
+  "session:no-init-frame": {
+    sessionId: string;
+    /** Actual elapsed ms since transport attach. */
+    sinceMs: number;
+  };
+
   // ── Backend integration ────────────────────────────────────────────
 
   /** Codex adapter created and ready to be attached to WsBridge. */
@@ -197,12 +331,42 @@ export interface CompanionEventMap {
     sessionId: string;
   };
 
+  /**
+   * Observer rigor: a liveness-probe user message (`observer-probe.ts`) was
+   * sent to a session whose council role is `observer`. Emitted by the
+   * bridge; the orchestrator keeps the probe's turn off the review channel.
+   */
+  "observer:probe-injected": {
+    sessionId: string;
+  };
+
   /** Codex synthetic observer wake failed after dispatch was accepted. */
   "observer:wake-failed": {
     /** Companion sessionId of the observer half (NOT cliSessionId). */
     sessionId: string;
     /** Best-effort transport / RPC failure string for logs and degraded copy. */
     error: string;
+    /**
+     * W14: why the wake failed. `silent` = the backend accepted the wake but
+     * then delivered no frame for {@link OBSERVER_WAKE_SILENCE_MS} (even after
+     * the codex fresh-thread retry). The orchestrator degrades the pair with
+     * `wake_produced_no_review` and auto-heals (relaunches) the observer.
+     * Absent = the send itself failed (`wake_send_failed`).
+     */
+    reason?: "send_failed" | "silent";
+  };
+
+  /**
+   * W14: the codex observer's wake turn went silent, so the adapter
+   * interrupted it and re-sent the SAME wake on a fresh thread. The
+   * orchestrator re-arms the wake→review deadline for the in-flight
+   * checkpoint so the retry gets a full review window.
+   */
+  "observer:wake-retried": {
+    sessionId: string;
+    reason: "silent";
+    previousThreadId: string | null;
+    threadId: string;
   };
 
   /**
@@ -251,6 +415,33 @@ export interface CompanionEventMap {
     downgrades: import("./session-types.js").BrowserObserverDowngrade[];
     observerModel: string;
     observerProvider: string;
+    /** P3/CONV-HONEST: changed files in the reviewed checkpoint (0 = spawn/empty). */
+    artifactsChanged: number;
+    /** P3/CONV-HONEST: how many of those the HOST saw the observer read
+     *  (`observer-read-ledger.ts`), not what the model claims. */
+    artifactsRead: number;
+    /** Observer rigor: host verdict on an empty review whose turn looked at
+     *  nothing beyond the prose artifact. Absent = no claim. */
+    verification?: "unverified";
+    /** W15: "second" = the host-run second-opinion review (`second-reviewer.ts`),
+     *  not the observer's. Absent = the observer's review. */
+    reviewerRole?: "second";
+  };
+
+  /**
+   * W15 multi-model review — second-opinion bookkeeping for the convergence
+   * tracker. `dispatched` / `queued`: a second verdict is owed for this checkpoint;
+   * `missing`: it will not come (failed, timed out, usage-limited, superseded,
+   * CLI missing). The verdict itself arrives as a `group:review` with
+   * `reviewerRole: "second"`.
+   */
+  "group:second-review": {
+    sessionGroupId: string;
+    checkpointId: string;
+    status: "dispatched" | "queued" | "missing";
+    backend: "claude" | "codex";
+    model: string;
+    reason?: string;
   };
 
   /**
@@ -261,14 +452,20 @@ export interface CompanionEventMap {
    *   - `cycle-progress`   →  counter incremented (still below threshold)
    *   - `converged`        →  counter reached threshold; UI flips badge to ✅
    *   - `revoked`          →  a STOP arrived after convergence; counter back to 0
+   *   - `not-counted`      →  a clean review that reviewed nothing (no changed
+   *                           files / no host-observed reads) or whose STOP
+   *                           grounding downgraded; counter unchanged
    *
    * Subscribers fan out to browsers as `group_update` payloads carrying
    * the new `cycleNumber` + `convergenceState` fields on `GroupRecord`.
    */
   "group:convergence": {
     sessionGroupId: string;
-    transition: "cycle-progress" | "converged" | "revoked";
+    transition: "cycle-progress" | "converged" | "revoked" | "not-counted";
     cycleNumber: number;
     convergenceThreshold: number;
+    convergenceState: "in-progress" | "converged" | "revoked";
+    /** Set on `not-counted` only. */
+    notCountedReason?: import("./convergence-tracker.js").ConvergenceNotCountedReason;
   };
 }

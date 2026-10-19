@@ -1,0 +1,53 @@
+# AuraBench task mined from PR #79 ("refactor(chat): extract shared AssistantAvatar — dedupe MessageFeed + MessageBubble").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: dedupe-assistant-avatar
+title: "The assistant avatar is one shared component instead of two drifting copies"
+start_commit: bd7a6cfebec849a82659d9f0a27811b5378ccca1
+prompt: |
+  The assistant glyph shown at the start of each assistant turn is implemented
+  twice: a local component in `MessageFeed.tsx` (28px container) and an
+  identical-by-structure copy in `MessageBubble.tsx` (24px, smaller glyph). Any
+  tweak to one silently drifts from the other.
+
+  Extract a shared `AssistantAvatar` component into
+  `web/src/components/chat/AssistantAvatar.tsx` with a `size?: "sm" | "md"`
+  prop (default `md`); its root element carries `data-testid="assistant-avatar"`
+  and `data-size` set to the size. `md` must render exactly what MessageFeed renders today
+  and `sm` exactly what MessageBubble renders today (same container/glyph
+  classes, same SVG path); the icon stays decorative for assistive tech. Use it
+  from both places, add both sizes to the Playground, and keep all existing
+  behaviour and tests green. This is a pure refactor.
+expected_files:
+  - web/src/components/MessageBubble.tsx
+  - web/src/components/MessageFeed.tsx
+  - web/src/components/Playground.tsx
+  - web/src/components/chat/AssistantAvatar.tsx
+expected_tests:
+  - web/src/components/chat/AssistantAvatar.test.tsx
+failure_modes:
+  - "the rendered markup of either consumer changes"
+  - "the avatar gains an accessible name/role"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 79
+  merge_commit: b9c3a83ac98d2fd332206dcf0f3d5c3d5870b573
+  class: refactor
+  hidden_tests:
+    - web/src/components/chat/AssistantAvatar.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:21:31.231Z"

@@ -1,8 +1,13 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { api } from "../api.js";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { api, type ModelDiagnostics } from "../api.js";
 import { useStore } from "../store.js";
+import { DeliveryHealthIndicator } from "./DeliveryHealthIndicator.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
+import type { SdkSessionInfo } from "../types.js";
+import { SessionDefaultsSettings, type DefaultSessionMode } from "./SessionDefaultsSettings.js";
+import { KnowledgeAnalysisSettings, type KbAnalysisThresholds } from "./KnowledgeAnalysisSettings.js";
+import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -10,6 +15,7 @@ interface SettingsPageProps {
 
 const CATEGORIES = [
   { id: "general", label: "General" },
+  { id: "session-defaults", label: "Session defaults" },
   { id: "webhooks", label: "Webhooks" },
   { id: "authentication", label: "Authentication" },
   { id: "notifications", label: "Notifications" },
@@ -21,6 +27,15 @@ const CATEGORIES = [
 ] as const;
 
 type CategoryId = (typeof CATEGORIES)[number]["id"];
+
+// Format a cache timestamp for the model-diagnostics panel. Accepts epoch ms
+// (Anthropic cache) or an ISO string (Codex cache); returns a locale string or
+// "unknown" when the value is missing/unparseable.
+function formatCacheTs(value: number | string | null): string {
+  if (value === null || value === "") return "unknown";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
+}
 
 export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
@@ -40,6 +55,18 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const setNotificationDesktop = useStore((s) => s.setNotificationDesktop);
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [telemetryEnabled, setTelemetryEnabled] = useState(getTelemetryPreferenceEnabled());
+  const [usageCounterEnabled, setUsageCounterEnabled] = useState(true);
+  // aura-diet defaults: solo sessions, KB consulted on demand.
+  const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
+  const [kbAutoPrime, setKbAutoPrime] = useState(false);
+  const [kbAnalysis, setKbAnalysis] = useState<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
+  const [diagnosticsMemoryReport, setDiagnosticsMemoryReport] = useState(false);
+  const kbSaveSeq = useRef(0);
+  const memSaveSeq = useRef(0);
+  const kbConfirmed = useRef<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
+  const memConfirmed = useRef(false);
+  const [secondReviewer, setSecondReviewer] = useState<SecondReviewerConfig>({ reviewer: "off", scope: "review-implement" });
+  const [autoResumeAfterLimit, setAutoResumeAfterLimit] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
   const [aiValidationAutoDeny, setAiValidationAutoDeny] = useState(false);
@@ -48,6 +75,16 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [apiKeyFocused, setApiKeyFocused] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ valid: boolean; error?: string } | null>(null);
+
+  // Model source diagnostics + manual refresh. The dropdown model lists are
+  // server-owned caches (Anthropic /v1/models keyed by API key; Codex
+  // ~/.codex/models_cache.json). This surfaces which COMPANION_HOME the server
+  // reads config from and lets the user force a fresh fetch when they've rotated
+  // a key or updated the Codex CLI out-of-band.
+  const [diagnostics, setDiagnostics] = useState<ModelDiagnostics | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<{ claude: string; codex: string } | null>(null);
 
   // Provider tokens state
   const [claudeCodeToken, setClaudeCodeToken] = useState("");
@@ -63,6 +100,12 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // the test mock upgraded to support Zustand-style subscriptions.
   const hydrateSettingsSlice = useStore((s) => s.hydrateSettings);
   const setProviderConfiguredSlice = useStore((s) => s.setProviderConfigured);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  // Council groups carry the authoritative observer identity
+  // (`observerSessionId`). The client `SdkSessionInfo` has no role field, so we
+  // derive the observer set here and exclude those halves from provider
+  // relaunch (P1/P2 #2).
+  const councilGroups = useStore((s) => s.groups);
   // PLAN-aura-dynamic-model-list Task 8: re-fetch the dynamic Claude
   // model list after a successful Anthropic API key save. The store
   // action is idempotent + inflight-token-guarded so the trigger is safe
@@ -70,7 +113,9 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const loadBackendModelsSlice = useStore((s) => s.loadBackendModels);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
+  const [providerRelaunchNotice, setProviderRelaunchNotice] = useState("");
   const [providerError, setProviderError] = useState("");
+  const [providerRelaunching, setProviderRelaunching] = useState<null | "claude" | "codex">(null);
 
   // Auth section state
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -158,6 +203,19 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           });
         }
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
+        if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
+        if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
+        if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
+        if (s.kbAnalysis) {
+          setKbAnalysis(s.kbAnalysis);
+          kbConfirmed.current = s.kbAnalysis;
+        }
+        if (typeof s.diagnosticsMemoryReport === "boolean") {
+          setDiagnosticsMemoryReport(s.diagnosticsMemoryReport);
+          memConfirmed.current = s.diagnosticsMemoryReport;
+        }
+        if (s.councilSecondReviewer) setSecondReviewer(s.councilSecondReviewer);
+        if (typeof s.autoResumeAfterLimit === "boolean") setAutoResumeAfterLimit(s.autoResumeAfterLimit);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
@@ -172,6 +230,42 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
     // Fetch auth token in parallel (non-blocking)
     api.getAuthToken().then((res) => setAuthToken(res.token)).catch(() => {});
   }, []);
+
+  const loadDiagnostics = useCallback(async () => {
+    setDiagnosticsError("");
+    try {
+      const d = await api.getModelDiagnostics();
+      setDiagnostics(d);
+    } catch (e: unknown) {
+      setDiagnosticsError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDiagnostics();
+  }, [loadDiagnostics]);
+
+  async function onRefreshModels() {
+    setRefreshing(true);
+    setRefreshResult(null);
+    setDiagnosticsError("");
+    try {
+      const result = await api.refreshModels();
+      setRefreshResult(result);
+      setTimeout(() => setRefreshResult(null), 5000);
+      // Repopulate the dropdowns from the freshly-primed caches. Both are
+      // idempotent + inflight-guarded in the store, safe to fire together.
+      if (typeof loadBackendModelsSlice === "function") {
+        void loadBackendModelsSlice("claude");
+        void loadBackendModelsSlice("codex");
+      }
+      await loadDiagnostics();
+    } catch (e: unknown) {
+      setDiagnosticsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
@@ -233,6 +327,78 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
       if (field === "aiValidationEnabled") setAiValidationEnabled(current);
       else if (field === "aiValidationAutoApprove") setAiValidationAutoApprove(current);
       else setAiValidationAutoDeny(current);
+    }
+  }
+
+  // Council-aware (P1/P2 #2): never relaunch a council OBSERVER half from
+  // Settings — it is a server-managed companion, not user-driven work, and
+  // restarting it independently of its orchestrator can interrupt an in-flight
+  // review. Its auth is refreshed on the server's own relaunch path.
+  function getSessionsToRelaunchForProviders(
+    sessions: SdkSessionInfo[],
+    providers: Array<"claude" | "codex">,
+    observerSessionIds: Set<string>,
+  ): SdkSessionInfo[] {
+    const wanted = new Set(providers);
+    return sessions.filter((session) => {
+      if (session.archived) return false;
+      if (observerSessionIds.has(session.sessionId)) return false;
+      const backend = session.backendType === "codex" ? "codex" : "claude";
+      return wanted.has(backend);
+    });
+  }
+
+  // Observer halves of council groups are server-managed companions; never
+  // relaunch them from Settings (P1/P2 #2).
+  const observerSessionIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of councilGroups.values()) ids.add(group.observerSessionId);
+    return ids;
+  }, [councilGroups]);
+
+  // Memoised counts so the disabled/label/className expressions don't re-filter
+  // the session list four times per render (P3 #15).
+  const claudeRelaunchCount = useMemo(
+    () => getSessionsToRelaunchForProviders(sdkSessions, ["claude"], observerSessionIds).length,
+    [sdkSessions, observerSessionIds],
+  );
+  const codexRelaunchCount = useMemo(
+    () => getSessionsToRelaunchForProviders(sdkSessions, ["codex"], observerSessionIds).length,
+    [sdkSessions, observerSessionIds],
+  );
+
+  async function relaunchProviderSessions(
+    providers: Array<"claude" | "codex">,
+    options: { showNoSessionsNotice?: boolean } = {},
+  ): Promise<void> {
+    // Read the live session list at action time, not the render-snapshot the
+    // closure captured — a session may have ended/spawned during the await (#15).
+    const liveState = useStore.getState();
+    const liveSessions = liveState.sdkSessions;
+    const liveObserverIds = new Set<string>();
+    for (const group of liveState.groups.values()) liveObserverIds.add(group.observerSessionId);
+    const sessionsToRelaunch = getSessionsToRelaunchForProviders(liveSessions, providers, liveObserverIds);
+    if (sessionsToRelaunch.length === 0) {
+      if (options.showNoSessionsNotice) {
+        const label = providers.length === 1 ? providers[0] : "selected";
+        setProviderRelaunchNotice(`No active ${label} sessions to relaunch.`);
+      }
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      sessionsToRelaunch.map((session) => api.relaunchSession(session.sessionId)),
+    );
+    const failedCount = results.filter((result) => result.status === "rejected").length;
+    const relaunchedCount = sessionsToRelaunch.length - failedCount;
+    // Partial failure is the actionable case: surface ONE message in the error
+    // register rather than a conflicting info+error pair (Friedman F5 / #11).
+    if (failedCount > 0) {
+      setProviderError(
+        `Relaunched ${relaunchedCount} of ${sessionsToRelaunch.length} session(s); ${failedCount} could not be relaunched and may still use the old credentials.`,
+      );
+    } else {
+      setProviderRelaunchNotice(`Relaunched ${relaunchedCount} session(s) to apply credentials.`);
     }
   }
 
@@ -344,6 +510,94 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 <p className="text-xs text-cc-muted px-1">
                   Last commit shows only uncommitted changes. Default branch shows all changes since diverging from main.
                 </p>
+              </div>
+            </section>
+
+            {/* Session defaults (aura-diet: solo by default, KB on demand) */}
+            <section id="session-defaults" ref={setSectionRef("session-defaults")}>
+              <h2 className="text-sm font-semibold text-cc-fg mb-4">Session defaults</h2>
+              <SessionDefaultsSettings
+                mode={defaultSessionMode}
+                kbAutoPrime={kbAutoPrime}
+                autoResumeAfterLimit={autoResumeAfterLimit}
+                disabled={loading}
+                onModeChange={async (next) => {
+                  const prev = defaultSessionMode;
+                  setDefaultSessionMode(next);
+                  try {
+                    await api.updateSettings({ defaultSessionMode: next });
+                  } catch (e: unknown) {
+                    setDefaultSessionMode(prev);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                onKbAutoPrimeChange={async (next) => {
+                  setKbAutoPrime(next);
+                  try {
+                    await api.updateSettings({ kbAutoPrime: next });
+                  } catch (e: unknown) {
+                    setKbAutoPrime(!next);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                onAutoResumeAfterLimitChange={async (next) => {
+                  setAutoResumeAfterLimit(next);
+                  try {
+                    await api.updateSettings({ autoResumeAfterLimit: next });
+                  } catch (e: unknown) {
+                    setAutoResumeAfterLimit(!next);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              />
+              <div className="mt-4" id="knowledge-analysis">
+                <KnowledgeAnalysisSettings
+                  thresholds={kbAnalysis}
+                  memoryReport={diagnosticsMemoryReport}
+                  disabled={loading}
+                  onThresholdsChange={async (next) => {
+                    // Review P2-1: only the LATEST save may set the value, and a
+                    // failure rolls back to the last server-confirmed value.
+                    const mine = ++kbSaveSeq.current;
+                    setKbAnalysis(next);
+                    try {
+                      const saved = await api.updateSettings({ kbAnalysis: next });
+                      if (saved.kbAnalysis) kbConfirmed.current = saved.kbAnalysis;
+                      if (mine === kbSaveSeq.current && saved.kbAnalysis) setKbAnalysis(saved.kbAnalysis);
+                    } catch (e: unknown) {
+                      if (mine === kbSaveSeq.current) setKbAnalysis(kbConfirmed.current);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                  onMemoryReportChange={async (next) => {
+                    const mine = ++memSaveSeq.current;
+                    setDiagnosticsMemoryReport(next);
+                    try {
+                      const saved = await api.updateSettings({ diagnosticsMemoryReport: next });
+                      if (typeof saved.diagnosticsMemoryReport === "boolean") memConfirmed.current = saved.diagnosticsMemoryReport;
+                    } catch (e: unknown) {
+                      if (mine === memSaveSeq.current) setDiagnosticsMemoryReport(memConfirmed.current);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                />
+              </div>
+              <div className="mt-4">
+                <SecondReviewerSettings
+                  value={secondReviewer}
+                  disabled={loading}
+                  onChange={async (next) => {
+                    const prev = secondReviewer;
+                    setSecondReviewer(next);
+                    try {
+                      const saved = await api.updateSettings({ councilSecondReviewer: next });
+                      if (saved.councilSecondReviewer) setSecondReviewer(saved.councilSecondReviewer);
+                    } catch (e: unknown) {
+                      setSecondReviewer(prev);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                />
               </div>
             </section>
 
@@ -644,25 +898,39 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </p>
                 </div>
 
-                {providerError && (
-                  <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
-                    {providerError}
-                  </div>
-                )}
+                {/* Live regions persist in the DOM so async status changes are
+                    announced (a11y F1 / Friedman F3). Only the inner text toggles. */}
+                <div role="alert" aria-live="assertive" aria-atomic="true">
+                  {providerError && (
+                    <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
+                      {providerError}
+                    </div>
+                  )}
+                </div>
 
-                {providerSaved && (
-                  <div className="px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
-                    Provider settings saved.
-                  </div>
-                )}
+                <div role="status" aria-live="polite" aria-atomic="true" className="space-y-2 empty:hidden">
+                  {providerSaved && (
+                    <div className="px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
+                      Provider settings saved.
+                    </div>
+                  )}
+
+                  {providerRelaunchNotice && (
+                    <div className="px-3 py-2 rounded-lg bg-cc-info/10 border border-cc-info/20 text-xs text-cc-info">
+                      {providerRelaunchNotice}
+                    </div>
+                  )}
+                </div>
 
                 <button
                   type="button"
+                  aria-busy={providerSaving}
                   disabled={providerSaving || (!claudeCodeToken.trim() && !openaiApiKey.trim())}
                   onClick={async () => {
                     setProviderSaving(true);
                     setProviderError("");
                     setProviderSaved(false);
+                    setProviderRelaunchNotice("");
                     try {
                       const payload: { claudeCodeOAuthToken?: string; openaiApiKey?: string } = {};
                       if (claudeCodeToken.trim()) payload.claudeCodeOAuthToken = claudeCodeToken.trim();
@@ -682,6 +950,28 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       setOpenaiApiKey("");
                       setProviderSaved(true);
                       setTimeout(() => setProviderSaved(false), 1800);
+                      const changedProviders: Array<"claude" | "codex"> = [];
+                      if (payload.claudeCodeOAuthToken) changedProviders.push("claude");
+                      if (payload.openaiApiKey) changedProviders.push("codex");
+                      // Credential-only save (Friedman F1 / #3): saving must NOT
+                      // silently kill live sessions. Disclose how many still run
+                      // on the old credentials and let the user apply them via
+                      // the explicit Relaunch button(s) below.
+                      const affectedState = useStore.getState();
+                      const affectedObserverIds = new Set<string>();
+                      for (const group of affectedState.groups.values()) {
+                        affectedObserverIds.add(group.observerSessionId);
+                      }
+                      const affected = getSessionsToRelaunchForProviders(
+                        affectedState.sdkSessions,
+                        changedProviders,
+                        affectedObserverIds,
+                      ).length;
+                      if (affected > 0) {
+                        setProviderRelaunchNotice(
+                          `${affected} active session(s) still use the previous credentials. Use the Relaunch button(s) below to apply them.`,
+                        );
+                      }
                     } catch (err: unknown) {
                       setProviderError(err instanceof Error ? err.message : String(err));
                     } finally {
@@ -696,6 +986,90 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 >
                   {providerSaving ? "Saving..." : "Save Provider Settings"}
                 </button>
+                <p id="provider-relaunch-help" className="text-xs text-cc-muted">
+                  Saving stores credentials only. Running sessions keep their old
+                  credentials until relaunched — use the buttons below to apply
+                  new credentials to active sessions.
+                </p>
+
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {(() => {
+                    const claudeBusy = providerRelaunching === "claude";
+                    const claudeDisabled = providerRelaunching !== null || claudeRelaunchCount === 0;
+                    return (
+                      <button
+                        type="button"
+                        aria-disabled={claudeDisabled}
+                        aria-busy={claudeBusy}
+                        aria-describedby="provider-relaunch-help"
+                        onClick={async () => {
+                          // Guard replaces native `disabled` so the control stays
+                          // focusable/discoverable for keyboard+SR users (a11y F3).
+                          if (claudeDisabled) return;
+                          setProviderError("");
+                          setProviderSaved(false);
+                          setProviderRelaunchNotice("Relaunching Claude sessions…");
+                          setProviderRelaunching("claude");
+                          try {
+                            await relaunchProviderSessions(["claude"], { showNoSessionsNotice: true });
+                          } catch (err: unknown) {
+                            setProviderError(err instanceof Error ? err.message : String(err));
+                          } finally {
+                            setProviderRelaunching(null);
+                          }
+                        }}
+                        className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                          claudeDisabled
+                            ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                            : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                        }`}
+                      >
+                        {claudeBusy
+                          ? "Relaunching Claude…"
+                          : claudeRelaunchCount === 0
+                            ? "No Active Claude Sessions"
+                            : `Relaunch ${claudeRelaunchCount} Active Claude Session(s)`}
+                      </button>
+                    );
+                  })()}
+                  {(() => {
+                    const codexBusy = providerRelaunching === "codex";
+                    const codexDisabled = providerRelaunching !== null || codexRelaunchCount === 0;
+                    return (
+                      <button
+                        type="button"
+                        aria-disabled={codexDisabled}
+                        aria-busy={codexBusy}
+                        aria-describedby="provider-relaunch-help"
+                        onClick={async () => {
+                          if (codexDisabled) return;
+                          setProviderError("");
+                          setProviderSaved(false);
+                          setProviderRelaunchNotice("Relaunching Codex sessions…");
+                          setProviderRelaunching("codex");
+                          try {
+                            await relaunchProviderSessions(["codex"], { showNoSessionsNotice: true });
+                          } catch (err: unknown) {
+                            setProviderError(err instanceof Error ? err.message : String(err));
+                          } finally {
+                            setProviderRelaunching(null);
+                          }
+                        }}
+                        className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                          codexDisabled
+                            ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                            : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                        }`}
+                      >
+                        {codexBusy
+                          ? "Relaunching Codex…"
+                          : codexRelaunchCount === 0
+                            ? "No Active Codex Sessions"
+                            : `Relaunch ${codexRelaunchCount} Active Codex Session(s)`}
+                      </button>
+                    );
+                  })()}
+                </div>
               </div>
             </section>
 
@@ -802,6 +1176,72 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </div>
                 )}
               </form>
+
+              <div className="mt-6 pt-5 border-t border-cc-border">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="text-sm font-medium text-cc-fg">Model list</h3>
+                    <p className="mt-0.5 text-xs text-cc-muted">
+                      Refresh the available models if you rotated a key or updated a CLI.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onRefreshModels}
+                    disabled={refreshing}
+                    className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                      refreshing
+                        ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                        : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                    }`}
+                  >
+                    {refreshing ? "Refreshing..." : "Refresh models"}
+                  </button>
+                </div>
+
+                {refreshResult && (
+                  <div className="mb-3 px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
+                    Refreshed — Claude: {refreshResult.claude}, Codex: {refreshResult.codex}.
+                  </div>
+                )}
+
+                {diagnosticsError && (
+                  <div className="mb-3 px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
+                    {diagnosticsError}
+                  </div>
+                )}
+
+                {diagnostics && (
+                  <dl className="space-y-1.5 text-xs">
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Config home</dt>
+                      <dd className="text-cc-fg font-mono truncate" title={diagnostics.companionHome}>
+                        {diagnostics.companionHome}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Anthropic cache</dt>
+                      <dd className="text-cc-fg text-right">
+                        {diagnostics.anthropic.cachePresent
+                          ? `${diagnostics.anthropic.cacheModelCount ?? "?"} models · ${formatCacheTs(diagnostics.anthropic.cacheFetchedAt)}`
+                          : diagnostics.anthropic.keyConfigured
+                            ? "no cache yet"
+                            : "no key configured"}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Codex cache</dt>
+                      <dd className="text-cc-fg text-right">
+                        {diagnostics.codex.present
+                          ? `${diagnostics.codex.listedModelCount ?? "?"} models${diagnostics.codex.clientVersion ? ` · v${diagnostics.codex.clientVersion}` : ""} · ${formatCacheTs(diagnostics.codex.fetchedAt)}`
+                          : "not installed"}
+                      </dd>
+                    </div>
+                  </dl>
+                )}
+              </div>
+
+              <DeliveryHealthIndicator />
             </section>
 
             {/* AI Validation */}
@@ -892,6 +1332,30 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 <p className="text-xs text-cc-muted">
                   Browser Do Not Track is respected automatically.
                 </p>
+                <p className="text-xs text-cc-muted pt-1">
+                  Anonymous usage counter — a random install id and an online/heartbeat
+                  ping (no prompts, code, or session content) that powers the global
+                  "online · active · total" count. On by default; turn it off here to stop
+                  reporting.
+                </p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const next = !usageCounterEnabled;
+                    setUsageCounterEnabled(next);
+                    try {
+                      await api.updateSettings({ telemetryEnabled: next });
+                    } catch (e: unknown) {
+                      setUsageCounterEnabled(!next);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                  aria-pressed={usageCounterEnabled}
+                  className="w-full flex items-center justify-between px-3 py-3 min-h-[44px] rounded-lg text-sm bg-cc-hover text-cc-fg hover:bg-cc-active transition-colors cursor-pointer"
+                >
+                  <span>Anonymous usage counter</span>
+                  <span className="text-xs text-cc-muted">{usageCounterEnabled ? "On" : "Off"}</span>
+                </button>
               </div>
             </section>
 

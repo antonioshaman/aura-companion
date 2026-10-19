@@ -139,3 +139,44 @@ describe("rerunGrounding — hermetic", () => {
     expect(r.recomputed).toEqual([]);
   });
 });
+
+// B2 (oracle v2): line facts frozen in the sidecar drive the line checks
+// hermetically; `lineChecks: false` reproduces the pre-B2 path-only gate —
+// the "before" column of the precision before/after.
+describe("rerunGrounding — B2 line facts", () => {
+  const withLines = (): EvalSidecarArtifact =>
+    sidecar({
+      manifest_partition: { delta: ["a.ts"], carried: [], dropped: [] },
+      raw_findings: [
+        { severity: "STOP", claim: "foo breaks", evidence_path: "a.ts", evidence_lines: [2, 2] },
+        { severity: "STOP", claim: "past eof", evidence_path: "a.ts", evidence_lines: [50, 50] },
+        { severity: "STOP", claim: "path only", evidence_path: "a.ts" },
+      ],
+      grounding_inputs: {
+        existence_by_path: { "a.ts": true },
+        line_facts_by_path: { "a.ts": { line_count: 3, changed_ranges: [[2, 2]], cited_lines: { "2": "foo();" } } },
+      },
+      grounding_downgrades: [{ index: 1, original_severity: "STOP", reason: "evidence_lines_out_of_range" }],
+    });
+
+  it("recomputes line downgrades and weak evidence from the frozen facts", () => {
+    const r = rerunGrounding(withLines());
+    expect(r.deterministic).toBe(true);
+    expect(r.weak_evidence).toEqual([{ index: 2, reason: "no_cited_lines" }]);
+  });
+
+  it("lineChecks:false reruns the path-only gate", () => {
+    const r = rerunGrounding(withLines(), { lineChecks: false });
+    expect(r.recomputed).toEqual([]);
+    expect(r.weak_evidence).toEqual([]);
+  });
+
+  it("a sidecar without line facts reruns exactly as the path-only gate (v1 compatibility)", () => {
+    const s = withLines();
+    delete s.grounding_inputs.line_facts_by_path;
+    s.grounding_downgrades = [];
+    const r = rerunGrounding(s);
+    expect(r.deterministic).toBe(true);
+    expect(r.weak_evidence).toEqual([]);
+  });
+});

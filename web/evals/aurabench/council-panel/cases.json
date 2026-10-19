@@ -1,0 +1,144 @@
+{
+  "_doc": "COUNCIL-PANEL-BENCH cases (P6). `title` is the PR's own merged title (commitizen prefix dropped) — what a real reviewer is given. Each case is a historical PR whose merged state carried defects that a LATER PR fixed on the same code. base..head is the diff the council reviews; knownDefects is the ground truth for recall. Evidence: fixedBy commits + (where one exists) the archived FINAL-REVIEW. Lines are hints at `head` (matching tolerates drift); files are exact repo paths at `head`. changedDomains is the closed-vocab domain set the diff touches (same vocabulary as web/scripts/__fixtures__/council-catalog/profiles.json).",
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "pr54-auto-proceed-wireup",
+      "pr": 54,
+      "base": "3dee080^",
+      "head": "3dee080",
+      "title": "auto-proceed Task 11 wire-up — 11.6 + 11.7 + 11.8 integration",
+      "changedDomains": ["backend-architecture", "llm-pipeline", "process-lifecycle", "protocol-correctness", "security", "test-quality"],
+      "evidence": "docs/history/council/review-output/2026-05-15-0336/FINAL-REVIEW.md (7 P1, reviewed at 3dee080); fixed by #55 (5 P1), #56 (P1 #6, #7), #57 (P1 #4)",
+      "knownDefects": [
+        { "id": "denylist-fails-open", "kind": "defect", "severity": "P1", "fixedBy": ["e9e22ca"],
+          "summary": "Idle-timer denylist gate fails open silently when idleTimerProbe is null.",
+          "locations": [{ "file": "web/server/claude-adapter.ts", "lines": [896, 913] }],
+          "keywords": ["idletimerprobe", "fail open", "fails open", "denylist", "probe"] },
+        { "id": "synthetic-send-toctou", "kind": "defect", "severity": "P1", "fixedBy": ["e9e22ca"],
+          "summary": "Synthetic-send path lacks the orchestrator turn-state gate; TOCTOU allows duplicate user frames.",
+          "locations": [{ "file": "web/server/claude-adapter.ts", "lines": [1120, 1180] }],
+          "keywords": ["toctou", "turn-state", "turn state", "duplicate", "sendorchestratorsyntheticframe", "synthetic"] },
+        { "id": "synthetic-inflight-torn-read", "kind": "defect", "severity": "P1", "fixedBy": ["e9e22ca"],
+          "summary": "isSyntheticTurnInFlight double-get torn read plus operator-precedence footgun.",
+          "locations": [{ "file": "web/server/idle-timer-manager.ts", "lines": [372, 375] }],
+          "keywords": ["issyntheticturninflight", "torn", "precedence", "double"] },
+        { "id": "wake-outcome-nonexhaustive", "kind": "defect", "severity": "P1", "fixedBy": ["38dfdb1"],
+          "summary": "Non-exhaustive BridgeObserverWakeOutcome mapping in index.ts; new variants silently stringify.",
+          "locations": [{ "file": "web/server/index.ts", "lines": [147, 158] }],
+          "keywords": ["bridgeobserverwakeoutcome", "exhaustive", "never", "switch"] },
+        { "id": "archive-clear-after-await", "kind": "defect", "severity": "P1", "fixedBy": ["e9e22ca"],
+          "summary": "archiveSession clears the pending synthetic turn only after the archiveGroup await (race).",
+          "locations": [{ "file": "web/server/session-orchestrator.ts", "lines": [2740, 2748] }],
+          "keywords": ["archivesession", "clearpendingsyntheticturn", "archivegroup", "await", "race"] },
+        { "id": "recorder-origin-untested", "kind": "test-gap", "severity": "P1", "fixedBy": ["fcbc784"],
+          "summary": "No replay test exercises the server:auto-proceed recorder origin.",
+          "locations": [{ "file": "web/server/recorder.ts", "lines": [73, 85] }, { "file": "web/server/recorder.test.ts" }],
+          "keywords": ["server:auto-proceed", "recorder", "origin", "replay"] },
+        { "id": "orchestrator-wiring-untested", "kind": "test-gap", "severity": "P1", "fixedBy": ["fcbc784"],
+          "summary": "Session-orchestrator wiring of the new call sites has no behavioural test (mock built, never asserted).",
+          "locations": [{ "file": "web/server/session-orchestrator.test.ts" }, { "file": "web/server/session-orchestrator.ts", "lines": [495, 509] }],
+          "keywords": ["onuserframeobserved", "noteusermessage", "wiring", "never asserted", "behavioural", "behavioral"] }
+      ]
+    },
+    {
+      "id": "pr91-dynamic-models",
+      "pr": 91,
+      "base": "8314318^",
+      "head": "8314318",
+      "title": "dynamic Claude model list via Anthropic /v1/models",
+      "changedDomains": ["accessibility", "backend-architecture", "filesystem-persistence", "frontend-architecture", "protocol-correctness", "security", "test-quality", "ui-visual-quality", "ux-flow"],
+      "evidence": "docs/history/council/review-output/2026-06-04-1826/FINAL-REVIEW.md (4 P1 on the burndown that was squashed into #91); fixed by #92 (a96a38a)",
+      "knownDefects": [
+        { "id": "raf-autofocus-test-vacuous", "kind": "test-gap", "severity": "P1", "fixedBy": ["a96a38a"],
+          "summary": "rAF autofocus test simulates focus instead of verifying it lands.",
+          "locations": [{ "file": "web/src/components/ModelSwitcher.test.tsx", "lines": [401, 423] }, { "file": "web/src/components/ModelSwitcher.tsx", "lines": [169, 182] }],
+          "keywords": ["requestanimationframe", "raf", "autofocus", "vacuous", "simulat"] },
+        { "id": "coalesced-signal-dead", "kind": "defect", "severity": "P1", "fixedBy": ["a96a38a"],
+          "summary": "resolveCoalescedSignal is unreachable in production: no caller threads parentSignal.",
+          "locations": [{ "file": "web/server/routes.ts", "lines": [1586, 1586] }, { "file": "web/server/anthropic-models-cache.ts", "lines": [665, 665] }],
+          "keywords": ["resolvecoalescedsignal", "parentsignal", "dead", "unreachable", "abort"] },
+        { "id": "footnote-listbox-test-vacuous", "kind": "test-gap", "severity": "P1", "fixedBy": ["a96a38a"],
+          "summary": "\"Footnote not inside listbox\" test queries the wrong renderer instance.",
+          "locations": [{ "file": "web/src/components/ModelSwitcher.test.tsx", "lines": [476, 491] }],
+          "keywords": ["footnote", "listbox", "renderer", "vacuous", "within"] },
+        { "id": "reject-after-success-test-vacuous", "kind": "test-gap", "severity": "P1", "fixedBy": ["a96a38a"],
+          "summary": "Settings-slice reject-after-success test cannot fail: both branches set the same state shape.",
+          "locations": [{ "file": "web/src/store/settings-slice.test.ts" }, { "file": "web/src/store/settings-slice.ts", "lines": [259, 291] }],
+          "keywords": ["reject", "loadbackendmodels", "rejected", "identical", "vacuous"] }
+      ]
+    },
+    {
+      "id": "pr172-173-codex-init",
+      "pr": 173,
+      "base": "ae5a288^",
+      "head": "5208108",
+      "title": "retry init thread/start on \"Not initialized\" race + re-arm spawn checkpoint after observer relaunch; make onInitError additive so the launcher's recovery survives bridge attach",
+      "changedDomains": ["backend-architecture", "filesystem-persistence", "process-lifecycle", "protocol-correctness", "security", "test-quality"],
+      "evidence": "Carmack council review of #172/#173 (3 P1, not archived); fixed by #174 (1a68032), whose message lists the P1s",
+      "knownDefects": [
+        { "id": "checkpoint-review-names-not-group-scoped", "kind": "defect", "severity": "P1", "fixedBy": ["1a68032"],
+          "summary": "Checkpoint and review filenames are not group-scoped, so two council pairs sharing a workspace overwrite each other's files.",
+          "locations": [{ "file": "web/server/session-orchestrator.ts" }, { "file": "web/server/review-watcher.ts" }, { "file": "web/server/checkpoint-watcher.ts" }, { "file": ".council/prompts/observer-system.md" }],
+          "keywords": ["group-scope", "groupid", "overwrite", "collision", "share", "same workspace", "filename"] },
+        { "id": "spawn-checkpoint-rearm-manual-only", "kind": "defect", "severity": "P1", "fixedBy": ["1a68032"],
+          "summary": "The spawn-checkpoint poll is re-armed only on the manual REST relaunch, not on auto-relaunch or boot recovery.",
+          "locations": [{ "file": "web/server/session-orchestrator.ts", "lines": [1920, 1960] }, { "file": "web/server/cli-launcher.ts" }, { "file": "web/server/routes.ts" }],
+          "keywords": ["re-arm", "rearm", "relaunch", "auto-relaunch", "boot recovery", "spawn checkpoint", "spawncheckpoint"] },
+        { "id": "deadline-rescan-ownership-untested", "kind": "test-gap", "severity": "P1", "fixedBy": ["1a68032"],
+          "summary": "The deadline-rescan ownership branch (recovery-path mirror of the headline fix) has no tests.",
+          "locations": [{ "file": "web/server/session-orchestrator.ts" }, { "file": "web/server/session-orchestrator.test.ts" }],
+          "keywords": ["deadline", "rescan", "ownership", "untested", "no test"] }
+      ]
+    },
+    {
+      "id": "pr120-codex-review-normalize",
+      "pr": 120,
+      "base": "49643d6^",
+      "head": "49643d6",
+      "title": "normalize codex observer reviews server-side so they parse",
+      "changedDomains": ["backend-architecture", "llm-pipeline", "protocol-correctness", "security", "test-quality"],
+      "evidence": "fixed by #122 (9b98563): the normalizer fixed only the envelope; every Codex review with a non-empty findings array was still dropped",
+      "knownDefects": [
+        { "id": "codex-findings-not-normalized", "kind": "defect", "severity": "P1", "fixedBy": ["9b98563"],
+          "summary": "normalizeCodexObserverReviewRaw normalizes only the envelope; Codex-native findings (severity critical/high, file, line, title) still fail parsing, so any review that found something is dropped.",
+          "locations": [{ "file": "web/server/council-types.ts", "lines": [360, 500] }],
+          "keywords": ["severity", "critical", "evidence_path", "finding shape", "findings", "dropped", "non-empty"] }
+      ]
+    },
+    {
+      "id": "pr122-codex-finding-shape",
+      "pr": 122,
+      "base": "9b98563^",
+      "head": "9b98563",
+      "title": "normalize codex finding shape so non-empty reviews parse",
+      "changedDomains": ["backend-architecture", "llm-pipeline", "protocol-correctness", "security", "test-quality"],
+      "evidence": "fixed by #123 (35eb5b9): a finding with line 0 maps to evidence_lines [0,0], parseLineRange rejects it and the whole normalized review is dropped",
+      "knownDefects": [
+        { "id": "line-zero-drops-review", "kind": "defect", "severity": "P1", "fixedBy": ["35eb5b9"],
+          "summary": "normalizeCodexFinding maps any integer line (including 0) to evidence_lines; line 0 fails parseLineRange and drops the entire review.",
+          "locations": [{ "file": "web/server/council-types.ts", "lines": [532, 560] }],
+          "keywords": ["line 0", "line: 0", "line:0", "zero", "parselinerange", "evidence_lines", "whole review", "entire review"] }
+      ]
+    },
+    {
+      "id": "pr189-silent-stdio-drift",
+      "pr": 189,
+      "base": "6467311^",
+      "head": "6467311",
+      "title": "silent-stdio drift detector — periodic transcript vs jsonl freshness check",
+      "changedDomains": ["backend-architecture", "filesystem-persistence", "process-lifecycle", "realtime-streaming", "security", "test-quality"],
+      "evidence": "fixed by #201 (4f47e7a, signal polluted by non-CLI transcript writes; verified on prod) and #204 (902965c, slug ignores underscores; verified on prod)",
+      "knownDefects": [
+        { "id": "transcript-mtime-signal-polluted", "kind": "defect", "severity": "P1", "fixedBy": ["4f47e7a"],
+          "summary": "Drift is gated on the transcript file mtime, which Bun also rewrites on non-CLI events (browser subscribe, state mutations, recording flushes), so a silently dead stdio pipe is never detected.",
+          "locations": [{ "file": "web/server/silent-stdio-drift-detector.ts" }, { "file": "web/server/session-orchestrator.ts" }],
+          "keywords": ["transcript", "mtime", "non-cli", "browser", "polluted", "fresh", "last frame", "false negative"] },
+        { "id": "jsonl-slug-ignores-underscore", "kind": "defect", "severity": "P1", "fixedBy": ["902965c"],
+          "summary": "resolveJsonlPath replaces only '/' with '-'; the CLI also maps '_', so cwds with underscores resolve to a missing jsonl and the detector is blind.",
+          "locations": [{ "file": "web/server/silent-stdio-drift-detector.ts", "lines": [220, 230] }],
+          "keywords": ["resolvejsonlpath", "slug", "underscore", "projects"] }
+      ]
+    }
+  ]
+}

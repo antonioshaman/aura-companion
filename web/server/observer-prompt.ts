@@ -18,6 +18,7 @@
 import { readFileSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve as resolvePath, sep } from "node:path";
+import { CLAIM_LANGUAGE_NAMES, type ClaimLanguage } from "./observer-language.js";
 import {
   OBSERVER_WAKE_MAX_BYTES,
   OBSERVER_WAKE_MAX_PATHS_PER_SECTION,
@@ -99,7 +100,7 @@ export function parseObserverPromptHeader(raw: string): number | null {
  * `sourcePath` must be absolute — relative paths are a misconfiguration
  * vector (relative to *what*? process cwd is unstable).
  *
- * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 11
+ * Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 11
  * rewrote the prior anti-fallback wording — the schema-mismatch hazard
  * is now mitigated at the resolver layer, not by refusing fallback
  * everywhere.
@@ -578,11 +579,12 @@ function hasUnsafeWireCharacters(s: string): boolean {
  * 1. `# Council Checkpoint — <phase>` — H1 preamble naming the action.
  * 2. Single prose sentence pointing at the manifest below.
  * 3. ```json``` fence carrying an {@link ObserverWakePayload}. Version is
- *    the first key; echo fields (`session_group_id`, `checkpoint_id`,
- *    `phase`, `checkpoint_seq`) precede the content arrays so the
- *    observer's review can copy-paste them rather than synthesise.
- * 4. Single imperative directive sentence pointing at the system
- *    prompt's ObserverReviewPayload contract.
+ *    the first key; identity fields (`session_group_id`, `checkpoint_id`,
+ *    `phase`, `checkpoint_seq`) precede the content arrays. Since P3/B1
+ *    they are context only — the observer no longer echoes them; the
+ *    host stamps them on the review envelope (`observer-reply.ts`).
+ * 4. Single imperative directive sentence naming the reply channel: a
+ *    bare findings array as the observer's final message.
  *
  * Defensive input-side validation (Hunt P1; Willison P8):
  * - Each manifest section is capped at
@@ -613,13 +615,17 @@ export function buildObserverWakePayload(args: {
    *  the resolving wrapper {@link assertWakeManifestPathAllowed}. */
   workspaceRoot: string;
   /** Observer provider token (`claude` | `codex`), the second segment of
-   *  the group pairing. Used to name the exact review-file path in the
-   *  wake terminator so the per-wake directive is transport-explicit
-   *  (Willison Council 2026-06-13 P1) — "emit X" with no Write target
-   *  named lets a model default to a chat reply the server cannot read. */
+   *  the group pairing. Validated for shape only: since P3/B1 the observer
+   *  replies with a bare findings array and the HOST writes the review file
+   *  (`observer-reply.ts`), so the terminator no longer names a path — the
+   *  per-wake directive stays transport-explicit by naming the reply
+   *  channel instead (Willison Council 2026-06-13 P1). */
   observerProvider: string;
+  /** Language the observer must write `claim` text in (`observer-language.ts`).
+   *  Absent = the system prompt's default (English). */
+  claimLanguage?: ClaimLanguage;
 }): ObserverWakeBuildResult {
-  const { checkpoint, manifest, workspaceRoot, observerProvider } = args;
+  const { checkpoint, manifest, workspaceRoot, observerProvider, claimLanguage } = args;
 
   // Per-section length caps — bounded independently. Char-level
   // validation (CR/LF/NUL/fence-triplet) happens first; realpath
@@ -701,10 +707,9 @@ export function buildObserverWakePayload(args: {
   if (!Number.isInteger(checkpoint.sequence) || checkpoint.sequence < 0) {
     throw new Error(`observer-wake: checkpoint.sequence must be a non-negative integer`);
   }
-  // Provider names the review-file path in the terminator. It is
-  // server-derived from the allowlisted pairing, but validate the shape
-  // anyway so the wake builder's contract is self-contained and a future
-  // caller cannot inject path/markdown bytes through it.
+  // Provider is server-derived from the allowlisted pairing; validate the
+  // shape anyway so the wake builder's contract is self-contained and a
+  // future caller cannot inject path/markdown bytes through it.
   if (observerProvider !== "claude" && observerProvider !== "codex") {
     throw new Error(`observer-wake: observerProvider must be "claude" or "codex"`);
   }
@@ -732,13 +737,19 @@ export function buildObserverWakePayload(args: {
   const textBody = [
     `# Council Checkpoint — ${checkpoint.phase}`,
     "",
-    "A new checkpoint has arrived. Read only the workspace-relative paths listed under `delta` and `carried` in the manifest below. Files listed under `dropped` are explicitly out of scope this cycle.",
+    "A new checkpoint has arrived. Review the workspace-relative paths listed under `delta` and `carried` in the manifest below. Files listed under `dropped` are explicitly out of scope this cycle. When a listed file says work is done, already implemented or verified, or cites code (`file:line`), open that code and check it before you reply `[]`.",
     "",
     "```json",
     jsonBlock,
     "```",
     "",
-    `You MUST use your \`Write\` tool to create the file \`.council/reviews/${checkpoint.phase}-${observerProvider}-observer.md\` (workspace-relative) containing one review matching the \`ObserverReviewPayload\` JSON schema described in your system prompt — JSON only, no prose, no code fences. The server reads that FILE off disk; a reply emitted only in chat is silently dropped and your review will not reach the user. Set \`observer_wake_payload_version_echo\` to the integer value of \`observer_wake_payload_version\` from the manifest. Echo \`session_group_id\`, \`checkpoint_id\`, and \`phase\` from the manifest verbatim. Begin.`,
+    ...(claimLanguage
+      ? [
+        `Write every \`claim\` in ${CLAIM_LANGUAGE_NAMES[claimLanguage]} — the language the user works in. Keep file paths, identifiers, code, commands and the severity / confidence values verbatim.`,
+        "",
+      ]
+      : []),
+    "Reply with your findings as a JSON array, as your final message and nothing else (no prose, no code fences) — `[]` when there is nothing to report. Do not write or edit any file: the server records, attributes and delivers your review. Begin.",
     "",
   ].join("\n");
 

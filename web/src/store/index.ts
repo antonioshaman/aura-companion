@@ -45,6 +45,7 @@ export const useStore = create<AppState>((...args) => ({
       // resets so the user's sidebar collapse preferences persist.
       sessions: new Map(),
       sdkSessions: [],
+      sdkSessionsLoaded: false,
       currentSessionId: null,
       connectionStatus: new Map(),
       cliConnected: new Map(),
@@ -95,6 +96,7 @@ export const useStore = create<AppState>((...args) => ({
       findings: new Map(),
       groundingDowngrades: new Map(),
       dismissedStopIds: new Set(),
+      autoProceedRestoreGaps: new Map(),
       // CLI terminal failures — reset to empty on hard store reset.
       cliFailures: new Map(),
       pendingCodexModelSwitches: new Map(),

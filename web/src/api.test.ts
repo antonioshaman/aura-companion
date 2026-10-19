@@ -2070,3 +2070,154 @@ describe("Browser preview thin wrappers", () => {
     expect(JSON.parse(opts.body)).toEqual({ url: "https://acme.test" });
   });
 });
+
+// ===========================================================================
+// Sweep orphans (preview / execute)
+// ===========================================================================
+describe("sweep orphans", () => {
+  it("sweepPreview GETs /api/sweep/preview and returns candidates + token", async () => {
+    const data = {
+      candidates: [{ id: "stale-session:s1", reason: "stale-session", sessionId: "s1", evidence: "old", ageMs: 1 }],
+      token: "abc123",
+    };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    const result = await api.sweepPreview();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sweep/preview");
+    // GET — no explicit method/body
+    expect(opts.method).toBeUndefined();
+    expect(result).toEqual(data);
+  });
+
+  it("sweepExecute POSTs the preview token and returns the result counts", async () => {
+    const data = { requested: 2, swept: 1, skipped: 1, perReason: { orphan: 1, "archived-leak": 0, "stale-session": 0, "orphan-timer": 0 } };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    const result = await api.sweepExecute("abc123");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sweep/execute");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ token: "abc123" });
+    expect(result).toEqual(data);
+  });
+
+  it("sweepExecute surfaces a rejected-token error body (409)", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "conflict" }, 409));
+    await expect(api.sweepExecute("stale")).rejects.toThrow("conflict");
+  });
+});
+
+// ===========================================================================
+// Diagnostics page (plan Tasks 13–15). The two GETs return the body; the two
+// POSTs resolve with { status, body } for ANY status — a 409 (run already in
+// flight / report changed) and a 202 (archive recorded but not applied) are
+// outcomes the page acts on, not exceptions.
+// ===========================================================================
+describe("diagnostics page API", () => {
+  it("diagnosticsOverview and kbAnalysisLatest GET their endpoints", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ generatedAt: 1 }));
+    expect(await api.diagnosticsOverview()).toEqual({ generatedAt: 1 });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/diagnostics/overview");
+    mockFetch.mockResolvedValueOnce(mockResponse({ inFlight: null }));
+    expect(await api.kbAnalysisLatest()).toEqual({ inFlight: null });
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/diagnostics/kb-analysis/latest");
+  });
+
+  it("kbAnalysisRun POSTs includeMemory and resolves a 409 with its body instead of throwing", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "conflict", runId: "r1", startedAt: 5 }, 409));
+    const r = await api.kbAnalysisRun(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/diagnostics/kb-analysis/run");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ includeMemory: true });
+    expect(r).toEqual({ status: 409, body: { error: "conflict", runId: "r1", startedAt: 5 } });
+  });
+
+  it("kbAnalysisDecide POSTs runId + decisions and resolves a 202 with its body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ recorded: true, message: "retry" }, 202));
+    const r = await api.kbAnalysisDecide("run-1", [{ entryId: "got-1", decision: "archive" }]);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/diagnostics/kb-analysis/decisions");
+    expect(JSON.parse(opts.body)).toEqual({ runId: "run-1", decisions: [{ entryId: "got-1", decision: "archive" }] });
+    expect(r).toEqual({ status: 202, body: { recorded: true, message: "retry" } });
+  });
+
+  it("a non-JSON error body resolves with an empty body, not a throw", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 502, statusText: "Bad Gateway", json: () => Promise.reject(new SyntaxError("x")) });
+    expect(await api.kbAnalysisRun(false)).toEqual({ status: 502, body: {} });
+  });
+});
+
+// ===========================================================================
+// Simple diagnostic GETs — each must hit its own endpoint and return the body
+// unchanged. getDeliveryMetrics feeds the reply-delivery health indicator
+// (server/delivery-metrics.ts); a wrong path would silently blank it.
+// ===========================================================================
+describe("diagnostic getters", () => {
+  it.each([
+    ["getDeliveryMetrics", "/api/metrics/delivery"],
+    ["getModelDiagnostics", "/api/settings/diagnostics"],
+    ["getTailscaleStatus", "/api/tailscale/status"],
+  ] as const)("%s GETs %s", async (method, path) => {
+    const body = { ok: true, method };
+    mockFetch.mockResolvedValueOnce(mockResponse(body));
+    const result = await (api[method] as () => Promise<unknown>)();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe(path);
+    expect(opts?.method ?? "GET").toBe("GET");
+    expect(result).toEqual(body);
+  });
+});
+
+// ===========================================================================
+// Council group API (W15 second-opinion reviewer + group actions)
+// ===========================================================================
+describe("council group API", () => {
+  // W15: the pair's second-opinion setting is read and written per group,
+  // with the group id URL-encoded.
+  it("getGroupSecondReviewer GETs the pair's effective setting", async () => {
+    const body = { reviewer: "auto", scope: "review-implement", source: "global" };
+    mockFetch.mockResolvedValueOnce(mockResponse(body));
+    expect(await api.getGroupSecondReviewer("grp/1")).toEqual(body);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/groups/grp%2F1/second-reviewer");
+    expect(opts.method ?? "GET").toBe("GET");
+  });
+
+  it("setGroupSecondReviewer PUTs the new setting", async () => {
+    const config = { reviewer: { backend: "claude" as const, model: "sonnet" }, scope: "all" as const };
+    mockFetch.mockResolvedValueOnce(mockResponse({ ...config, source: "group" }));
+    expect(await api.setGroupSecondReviewer("grp_1", config)).toEqual({ ...config, source: "group" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/groups/grp_1/second-reviewer");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual(config);
+  });
+
+  // A rejected setting surfaces the server's error message (the panel shows it).
+  it("setGroupSecondReviewer throws the server error on 400", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "secondReviewer.backend must be \"claude\" or \"codex\"" }, 400));
+    await expect(api.setGroupSecondReviewer("grp_1", { reviewer: "auto", scope: "all" })).rejects.toThrow(/secondReviewer.backend/);
+  });
+
+  // A network failure (fetch rejects) propagates and is tracked as a PUT failure.
+  it("setGroupSecondReviewer propagates a network failure", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(api.setGroupSecondReviewer("grp_1", { reviewer: "off", scope: "all" })).rejects.toThrow("offline");
+  });
+
+  it("disputeObserverFinding and ignoreAutoProceedRestoreGap POST to the group", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, added: true }));
+    await api.disputeObserverFinding("grp_1", { finding_id: "f", claim: "c", evidence_path: "a.ts" });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/groups/grp_1/disputes");
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, added: true }));
+    await api.ignoreAutoProceedRestoreGap("grp_1", { file: "x.md", fingerprint: "fp" });
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/groups/grp_1/restore-gaps/ignore");
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ file: "x.md", fingerprint: "fp" });
+  });
+
+  it("fetchGroups GETs /groups", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ groups: [] }));
+    expect(await api.fetchGroups()).toEqual({ groups: [] });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/groups");
+  });
+});

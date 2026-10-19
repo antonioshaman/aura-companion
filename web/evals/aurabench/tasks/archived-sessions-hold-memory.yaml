@@ -1,0 +1,62 @@
+# AuraBench task mined from PR #89 ("fix(session): evict in-memory state of archived sessions").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: archived-sessions-hold-memory
+title: "Archived sessions stop holding their full message history in server memory"
+start_commit: c3c71ac61f9ea10880ccf47821ed2254bcc28c61
+prompt: |
+  The server's RSS grows without bound over long uptimes. Archived sessions keep
+  their full in-memory message history (up to 2000 messages) and their event
+  resync buffer in the WebSocket bridge until restart, and on restart every
+  archived session is loaded back from disk with its full history too.
+
+  Bound the memory of archived sessions without touching what is persisted on
+  disk and without evicting the session row (unarchive must stay a flag flip):
+
+  - In `web/server/ws-bridge-persist.ts` export `ARCHIVED_HISTORY_RETENTION`
+    (the number of most recent messages an archived session keeps; use 100) and
+    an idempotent `trimArchivedSessionState(session, retention?)` that keeps
+      only the last `retention` entries of the message history and empties the
+      event buffer, changing the session object it is given in place (callers
+      ignore its return value).
+  - Add a public `WsBridge.trimArchivedSessionMemory(sessionId)` that applies it
+    to a live in-memory session (no-op for unknown ids): a reference to that
+      session taken earlier sees the trimmed history and the empty buffer.
+  - Archived sessions must be trimmed when the bridge restores from disk (active
+    sessions untouched) and when a session or council pair is archived.
+expected_files:
+  - web/server/session-orchestrator.ts
+  - web/server/ws-bridge-persist.ts
+  - web/server/ws-bridge.ts
+expected_tests:
+  - web/server/session-orchestrator.test.ts
+  - web/server/ws-bridge-persist.test.ts
+  - web/server/ws-bridge.test.ts
+failure_modes:
+  - "persisted session files are rewritten/truncated on disk"
+  - "active (non-archived) sessions lose history on restore"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 89
+  merge_commit: 55de874f306743d21f3e66159d872ca965b3026f
+  class: bugfix
+  hidden_tests:
+    - web/server/session-orchestrator.test.ts
+    - web/server/ws-bridge-persist.test.ts
+    - web/server/ws-bridge.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:23:11.727Z"

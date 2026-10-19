@@ -32,6 +32,7 @@ import type {
   CLIStreamlinedTextMessage,
   CLIStreamlinedToolUseSummaryMessage,
   CLIPromptSuggestionMessage,
+  CLICommandLifecycleMessage,
   CLICompactBoundaryMessage,
   CLITaskNotificationMessage,
   CLIFilesPersistedMessage,
@@ -46,11 +47,47 @@ import type { SocketData } from "./ws-bridge-types.js";
 import type { PendingControlRequest } from "./ws-bridge-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { parseNDJSON, isDuplicateCLIMessage } from "./ws-bridge-cli-ingest.js";
+import type { CliTransport } from "./cli-transport.js";
+import { WebSocketCliTransport } from "./cli-transport.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
+import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
+import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
+import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
+import {
+  parseClaudeRateLimitEvent,
+  resolveClaudeUsageLimit,
+  type ClaudeRateLimitInfo,
+} from "./usage-limit-parse.js";
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
+
+/**
+ * Legacy-CLI grace between `system.init` and the probe interrupt (CLIs that
+ * emit no `command_lifecycle`). Short: the API round-trip the interrupt must
+ * beat takes seconds; healthy CLIs emit init within ~100 ms of the probe.
+ */
+export const INIT_PROBE_LEGACY_GRACE_MS = 200;
+/** A probe the CLI never reports on is forgotten after this long. */
+export const INIT_PROBE_EXPIRY_MS = 120_000;
+
+interface InitProbeState {
+  uuid: string;
+  /** The exact NDJSON written — lets sendRaw tell the probe from a real prompt. */
+  frame: string;
+  /** The CLI reported `command_lifecycle started` for the probe. */
+  started: boolean;
+  /** Another command is (or will be) running: never interrupt. */
+  foreignWork: boolean;
+  /** `cancel_async_message` for the probe already written. */
+  cancelSent: boolean;
+  legacyTimer: ReturnType<typeof setTimeout> | null;
+  expiry: ReturnType<typeof setTimeout>;
+}
 
 // --- Constants ----------------------------------------------------------------
 
@@ -67,21 +104,165 @@ const CLI_DEDUP_WINDOW = 2000;
 const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 
 /**
+ * Silent-stdio watchdog deadline. If a user turn is in flight and no
+ * stream-json frame arrives from the CLI for this many ms, we assume
+ * the stdio pipe is dead-but-not-closed and trigger a subprocess
+ * respawn via the orchestrator's existing keepalive path.
+ *
+ * **Default 300s (5 min), overridable via `AURA_SILENT_STDIO_TIMEOUT_MS` env.**
+ *
+ * The prior 60s value (PR #175) was chosen from the initial 2026-09-09
+ * incident where stdout truly went dead for >45s at a time. Field
+ * observations 2026-09-10 showed 60s was too aggressive for legitimate
+ * tool-heavy turns: a long `Bash` execution or a slow `WebFetch` can
+ * silently span >60s between intermediate `tool_progress` / stream
+ * frames on some CLI paths — the watchdog then killed a HEALTHY
+ * subprocess in the middle of real work, dropped the turn, and
+ * cascaded the group to `degraded` via `reconnect_failed`. 300s keeps
+ * the anti-silence coverage but stops those false positives.
+ *
+ * Operators can tune via env for their workload — set the env var to a
+ * positive integer number of ms. Values <10s are rejected as too
+ * aggressive (log warn + fall through to default) since a healthy
+ * turn regularly has stream gaps in that range.
+ */
+const SILENT_STDIO_TIMEOUT_MS = resolveSilentStdioTimeoutMs();
+
+/**
+ * Env-override resolver for {@link SILENT_STDIO_TIMEOUT_MS}. Extracted +
+ * exported so the parsing rules are testable in isolation and the
+ * module-level constant stays a plain immutable number.
+ *
+ * Semantics — deliberately closed, deliberately strict:
+ *   - Unset / empty → default (300_000 ms).
+ *   - Integer >= MIN_MS (10_000) → use.
+ *   - Anything else (non-numeric, negative, float, below MIN_MS) →
+ *     log WARN and fall through to default. Fail-loud parse errors
+ *     rather than silent "smaller number picked" surprises.
+ */
+export function resolveSilentStdioTimeoutMs(
+  env: string | undefined = process.env.AURA_SILENT_STDIO_TIMEOUT_MS,
+  warn: (msg: string) => void = (m) => console.warn(m),
+): number {
+  const DEFAULT_MS = 300_000;
+  const MIN_MS = 10_000;
+  if (env === undefined || env === "") return DEFAULT_MS;
+  const parsed = Number.parseInt(env, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_MS || String(parsed) !== env.trim()) {
+    warn(
+      `[claude-adapter] AURA_SILENT_STDIO_TIMEOUT_MS=${env} rejected (must be integer >= ${MIN_MS}); using default ${DEFAULT_MS}ms`,
+    );
+    return DEFAULT_MS;
+  }
+  return parsed;
+}
+
+/**
+ * Init-frame health canary deadline (COLD spawn). A fresh CLI subprocess
+ * should emit its `system.init` stream-json frame within a few seconds of
+ * spawn — a cold spawn has no work to do before it, and stdio transport is
+ * synchronous on our side. If nothing arrives within this window, the
+ * upstream CLI is broken (the 2026-09-09 CLI 2.1.265 regression was
+ * exactly this shape: transport opens, subprocess runs, jsonl grows,
+ * but stream-json emit is silently dropped). Firing an event on this
+ * seam lets the operator hear about a CLI regression on the very
+ * first spawn, before the silent-stdio watchdog has burned through
+ * MAX_AUTO_RELAUNCHES on symptomatic kills.
+ *
+ * 30s is deliberately generous for a COLD spawn — a first spawn on a cold
+ * disk may take several seconds to load, and we don't want false positives.
+ * The regression case takes 60+ seconds to visibly fail today, so
+ * 30s still catches it two watchdog cycles earlier.
+ *
+ * Overridable via `AURA_INIT_FRAME_TIMEOUT_MS` (integer ms >= MIN).
+ */
+const INIT_FRAME_TIMEOUT_MS = resolveInitFrameTimeoutMs();
+
+/**
+ * Init-frame health canary deadline (`--resume` spawn). The cold-spawn
+ * premise above — "no work to do before the init frame" — is FALSE for a
+ * resume: the CLI must replay the persisted transcript
+ * (`~/.claude/projects/**.jsonl`, which can be multiple MB) AND make its
+ * first API round-trip before it emits `system.init`. On a large transcript
+ * under slow/rate-limited API, that legitimately exceeds the 30s cold
+ * deadline, so a resume spawn was being flagged "CLI may be broken" and
+ * churning through relaunches while the subprocess was in fact healthy but
+ * still loading (prod incident, session eb13fc90, 2026-09-14). A resume
+ * therefore gets a longer window; the anti-regression value is preserved
+ * because a genuinely stuck resume still trips this deadline (just later)
+ * and still eventually the silent-stdio watchdog once a turn is in flight.
+ *
+ * Default 120s, overridable via `AURA_INIT_FRAME_TIMEOUT_RESUME_MS`.
+ */
+const INIT_FRAME_TIMEOUT_RESUME_MS = resolveInitFrameTimeoutMs(
+  process.env.AURA_INIT_FRAME_TIMEOUT_RESUME_MS,
+  120_000,
+  "AURA_INIT_FRAME_TIMEOUT_RESUME_MS",
+);
+
+/**
+ * Env-override resolver for the init-frame canary deadlines. Extracted +
+ * exported so the parsing rules are testable in isolation and the two
+ * module-level constants stay plain immutable numbers. Same strict,
+ * fail-loud family as {@link resolveSilentStdioTimeoutMs}:
+ *   - Unset / empty → `defaultMs`.
+ *   - Integer >= MIN_MS (5_000) → use.
+ *   - Anything else (non-numeric, negative, float, below MIN_MS) →
+ *     log WARN and fall through to `defaultMs`.
+ *
+ * MIN_MS is 5s (not 10s like the silence watchdog): a resume on a warm
+ * transcript can init in well under 10s, and an operator tuning DOWN for a
+ * fast box is a legitimate ask the floor should not veto.
+ */
+export function resolveInitFrameTimeoutMs(
+  env: string | undefined = process.env.AURA_INIT_FRAME_TIMEOUT_MS,
+  defaultMs = 30_000,
+  envName = "AURA_INIT_FRAME_TIMEOUT_MS",
+  warn: (msg: string) => void = (m) => console.warn(m),
+): number {
+  const MIN_MS = 5_000;
+  if (env === undefined || env === "") return defaultMs;
+  const parsed = Number.parseInt(env, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_MS || String(parsed) !== env.trim()) {
+    warn(
+      `[claude-adapter] ${envName}=${env} rejected (must be integer >= ${MIN_MS}); using default ${defaultMs}ms`,
+    );
+    return defaultMs;
+  }
+  return parsed;
+}
+
+/**
+ * Backstop for a stuck observer wake turn. `observerTurnState` flips to
+ * `in-flight` when a wake `user` frame is sent and is only cleared by a
+ * parsed `result` frame (or a transport reset). Council review 2026-09-11
+ * P2-3: a `result` frame split across TCP chunks whose first chunk fails
+ * JSON.parse never reaches `handleResultMessage`, so the turn strands
+ * `in-flight` forever and every future wake returns `busy` — the observer
+ * pair deadlocks. The Codex adapter already carries this exact backstop
+ * (`OBSERVER_WAKE_COMPLETION_WATCHDOG_MS`); this ports it to Claude. On
+ * expiry we force-release the slot and emit `observer:turn-done` so the
+ * orchestrator drains any queued checkpoint. Kept identical (360s) to the
+ * Codex value so both backends have the same stranded-turn ceiling.
+ */
+const OBSERVER_WAKE_COMPLETION_WATCHDOG_MS = 360_000;
+
+/**
  * Adapter-level outcome of a wake send attempt. The orchestrator's
  * dispatcher (Task 3) wraps this in a richer WakeDispatchOutcome that
  * adds coordinator-side reasons (observer_unknown, group_not_active).
  *
- * - `sent` — NDJSON frame was passed to `cliSocket.send` without throwing.
+ * - `sent` — NDJSON frame was passed to `transport.send` without throwing.
  *   The observer turn-state is now `in-flight` and idle-kill activity
  *   has been registered.
- * - `socket_disconnected` — cliSocket is null or closing. Transient
+ * - `socket_disconnected` — transport is null or closing. Transient
  *   observer disconnect window; the dispatcher should keep the pending
  *   checkpoint for the reconnect-aware drain (Task 5).
  * - `busy` — observer is mid-turn from a previous wake. Dispatcher should
  *   enqueue (Task 4).
  * - `backpressure` — bufferedAmount exceeds threshold. Refuse rather
  *   than queue; the next checkpoint will try again.
- * - `failed` — `cliSocket.send` threw synchronously. Logged at EC-9 by
+ * - `failed` — `transport.send` threw synchronously. Logged at EC-9 by
  *   the dispatcher; do NOT mark the half degraded directly (Subprocess
  *   Council Rec 6).
  */
@@ -116,8 +297,9 @@ export type ClaudeAdapterEnqueueOutcome =
 export class ClaudeAdapter implements IBackendAdapter {
   private sessionId: string;
 
-  // WebSocket to the Claude Code CLI process
-  private cliSocket: ServerWebSocket<SocketData> | null = null;
+  // Control channel to the Claude Code CLI process. WebSocket for a pinned
+  // pre-2.1.121 CLI, stdio pipes for a current one — see ./cli-transport.ts.
+  private transport: CliTransport | null = null;
 
   // Callbacks registered by the bridge via on*() methods
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
@@ -158,6 +340,81 @@ export class ClaudeAdapter implements IBackendAdapter {
   private parseErrorSeen = new Set<string>();
 
   /**
+   * Silent-stdio deadline (see {@link SILENT_STDIO_TIMEOUT_MS} and the
+   * event contract on `session:backend-silent`). Armed when a user
+   * message dispatches to the CLI, slid forward on every parseable
+   * frame arrival, disarmed on `result` frames and transport close.
+   */
+  private readonly silenceWatchdog: SilentStdioWatchdog;
+
+  /**
+   * Once-per-spawn guard for the model-fallback classifier. A rate-
+   * limit-class error typically produces several assistant frames
+   * (synthetic "You've hit your session limit" messages, followed by a
+   * `result` with `stop_reason: "stop_sequence"`). We only want to
+   * fire the fallback event on the first such detection — the
+   * subsequent frames belong to the same failure, not a new one.
+   * Reset on {@link attachTransport} because a fresh spawn is by
+   * definition a fresh classification opportunity.
+   */
+  private modelFallbackFiredForThisSpawn = false;
+
+  /**
+   * Last `rate_limit_event` with `status: "rejected"` (auto-resume). Cleared
+   * by any non-rejected event and by a successful `result`.
+   */
+  private lastRejectedRateLimit: ClaudeRateLimitInfo | null = null;
+
+  /**
+   * Init-frame health canary timer handle. Armed in
+   * {@link attachTransport} on every fresh transport; cleared in
+   * {@link handleSystemInit} on the first init frame; cleared on
+   * transport close so a clean disconnect before init doesn't fire
+   * a spurious warning. See {@link INIT_FRAME_TIMEOUT_MS} + the
+   * `session:no-init-frame` event contract for full rationale.
+   *
+   * Type is `ReturnType<typeof setTimeout>` for cross-runtime
+   * compatibility (bun/node/dom widen the return type differently).
+   */
+  private initFrameTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Wall-clock ms at last {@link attachTransport}, for the `sinceMs` field. */
+  private lastAttachAt: number = 0;
+  /**
+   * Wall-clock ms at the last non-empty CLI frame we received. Baseline
+   * is set on {@link attachTransport}; slid forward on every non-empty
+   * frame in {@link handleRawMessage}. Read by the silent-stdio drift
+   * detector as the authoritative "bun's freshness" signal — the
+   * previously-used transcript file mtime was polluted by non-CLI writes
+   * (browser subscribe/disconnect, state field updates), which meant the
+   * detector never fired on real stdio-pipe-death because the transcript
+   * stayed "fresh" via browser events even when zero CLI frames were
+   * arriving. See {@link getLastCliFrameReceivedMs}.
+   */
+  private lastCliFrameReceivedMs: number = 0;
+  /**
+   * The init probe this process is still waiting to resolve — see
+   * {@link sendInitProbe}. `null` once it was interrupted, cancelled,
+   * finished, or the transport changed.
+   */
+  private initProbe: InitProbeState | null = null;
+  /**
+   * Whether the CURRENT CLI process emitted any `command_lifecycle` frame.
+   * CLIs older than 2.1.278 never do; for them the probe falls back to the
+   * init-frame trigger (see {@link onInitForProbe}). Reset per transport.
+   */
+  private lifecycleSeenThisProcess = false;
+  /**
+   * Whether the NEXT / current spawn was launched with `--resume`. Set by the
+   * bridge via {@link setResumeExpected} before `attachTransport`, from the
+   * launcher's actual argv (`args.includes("--resume")`). Selects the longer
+   * {@link INIT_FRAME_TIMEOUT_RESUME_MS} deadline because a resume must replay
+   * the transcript + make its first API round-trip before `system.init` —
+   * work a cold spawn does not do. Reset by the launcher/bridge on each spawn;
+   * defaults to `false` (cold) so an unset value never over-waits.
+   */
+  private resumeExpected = false;
+
+  /**
    * Observer turn-state for the Council Mode auto-wake gate.
    *
    * `idle` means the observer is ready for a new `user` frame — either
@@ -176,6 +433,27 @@ export class ClaudeAdapter implements IBackendAdapter {
    * purpose.
    */
   private observerTurnState: "idle" | "in-flight" = "idle";
+
+  /**
+   * Backstop timer for {@link observerTurnState}. Armed when a wake turn
+   * goes `in-flight`, cleared on every legitimate return to `idle`. See
+   * {@link OBSERVER_WAKE_COMPLETION_WATCHDOG_MS} for the strand it guards.
+   */
+  private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * W14 parity with the Codex adapter: an observer wake turn that delivers
+   * NO stdout frame at all within `OBSERVER_WAKE_SILENCE_MS` of the send is
+   * reported as
+   * `observer:wake-failed` (reason `silent`) so the orchestrator degrades the
+   * pair and auto-heals (relaunches) the observer, then redelivers the
+   * checkpoint. Claude has no in-process "fresh thread", so there is no
+   * interrupt-and-retry step here — a fresh `--resume` process IS the retry.
+   * Separate from {@link silenceWatchdog}, which is armed only for browser
+   * user messages and routes to the generic kill / model-rotation path.
+   */
+  private readonly observerWakeSilence: SilentStdioWatchdog = createObserverWakeSilenceWatchdog(
+    ({ sinceMs }) => this.handleObserverWakeSilent(sinceMs),
+  );
 
   /**
    * Orchestrator-half per-turn state. Mirrors `observerTurnState` but
@@ -257,6 +535,24 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.recorder = opts?.recorder ?? null;
     this.onActivityUpdate = opts?.onActivityUpdate ?? null;
     this.idleTimerProbe = opts?.idleTimerProbe ?? null;
+    this.silenceWatchdog = new SilentStdioWatchdog({
+      timeoutMs: SILENT_STDIO_TIMEOUT_MS,
+      onSilent: ({ sinceMs, reason }) => {
+        // The subprocess is producing output somewhere (its own jsonl
+        // is likely still growing — this failure mode was reproduced
+        // 2026-09-09), but nothing is reaching us. Surface a browser-
+        // visible error and let the orchestrator kill + relaunch.
+        this.browserMessageCb?.({
+          type: "error",
+          message: `Backend silent for ${Math.round(sinceMs / 1000)}s — relaunching…`,
+        });
+        companionBus.emit("session:backend-silent", {
+          sessionId: this.sessionId,
+          sinceMs,
+          reason,
+        });
+      },
+    });
   }
 
   // -- WebSocket lifecycle ----------------------------------------------------
@@ -266,18 +562,50 @@ export class ClaudeAdapter implements IBackendAdapter {
    * flushes any NDJSON messages that were queued before the connection.
    */
   attachWebSocket(ws: ServerWebSocket<SocketData>): void {
-    this.cliSocket = ws;
+    this.attachTransport(new WebSocketCliTransport(ws));
+  }
+
+  /**
+   * Transport-agnostic attach. `attachWebSocket` is the WS-flavoured wrapper;
+   * the stdio launcher calls this directly with a {@link StdioCliTransport}.
+   *
+   * Every turn-state reset below is attach-bound, not socket-bound: a fresh
+   * transport is by definition a fresh turn regardless of its kind.
+   */
+  attachTransport(transport: CliTransport): void {
+    this.transport = transport;
     // Council Review 2026-05-13 Subprocess #5: reset turn-state on every
     // attach. A fresh socket is by definition a fresh turn — closes the
     // late-detach race where the stale-socket guard in detachWebSocket
     // skips the reset, leaving `in-flight` from the prior socket and
     // permanently blocking the dispatcher.
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
     // Same discipline for the orchestrator half: a fresh socket has no
     // in-flight turn. Default `blockedByStop` to false on reattach —
     // the council slice will re-mutate via setter (Task 8 surface) when
     // it next reconciles the session against the unresolved-STOP set.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // A fresh spawn is a fresh classification opportunity — the
+    // previous spawn's rate-limit fatality does not carry.
+    this.modelFallbackFiredForThisSpawn = false;
+    // A fresh transport by definition cannot be silent yet.
+    this.silenceWatchdog.disarm();
+    // Baseline the drift detector's "bun freshness" signal to attach
+    // time. Anything the CLI sends after this point advances the value;
+    // a broken stdio pipe leaves it frozen while the CLI's own jsonl
+    // continues to grow — that gap IS the drift the detector catches.
+    this.lastCliFrameReceivedMs = Date.now();
+    // A probe belongs to the process it was written to.
+    this.clearInitProbe();
+    this.lifecycleSeenThisProcess = false;
+    // Arm the init-frame health canary. On a working CLI the
+    // `system.init` frame lands within a few seconds and
+    // `handleSystemInit` clears this timer. On a regressed CLI (see
+    // 2026-09-09/10 CLI 2.1.265 incident) init never arrives and we
+    // surface a WARN + browser toast at INIT_FRAME_TIMEOUT_MS so the
+    // operator hears about the regression on the first failed spawn.
+    this.armInitFrameCanary();
 
     // Flush pending messages
     if (this.pendingMessages.length > 0) {
@@ -302,13 +630,21 @@ export class ClaudeAdapter implements IBackendAdapter {
    * `busy` regardless of actual observer state.
    */
   detachWebSocket(ws: ServerWebSocket<SocketData>): void {
-    // Only detach if this is the current socket -- ignore stale close events
-    if (this.cliSocket !== ws) return;
-    this.cliSocket = null;
+    // Only detach if this is the current transport -- ignore stale close events
+    if (this.transport?.raw !== ws) return;
+    this.transport = null;
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // Same reasoning as handleTransportClose: transport gone → no
+    // more frames → silence watchdog would misfire on a real
+    // disconnect.
+    this.silenceWatchdog.disarm();
+    // Init-frame canary too — a WS-transport detach before init
+    // means the CLI never dialled back through; no canary needed.
+    this.disarmInitFrameCanary();
     // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
     // so unresolved Promise resolvers from the now-dead socket don't leak
     // into the next attach. `disconnect()` already clears this (line 283);
@@ -337,7 +673,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- IBackendAdapter: Transport state ---------------------------------------
 
   isConnected(): boolean {
-    return this.cliSocket !== null;
+    return this.transport !== null;
   }
 
   /**
@@ -348,20 +684,20 @@ export class ClaudeAdapter implements IBackendAdapter {
    * not-ready. See {@link IBackendAdapter.isReadyForServerFrame}.
    */
   isReadyForServerFrame(): boolean {
-    return this.cliSocket !== null && this.cliSocket.readyState === 1;
+    return this.transport !== null && this.transport.isOpen();
   }
 
   async disconnect(): Promise<void> {
     // Clear pending control requests to prevent memory leaks from
     // unresolved promises (CLI won't respond after disconnect)
     this.pendingControlRequests.clear();
-    if (this.cliSocket) {
+    if (this.transport) {
       try {
-        this.cliSocket.close();
+        this.transport.close();
       } catch {
-        // Socket may already be closed
+        // Transport may already be closed
       }
-      this.cliSocket = null;
+      this.transport = null;
     }
   }
 
@@ -375,8 +711,21 @@ export class ClaudeAdapter implements IBackendAdapter {
    * never arrive. Stale `in-flight` here would deadlock the dispatcher.
    */
   handleTransportClose(): void {
-    this.cliSocket = null;
+    this.transport = null;
+    this.clearInitProbe();
+    // The CLI's background tasks die with it.
+    deliveryMetrics.clearRunningTasks(this.sessionId);
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
+    // Transport gone = no more frames can arrive; the exit + relaunch
+    // path takes over. Firing `backend-silent` on top of a real exit
+    // would double-trigger the orchestrator.
+    this.silenceWatchdog.disarm();
+    // Same reasoning for the init-frame canary: a transport that
+    // closed before init landed will not now produce one, and the
+    // exit handler drives the recovery — a spurious `no-init-frame`
+    // on top of a real exit would be noise.
+    this.disarmInitFrameCanary();
   }
 
   // -- IBackendAdapter: Raw message ingestion from CLI ------------------------
@@ -392,6 +741,25 @@ export class ClaudeAdapter implements IBackendAdapter {
     );
 
     const lines = parseNDJSON(data);
+    if (lines.length > 0) {
+      // Any non-empty CLI line proves the stdio pipe is alive, even if
+      // the line later fails protocol parsing. Without this, malformed
+      // but arriving output can let the silent watchdog kill a live turn.
+      this.silenceWatchdog.onFrame();
+      // W14: the Claude observer verdict is "accepted but ZERO output" — the
+      // first line after a wake proves the stream alive, so the watchdog is
+      // done for this wake. A turn that produced output and then lost its
+      // `result` frame stays with the 360s completion backstop (P2-3).
+      this.observerWakeSilence.disarm();
+      // Slide the drift-detector freshness signal. Doing this at the
+      // parse-lines seam (not at the record() seam above) keeps the
+      // signal aligned with the watchdog's own liveness definition —
+      // both track "bun saw at least one line from CLI" rather than
+      // "bun's stdio read returned N bytes" (a partial line write with
+      // no newline would tick the recorder but not the watchdog or the
+      // drift baseline, correctly).
+      this.lastCliFrameReceivedMs = Date.now();
+    }
     for (const line of lines) {
       let msg: CLIMessage;
       try {
@@ -512,6 +880,12 @@ export class ClaudeAdapter implements IBackendAdapter {
     // provenance of the prompt. Provenance is recorded separately by
     // the recorder (Task 11 of the auto-proceed plan).
     this.orchestratorTurnState = { kind: "in-flight" };
+    // Arm the silence deadline: from this moment we expect a frame
+    // back within SILENT_STDIO_TIMEOUT_MS. Rate-limit-class errors
+    // still produce a synthetic assistant frame + result, so those
+    // paths will disarm normally; only a genuinely dead pipe reaches
+    // the timeout without any frame at all.
+    this.silenceWatchdog.arm("user_message_sent");
     return true;
   }
 
@@ -577,6 +951,20 @@ export class ClaudeAdapter implements IBackendAdapter {
     // process kill, no relaunch; idle-kill / auto-relaunch / --resume / PID
     // reconnect are all untouched. Exactly one frame (or none) reaches the CLI,
     // so no second in-flight marker is ever seeded.
+    // Broken-model table FIRST — the same table the spawn/relaunch path
+    // (`cli-launcher.ts`) rewrites with. Without this the switcher ran the
+    // listed model until the next relaunch, then got silently rewritten.
+    const brokenSub = resolveModelSubstitution(model);
+    if (brokenSub) {
+      this.browserMessageCb?.({
+        type: "model_substitution",
+        requested: brokenSub.from,
+        applied: brokenSub.to,
+        outcome: "substituted",
+        reason: "cli-incompatible",
+      });
+      return this.emitSetModel(brokenSub.to);
+    }
     const resolution = resolveModelAvailability({ backend: "claude", requested: model });
     switch (resolution.kind) {
       case "ok":
@@ -620,6 +1008,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       request: { subtype: "set_model", model },
     });
     this.sendToBackend(ndjson);
+    // NOTE: we do NOT persist `model` to the launcher here. A composer choice
+    // is only "sent", not confirmed — a model the static pre-send gate passes
+    // can still be rejected by the account's subscription/tier at the CLI on
+    // the NEXT turn (it 404s there, not in the registry this gate consults).
+    // Persisting it optimistically would make a relaunch in that window spawn
+    // the rejected model. The launcher's model is updated only once the main
+    // assistant frame confirms the CLI is actually running the new model
+    // (ws-bridge → `session:model-active-changed`).
     return true;
   }
 
@@ -745,8 +1141,12 @@ export class ClaudeAdapter implements IBackendAdapter {
         break;
 
       case "rate_limit_event":
-        // Rate-limit status from Claude API (allowed/throttled). Silently
-        // consumed — no user-facing action needed.
+        // Rate-limit status from Claude API (allowed / allowed_warning /
+        // rejected). Not user-facing, but a `rejected` event carries the
+        // authoritative `resetsAt` (epoch s) for the limit that is about to
+        // terminate the turn — remembered for the usage-limit emit on the
+        // `result` frame (auto-resume). Any non-rejected status clears it.
+        this.noteRateLimitEvent(msg as { rate_limit_info?: Record<string, unknown> });
         break;
 
       case "control_cancel_request":
@@ -763,6 +1163,14 @@ export class ClaudeAdapter implements IBackendAdapter {
 
       case "prompt_suggestion":
         this.handlePromptSuggestion(msg as CLIPromptSuggestionMessage);
+        break;
+
+      case "command_lifecycle":
+        // Queue lifecycle of uuid-stamped commands (CLI 2.1.278+). No browser
+        // mapping; consumed by the init-probe gate. Previously unrouted, so
+        // every reconnect that met a CLI-scheduled (cron) prompt surfaced a
+        // spurious "protocol drift" error in the chat.
+        this.handleCommandLifecycle(msg as CLICommandLifecycleMessage);
         break;
 
       default:
@@ -785,6 +1193,14 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- System message handling ------------------------------------------------
 
   private handleSystemMessage(msg: CLISystemMessage): void {
+    // Running background tasks, for the drift-recovery metric (a recovery
+    // kills the CLI and every task it still runs). `task_started` has no
+    // browser mapping and is otherwise dropped below.
+    const subtype = (msg as { subtype?: string }).subtype;
+    if (subtype === "task_started" || subtype === "task_notification") {
+      deliveryMetrics.recordTaskFrame(this.sessionId, msg as { subtype?: unknown; task_id?: unknown; task_type?: unknown });
+    }
+
     if (msg.subtype === "init") {
       this.handleSystemInit(msg as CLISystemInitMessage);
       return;
@@ -895,6 +1311,13 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private handleSystemInit(msg: CLISystemInitMessage): void {
+    // The very first init frame is the health-canary green signal —
+    // stream-json stdio emit is working. Cancel the deadline before
+    // anything else so a downstream throw doesn't leave the timer
+    // to fire spuriously.
+    this.disarmInitFrameCanary();
+    this.onInitForProbe(msg);
+
     // Emit session metadata so the bridge can update session state
     this.sessionMetaCb?.({
       cliSessionId: msg.session_id,
@@ -937,6 +1360,31 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- Assistant, result, stream ----------------------------------------------
 
   private handleAssistantMessage(msg: CLIAssistantMessage): void {
+    // Rate-limit-class classification. The Claude CLI fabricates a
+    // synthetic assistant message (`model: "<synthetic>"`) containing
+    // the human-readable error string ("You've hit your session limit
+    // · resets 2:40am (UTC)") when the API returns an error the CLI
+    // knows how to translate. We look at those first-class error
+    // surfaces and, if the current model has a downgrade target in
+    // the chain, ask the orchestrator to swap-and-relaunch.
+    this.maybeEmitModelFallback(msg);
+
+    // Silent-stdio watchdog hold: an assistant message carrying a tool_use
+    // block means the CLI is about to run a tool locally and may emit NO
+    // stdout frames until it returns (a long Bash build / download / deploy).
+    // Hold the silence deadline open (widened window) so a legitimately-busy
+    // turn isn't misread as a dead stream and killed mid-work. A tool-free
+    // assistant message (final text) releases the hold; the `result`
+    // terminator disarms entirely. The classic no-output-after-user-message
+    // bug is unaffected — `held` is false until the first tool_use arrives.
+    const content = msg.message?.content;
+    const hasToolUse =
+      Array.isArray(content) &&
+      content.some(
+        (b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use",
+      );
+    this.silenceWatchdog.setHeld(hasToolUse);
+
     this.browserMessageCb?.({
       type: "assistant",
       message: msg.message,
@@ -945,7 +1393,105 @@ export class ClaudeAdapter implements IBackendAdapter {
     });
   }
 
+  /**
+   * Scan an assistant message for rate-limit-class error text; if the
+   * classifier fires AND we have a downgrade target AND we haven't
+   * already fired this spawn, emit `session:model-fallback` for the
+   * orchestrator to swap-and-relaunch.
+   *
+   * Deliberately narrow: only "hit your session limit" / "rate_limit" /
+   * "out of credits" / "unknown model" surfaces trigger this. Any
+   * ambiguous or new failure mode is not misclassified as a fallback
+   * candidate — it flows through as a normal error.
+   */
+  private maybeEmitModelFallback(msg: CLIAssistantMessage): void {
+    if (this.modelFallbackFiredForThisSpawn) return;
+    const message = msg.message as { model?: unknown; content?: unknown } | undefined;
+    if (!message) return;
+
+    const currentModel = typeof message.model === "string" ? message.model : "";
+    // Extract text from all text-typed content blocks. Non-text blocks
+    // (tool_use, tool_result, etc.) can't carry a rate-limit surface
+    // in the shape we classify against, so skip.
+    const parts: string[] = [];
+    const content = message.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === "object" && (block as { type?: unknown }).type === "text") {
+          const text = (block as { text?: unknown }).text;
+          if (typeof text === "string") parts.push(text);
+        }
+      }
+    } else if (typeof content === "string") {
+      parts.push(content);
+    }
+    const joined = parts.join("\n");
+    if (!joined) return;
+
+    const reason = classifyFallbackReason(joined);
+    if (!reason) return;
+
+    // Prefer the CLI's spawn-time model (persisted on the launcher's
+    // session record) over the message's own `model` — the assistant
+    // frame carries `<synthetic>` in exactly the case where a
+    // downgrade would help, and `<synthetic>` is not in the chain.
+    // The orchestrator has the real spawn model; we forward the
+    // reason and let it resolve `from` there.
+    const messageModel = currentModel;
+    const nextModel = nextModelInChain(messageModel);
+    // For the `<synthetic>` case, `nextModel` is null. That's the
+    // signal to the orchestrator handler: "please look up the real
+    // spawn model and downgrade from there". We fire the event
+    // regardless so the orchestrator gets a chance to decide; the
+    // handler will drop the event if it also can't resolve a next
+    // model.
+    this.modelFallbackFiredForThisSpawn = true;
+    companionBus.emit("session:model-fallback", {
+      sessionId: this.sessionId,
+      from: messageModel || "<unknown>",
+      to: nextModel ?? "<resolve-at-orchestrator>",
+      reason,
+    });
+  }
+
+  private noteRateLimitEvent(msg: { rate_limit_info?: Record<string, unknown> }): void {
+    const parsed = parseClaudeRateLimitEvent(msg.rate_limit_info);
+    this.lastRejectedRateLimit = parsed.rejected ? parsed : null;
+  }
+
+  /**
+   * Auto-resume detection: an error `result` whose text / status is a usage
+   * limit ("You've hit your session limit · resets 1:40am (UTC)", 429 after a
+   * `rejected` rate_limit_event) → `session:usage-limit` with the resolved
+   * reset time. Fires per limit-terminated turn; the scheduler dedups.
+   */
+  private maybeEmitUsageLimit(msg: CLIResultMessage): void {
+    if (!msg.is_error) {
+      this.lastRejectedRateLimit = null;
+      return;
+    }
+    const text = typeof msg.result === "string" ? msg.result : "";
+    const resolved = resolveClaudeUsageLimit({
+      text,
+      apiErrorStatus: typeof msg.api_error_status === "number" ? msg.api_error_status : null,
+      lastRejected: this.lastRejectedRateLimit,
+      now: Date.now(),
+    });
+    if (!resolved) return;
+    const modelUsage = (msg as { modelUsage?: Record<string, unknown> }).modelUsage;
+    const model = modelUsage && typeof modelUsage === "object" ? Object.keys(modelUsage)[0] ?? null : null;
+    companionBus.emit("session:usage-limit", {
+      sessionId: this.sessionId,
+      backend: "claude",
+      model,
+      resetAt: resolved.resetAt,
+      resetSource: resolved.resetSource,
+      limitType: resolved.limitType,
+    });
+  }
+
   private handleResultMessage(msg: CLIResultMessage): void {
+    this.maybeEmitUsageLimit(msg);
     // Council Mode auto-wake: `result` is the documented per-turn
     // terminator in the Claude Code NDJSON protocol. When we see one
     // and the observer was mid-flight from an auto-wake, flip back to
@@ -956,6 +1502,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     // sessions off the bus channel.
     if (this.observerTurnState === "in-flight") {
       this.observerTurnState = "idle";
+      this.clearObserverWakeWatchdog();
       companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
     }
     // Orchestrator-half symmetric emit. Only fires on the in-flight →
@@ -967,6 +1514,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     // axis and may mutate via setter (Task 8 wiring).
     if (this.orchestratorTurnState.kind === "in-flight") {
       this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+      // Turn done → cancel the silence deadline. `handleRawMessage`
+      // already reset it on this very `result` frame, but the intent
+      // here is "no longer expecting output", not "reset for another
+      // 60s window".
+      this.silenceWatchdog.disarm();
       companionBus.emit("orchestrator:turn-done", {
         sessionId: this.sessionId,
         blockedByStop: false,
@@ -1201,6 +1753,169 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.sendToBackend(ndjson);
   }
 
+  // -- Init probe (reconnect kickoff) ------------------------------------------
+
+  /**
+   * Write the init-probe `user` frame and interrupt it — but only once the
+   * CLI shows that the turn it is running IS the probe. See
+   * `WsBridge.sendInitializeKickoff` for why the probe exists at all.
+   *
+   * The interrupt used to go out on a blind 200 ms timer. A `--resume`d CLI
+   * that owns a durable cron job dequeues that job's prompt on startup, BEFORE
+   * it reads our probe from stdin; the timer's interrupt then cancelled the
+   * cron turn and the probe ran as a real turn instead ("No response
+   * requested."). Prod 40f03a1e, 2026-10-15 20:31:16 and 2026-10-16 07:02:41:
+   * jsonl `queue-operation enqueue <cron prompt>` → probe enqueued → our
+   * interrupt → `[Request interrupted by user]` on the cron prompt.
+   *
+   * Now the probe carries a client `uuid`, so CLI 2.1.278+ reports it with
+   * `command_lifecycle` frames ({@link handleCommandLifecycle}):
+   *  - probe `started` while nothing else runs → interrupt (the old intent);
+   *  - another command queued/started first (cron, server prompt) → never
+   *    interrupt; drop the still-queued probe with `cancel_async_message`;
+   *  - a real prompt written to stdin after the probe → never interrupt.
+   * A CLI without lifecycle frames falls back to "interrupt after system.init"
+   * ({@link onInitForProbe}).
+   *
+   * @returns the probe's uuid.
+   */
+  sendInitProbe(markerText: string): string {
+    this.clearInitProbe();
+    const uuid = randomUUID();
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: markerText },
+      uuid,
+    });
+    const expiry = setTimeout(() => this.clearInitProbe(), INIT_PROBE_EXPIRY_MS);
+    (expiry as { unref?: () => void }).unref?.();
+    this.initProbe = { uuid, frame, started: false, foreignWork: false, cancelSent: false, legacyTimer: null, expiry };
+    this.sendToBackend(frame);
+    return uuid;
+  }
+
+  /** Test/diagnostic view of the pending probe. */
+  getPendingInitProbeUuid(): string | null {
+    return this.initProbe?.uuid ?? null;
+  }
+
+  private clearInitProbe(): void {
+    const p = this.initProbe;
+    if (!p) return;
+    if (p.legacyTimer) clearTimeout(p.legacyTimer);
+    clearTimeout(p.expiry);
+    this.initProbe = null;
+  }
+
+  /** A real prompt (browser, auto-proceed, council wake) reached stdin. */
+  private noteRealPromptSent(): void {
+    const p = this.initProbe;
+    if (!p || p.foreignWork) return;
+    p.foreignWork = true;
+    // Probe not running yet: drop it from the CLI queue so it cannot run as
+    // its own turn ahead of / around the real prompt. Already running: leave
+    // it — the real prompt may be folded into the probe's turn, and the
+    // marker asks the model to answer what follows.
+    if (!p.started) this.cancelQueuedProbe(p);
+  }
+
+  /**
+   * `cancel_async_message` the probe — only on a CLI that has shown it speaks
+   * the lifecycle protocol (else the request is unknown to it). A CLI that
+   * reports the probe `queued` later gets the cancel then (handleCommandLifecycle).
+   */
+  private cancelQueuedProbe(p: InitProbeState): void {
+    if (p.cancelSent || !this.lifecycleSeenThisProcess) return;
+    p.cancelSent = true;
+    this.sendToBackend(JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "cancel_async_message", message_uuid: p.uuid },
+    }));
+  }
+
+  private interruptProbe(p: InitProbeState, trigger: "probe_started" | "init_legacy"): void {
+    log.info("claude-adapter", "init probe interrupted", {
+      event: "init_probe.interrupt",
+      sessionId: this.sessionId,
+      probeUuid: p.uuid,
+      trigger,
+    });
+    this.sendToBackend(JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "interrupt" },
+    }));
+    this.clearInitProbe();
+  }
+
+  private handleCommandLifecycle(msg: CLICommandLifecycleMessage): void {
+    this.lifecycleSeenThisProcess = true;
+    const p = this.initProbe;
+    if (!p || typeof msg.command_uuid !== "string") return;
+    if (p.legacyTimer) {
+      clearTimeout(p.legacyTimer);
+      p.legacyTimer = null;
+    }
+    if (msg.command_uuid === p.uuid) {
+      if (msg.state === "started") {
+        p.started = true;
+        if (!p.foreignWork) {
+          this.interruptProbe(p, "probe_started");
+          return;
+        }
+        log.info("claude-adapter", "init probe left running — a real turn shares it", {
+          event: "init_probe.interrupt_skipped",
+          sessionId: this.sessionId,
+          reason: "foreign_work",
+        });
+        this.clearInitProbe();
+        return;
+      }
+      if (msg.state === "queued") {
+        if (p.foreignWork) this.cancelQueuedProbe(p);
+        return;
+      }
+      this.clearInitProbe(); // completed/cancelled/discarded/refused
+      return;
+    }
+    // Someone else's command (a CLI-scheduled cron prompt, another client).
+    if ((msg.state === "queued" || msg.state === "started") && !p.foreignWork) {
+      p.foreignWork = true;
+      log.info("claude-adapter", "init probe will not interrupt — CLI runs another command", {
+        event: "init_probe.interrupt_skipped",
+        sessionId: this.sessionId,
+        reason: "foreign_command",
+        commandState: msg.state,
+      });
+      if (!p.started) this.cancelQueuedProbe(p);
+    }
+  }
+
+  /**
+   * Legacy path: a CLI that emits no `command_lifecycle` frames (< 2.1.278)
+   * cannot tell us which command its turn runs. On its `system.init`, wait a
+   * short grace for a lifecycle frame (a modern CLI writes one ahead of init);
+   * none → interrupt as before, unless a real prompt went out meanwhile.
+   */
+  private onInitForProbe(msg: CLISystemInitMessage): void {
+    const caps = (msg as { capabilities?: unknown }).capabilities;
+    // CLI 2.1.283 advertises `msg_lifecycle_v1` in init: its lifecycle frames
+    // will decide, never the legacy timer.
+    if (Array.isArray(caps) && caps.includes("msg_lifecycle_v1")) this.lifecycleSeenThisProcess = true;
+    const p = this.initProbe;
+    if (!p || p.started || p.legacyTimer || this.lifecycleSeenThisProcess) return;
+    p.legacyTimer = setTimeout(() => {
+      p.legacyTimer = null;
+      if (this.initProbe !== p || p.started || this.lifecycleSeenThisProcess) return;
+      if (p.foreignWork) {
+        this.clearInitProbe();
+        return;
+      }
+      this.interruptProbe(p, "init_legacy");
+    }, INIT_PROBE_LEGACY_GRACE_MS);
+  }
+
   /**
    * Council Mode auto-wake seam: synthesise a `user` NDJSON frame on the
    * server's own initiative and push it to the observer's CLI socket.
@@ -1213,7 +1928,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    *
    * Gating order — three strict checks per Subprocess Council Rec 3:
    * 1. `observerTurnState === "in-flight"` → return `busy`
-   * 2. `cliSocket` is null or not OPEN → return `socket_disconnected`
+   * 2. transport is null or not writable → return `socket_disconnected`
    * 3. `bufferedAmount > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES`
    *    → return `backpressure`
    *
@@ -1271,14 +1986,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       return { kind: "busy" };
     }
 
-    if (!this.cliSocket) {
+    if (!this.transport) {
       return { kind: "socket_disconnected" };
     }
-    if (this.cliSocket.readyState !== 1) {
+    if (!this.transport.isOpen()) {
       return { kind: "socket_disconnected" };
     }
 
-    const buffered = this.cliSocket.getBufferedAmount();
+    const buffered = this.transport.bufferedAmount();
     if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
       return { kind: "backpressure", bufferedAmount: buffered };
     }
@@ -1304,7 +2019,8 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.recorder?.record(
         this.sessionId, "out", frame, "cli", "claude", "", "server:auto-proceed",
       );
-      this.cliSocket.send(frame + "\n");
+      this.transport.send(frame + "\n");
+      this.noteRealPromptSent();
     } catch (err) {
       return {
         kind: "failed",
@@ -1333,17 +2049,18 @@ export class ClaudeAdapter implements IBackendAdapter {
       return { kind: "busy" };
     }
 
-    // Gate 2: transport. readyState 1 === OPEN per WebSocket spec.
-    if (!this.cliSocket) {
+    // Gate 2: transport is attached AND writable right now.
+    if (!this.transport) {
       return { kind: "socket_disconnected" };
     }
-    if (this.cliSocket.readyState !== 1) {
+    if (!this.transport.isOpen()) {
       return { kind: "socket_disconnected" };
     }
 
-    // Gate 3: backpressure. Bun's ServerWebSocket exposes
-    // getBufferedAmount(); refuse rather than silently queue in JS.
-    const buffered = this.cliSocket.getBufferedAmount();
+    // Gate 3: backpressure. The WS transport reports Bun's buffered amount;
+    // the stdio transport reports 0 (a pipe exposes no queue depth), so this
+    // gate is a no-op there rather than a fabricated number.
+    const buffered = this.transport.bufferedAmount();
     if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
       return { kind: "backpressure", bufferedAmount: buffered };
     }
@@ -1382,7 +2099,8 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.recorder?.record(
         this.sessionId, "out", frame, "cli", "claude", "", "server:council-wake",
       );
-      this.cliSocket.send(frame + "\n");
+      this.transport.send(frame + "\n");
+      this.noteRealPromptSent();
     } catch (err) {
       return {
         kind: "failed",
@@ -1393,7 +2111,32 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Success: flip turn-state to in-flight. Activity was already
     // registered before the gates (Council Review #15).
     this.observerTurnState = "in-flight";
+    // P2-3: arm the completion backstop so a lost/unparseable `result`
+    // frame can't strand this turn `in-flight` forever.
+    this.armObserverWakeWatchdog();
     return { kind: "sent" };
+  }
+
+  /**
+   * W14: the wake turn went silent. Release the slot WITHOUT a drain (the
+   * pair is about to degrade; the orchestrator re-queues the checkpoint and
+   * delivers it after the auto-heal relaunch) and report the failure.
+   */
+  private handleObserverWakeSilent(sinceMs: number): void {
+    if (this.observerTurnState !== "in-flight") return;
+    log.warn("claude-adapter", "observer wake turn silent — no frame from CLI", {
+      event: "council.observer_wake_silent",
+      sessionId: this.sessionId,
+      sinceMs,
+      action: "give_up",
+    });
+    this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
+    companionBus.emit("observer:wake-failed", {
+      sessionId: this.sessionId,
+      error: `observer wake silent for ${Math.round(sinceMs / 1000)}s`,
+      reason: "silent",
+    });
   }
 
   /**
@@ -1407,6 +2150,42 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   getObserverTurnState(): "idle" | "in-flight" {
     return this.observerTurnState;
+  }
+
+  /**
+   * P2-3 backstop. Arm a one-shot timer that force-releases a wake turn
+   * stranded `in-flight` (lost/unparseable `result` frame). On expiry we
+   * flip back to `idle` and emit `observer:turn-done` — the same terminal
+   * transition {@link handleResultMessage} performs — so the orchestrator
+   * drains any queued checkpoint instead of deadlocking on `busy`. The
+   * timer is `unref`'d so it never keeps the process alive on shutdown.
+   * Mirrors `CodexAdapter.armObserverWakeWatchdog`.
+   */
+  private armObserverWakeWatchdog(): void {
+    this.clearObserverWakeWatchdog();
+    this.observerWakeSilence.arm("observer_wake");
+    const timer = setTimeout(() => {
+      this.observerWakeWatchdog = null;
+      this.observerWakeSilence.disarm();
+      if (this.observerTurnState !== "in-flight") return;
+      log.warn("claude-adapter", "observer wake turn never terminated — force-releasing slot", {
+        event: "council.observer_wake_completion_watchdog",
+        sessionId: this.sessionId,
+        timeoutMs: OBSERVER_WAKE_COMPLETION_WATCHDOG_MS,
+      });
+      this.observerTurnState = "idle";
+      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    }, OBSERVER_WAKE_COMPLETION_WATCHDOG_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.observerWakeWatchdog = timer;
+  }
+
+  private clearObserverWakeWatchdog(): void {
+    this.observerWakeSilence.disarm();
+    if (this.observerWakeWatchdog) {
+      clearTimeout(this.observerWakeWatchdog);
+      this.observerWakeWatchdog = null;
+    }
   }
 
   /**
@@ -1451,11 +2230,88 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
+   * Arm the init-frame health canary. Called from
+   * {@link attachTransport} on every fresh transport. On expiry
+   * (INIT_FRAME_TIMEOUT_MS elapsed with no `system.init` frame),
+   * emit `session:no-init-frame` on the internal bus and surface a
+   * browser-visible warning. Idempotent — a second arm without a
+   * disarm cancels the first, so back-to-back attachTransport calls
+   * (e.g. flap-reconnect) each get a full fresh window.
+   */
+  private armInitFrameCanary(): void {
+    this.disarmInitFrameCanary();
+    this.lastAttachAt = Date.now();
+    const deadlineMs = this.resumeExpected
+      ? INIT_FRAME_TIMEOUT_RESUME_MS
+      : INIT_FRAME_TIMEOUT_MS;
+    this.initFrameTimer = setTimeout(() => {
+      // Clear state BEFORE firing so a same-tick re-arm from the
+      // callback path works cleanly.
+      const attachedAt = this.lastAttachAt;
+      this.initFrameTimer = null;
+      const sinceMs = Date.now() - attachedAt;
+      this.browserMessageCb?.({
+        type: "error",
+        message: `Backend never emitted its init frame in ${Math.round(sinceMs / 1000)}s — CLI may be broken.`,
+      });
+      companionBus.emit("session:no-init-frame", {
+        sessionId: this.sessionId,
+        sinceMs,
+      });
+    }, deadlineMs);
+  }
+
+  /**
+   * Tell the adapter whether the spawn it is about to attach was launched
+   * with `--resume`. The bridge calls this from `openCliTransport` BEFORE
+   * `attachTransport`, sourcing the flag from the launcher's real argv. A
+   * resume selects the longer {@link INIT_FRAME_TIMEOUT_RESUME_MS} canary
+   * deadline (transcript replay + first API round-trip precede `system.init`);
+   * a cold spawn keeps the tight {@link INIT_FRAME_TIMEOUT_MS} window. Safe to
+   * call repeatedly; the value is consumed at the next `armInitFrameCanary`.
+   */
+  setResumeExpected(resume: boolean): void {
+    this.resumeExpected = resume;
+  }
+
+  /**
+   * Wall-clock ms at the last non-empty CLI frame this adapter received.
+   * Baseline is set on {@link attachTransport}; slid forward on every
+   * non-empty line by {@link handleRawMessage}. Zero only before the
+   * first attach (i.e., the adapter has never been wired to a transport).
+   *
+   * Read by the silent-stdio drift detector in `session-orchestrator.ts`
+   * as the authoritative "when did bun last see a CLI frame" signal.
+   * Preferred over the transcript file's mtime because bun writes to
+   * the transcript on many non-CLI events (browser subscribe/disconnect,
+   * session state field mutations, protocol-recording flushes), so the
+   * transcript mtime stays fresh even when zero CLI frames are arriving
+   * — that failure mode is exactly what the detector is supposed to
+   * catch, and the polluted signal made it silent.
+   */
+  getLastCliFrameReceivedMs(): number {
+    return this.lastCliFrameReceivedMs;
+  }
+
+  /**
+   * Cancel a pending init-frame canary. Called on the first
+   * `system.init` frame (success), on transport close (deferred to
+   * exit handler), and on detachWebSocket. Safe to call when no
+   * timer is armed — the pointer check makes this idempotent.
+   */
+  private disarmInitFrameCanary(): void {
+    if (this.initFrameTimer !== null) {
+      clearTimeout(this.initFrameTimer);
+      this.initFrameTimer = null;
+    }
+  }
+
+  /**
    * Send an NDJSON string to the CLI. If the CLI socket is not yet connected,
    * queues the message for later delivery (flushed in attachWebSocket).
    */
   private sendToBackend(ndjson: string): void {
-    if (!this.cliSocket) {
+    if (!this.transport) {
       console.log(
         `[claude-adapter] CLI not yet connected for session ${this.sessionId}, queuing message`,
       );
@@ -1573,17 +2429,20 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
-   * Low-level send: writes NDJSON to the CLI socket with newline delimiter.
-   * Records the outgoing message. Assumes cliSocket is non-null.
+   * Low-level send: writes NDJSON to the CLI transport with newline delimiter.
+   * Records the outgoing message. Assumes the transport is non-null.
    */
   private sendRaw(ndjson: string): void {
+    if (ndjson.startsWith('{"type":"user"') && !(this.initProbe && ndjson === this.initProbe.frame)) {
+      this.noteRealPromptSent();
+    }
     // Record raw outgoing CLI message
     this.recorder?.record(
       this.sessionId, "out", ndjson, "cli", "claude", "",
     );
     try {
       // NDJSON requires a newline delimiter
-      this.cliSocket!.send(ndjson + "\n");
+      this.transport!.send(ndjson + "\n");
     } catch (err) {
       console.error(
         `[claude-adapter] Failed to send to CLI for session ${this.sessionId}:`,

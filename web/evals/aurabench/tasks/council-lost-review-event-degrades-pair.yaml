@@ -1,0 +1,57 @@
+# AuraBench task mined from PR #165 ("fix(council): rescan reviews dir before degrading on wake timeout").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-lost-review-event-degrades-pair
+title: "A review written while its filesystem event was lost is still picked up instead of degrading the pair"
+start_commit: 01c72df3769427e28a572afa991c632e1826b6a6
+prompt: |
+  After the server wakes a Council observer for a checkpoint, a watchdog waits
+  for the matching review in `.council/reviews/`. When the `fs.watch` event for the
+  review file is lost, the pair is degraded at the deadline AND the findings are
+  discarded forever, even though the review file is sitting on disk.
+
+  Required:
+  - in `web/server/review-watcher.ts` export a synchronous
+    `findReviewForCheckpointSync({ directory, checkpointId, normalizeRaw? })`
+    returning `{ payload, file, reviewedAt }` (`file` = the bare filename inside
+      `directory`, not a path; reviewedAt = the file's mtime in ms) for the first review file in `directory` whose payload answers
+    `checkpointId`, or `null`. Only files matching the review filename pattern
+    count; a missing directory returns `null`; unreadable or corrupt files are
+    skipped. `normalizeRaw(raw, provider)` (provider taken from the filename) is
+    applied before parsing, exactly as the live watcher does;
+  - when the wake deadline expires and a matching review is found, process it as
+    if the watcher had delivered it and do not degrade the pair; if none is found
+    (or only reviews for other checkpoints), degrade exactly as today.
+expected_files:
+  - web/server/review-watcher.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/review-watcher.test.ts
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "the live watcher and the rescan normalize reviews differently"
+  - "the deadline no longer degrades when no review exists"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 165
+  merge_commit: 26f3b4a2853cce868040d1a430c8d585004f1789
+  class: bugfix
+  hidden_tests:
+    - web/server/review-watcher.test.ts
+    - web/server/session-orchestrator.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:38:38.659Z"

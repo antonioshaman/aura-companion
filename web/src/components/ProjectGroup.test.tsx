@@ -162,6 +162,39 @@ describe("ProjectGroup", () => {
     expect(screen.queryAllByTestId("council-role-suffix")).toHaveLength(0);
   });
 
+  // ── Convergence badge plumbing (Story 4.1.5) ───────────────────────────────
+  // ProjectGroup is the PRIMARY render path for active (non-archived, non-cron)
+  // sessions. The convergence badge was first wired only through
+  // CollapsibleSessionList (cron/agent/archived), so active pairs — the common
+  // case — silently dropped the badge. These tests pin the `convergence` prop
+  // spread here so that regression can't recur on the hot path.
+
+  it("forwards `convergence` from getCouncilInfo through to SessionItem (mid-cycle badge rendered)", () => {
+    const getCouncilInfo = vi.fn((id: string) => {
+      if (id === "orch_pg")
+        return {
+          pairing: "claude+codex",
+          unreadStops: 0,
+          role: "orchestrator" as const,
+          convergence: { state: "in-progress" as const, cycleNumber: 2, threshold: 3, degraded: false },
+        };
+      return {};
+    });
+    render(<ProjectGroup {...makeProps({ getCouncilInfo })} />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+  });
+
+  it("does NOT render a convergence badge when getCouncilInfo omits convergence", () => {
+    const getCouncilInfo = vi.fn((id: string) => {
+      if (id === "orch_pg") return { pairing: "claude+codex", unreadStops: 0, role: "orchestrator" as const };
+      return {};
+    });
+    render(<ProjectGroup {...makeProps({ getCouncilInfo })} />);
+    expect(screen.queryAllByTestId("council-convergence-badge")).toHaveLength(0);
+  });
+
   // ── Accessibility ─────────────────────────────────────────────────────────
 
   it("passes axe accessibility checks in the expanded council-role state", async () => {

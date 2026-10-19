@@ -78,6 +78,58 @@ describe("MessageBubble - system messages", () => {
   });
 });
 
+// ─── System messages built from errored result frames (UI-RESUME-NOISE) ─────
+
+describe("MessageBubble - result error variants", () => {
+  const diagnostic = "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null";
+
+  it("renders a real execution error in the error color", () => {
+    const msg = makeMessage({ role: "system", content: "Error: Timed out", systemVariant: "error" });
+    render(<MessageBubble message={msg} />);
+    const text = screen.getByText("Error: Timed out");
+    expect(text.className).toContain("text-cc-error");
+  });
+
+  it("renders the --resume bookkeeping frame as a muted, collapsed note (not an error)", () => {
+    const msg = makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    const note = screen.getByTestId("resume-interrupted-note") as HTMLDetailsElement;
+    // Collapsed by default: only the human label is visible.
+    expect(note.open).toBe(false);
+    // Cause-neutral label: the same frame closes a turn cut by a restart AND
+    // one the user stopped mid-tool-call, so it must not claim "restart".
+    expect(screen.getByText("Turn interrupted (stopped or restarted)")).toBeTruthy();
+    expect(screen.queryByText(/by a restart/)).toBeNull();
+    // Nothing in the note uses the error color — this is the whole point.
+    expect(container.querySelector(".text-cc-error")).toBeNull();
+  });
+
+  it("expands to show the raw diagnostic when the summary is clicked", () => {
+    const msg = makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    const note = screen.getByTestId("resume-interrupted-note") as HTMLDetailsElement;
+    fireEvent.click(container.querySelector("summary")!);
+    expect(note.open).toBe(true);
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+  });
+
+  it("passes axe for both variants", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ role: "system", content: "Error: Timed out", systemVariant: "error" })} />
+        <MessageBubble
+          message={makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" })}
+        />
+      </div>,
+    );
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+
 // ─── User messages ───────────────────────────────────────────────────────────
 
 describe("MessageBubble - user messages", () => {
@@ -109,6 +161,28 @@ describe("MessageBubble - user messages", () => {
     expect(images[0].getAttribute("src")).toBe("data:image/png;base64,abc123base64");
     expect(images[1].getAttribute("src")).toBe("data:image/jpeg;base64,def456base64");
     expect(images[0].getAttribute("alt")).toBe("attachment");
+  });
+
+  // Usage-limit auto-resume: the server-sent continuation prompt is labelled
+  // so it is not mistaken for something the user typed; normal messages are not.
+  it("labels an auto-resume user message with the automatic caption", () => {
+    render(<MessageBubble message={makeMessage({ role: "user", content: "Лимит сброшен", origin: "auto_resume" })} />);
+    expect(screen.getByTestId("auto-resume-caption").textContent).toBe("Автопродолжение после лимита");
+  });
+
+  it("does not label a normal user message", () => {
+    render(<MessageBubble message={makeMessage({ role: "user", content: "typed" })} />);
+    expect(screen.queryByTestId("auto-resume-caption")).toBeNull();
+  });
+
+  it("passes axe for the auto-resume user message", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<MessageBubble message={makeMessage({ role: "user", content: "Лимит сброшен", origin: "auto_resume" })} />);
+    // `listitem` is disabled because this file's react-markdown mock renders a
+    // bare demo <li> for every message body — an artifact of the mock, not of
+    // the caption under test.
+    const results = await axe(container, { rules: { listitem: { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
   });
 
   it("does not render images section when images array is empty", () => {
@@ -718,5 +792,58 @@ describe("MessageBubble - ContentBlockRenderer", () => {
     render(<MessageBubble message={msg} />);
 
     expect(screen.getByText("file contents here")).toBeTruthy();
+  });
+});
+
+// Observer findings card gate (observer review 2026-10-15, checkpoint 149
+// WARN): a findings-shaped JSON reply card-renders ONLY with observer
+// provenance — an ordinary assistant replying "[]" stays plain markdown.
+describe("observer findings rendering gate", () => {
+  const FINDINGS_TEXT = JSON.stringify([
+    { severity: "STOP", claim: "swallowed error", evidence_path: "src/a.ts", confidence: "high" },
+  ]);
+
+  it("card-renders a findings array for an observer session (plain content path)", () => {
+    const msg = makeMessage({ role: "assistant", content: FINDINGS_TEXT });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.getByRole("list", { name: "Observer findings" })).toBeTruthy();
+    expect(screen.getByText("swallowed error")).toBeTruthy();
+  });
+
+  it("card-renders a findings array in a content block for an observer session", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      contentBlocks: [{ type: "text", text: "[]" }],
+    });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.getByRole("status")).toBeTruthy();
+  });
+
+  it("does NOT card-render for a non-observer session — raw JSON stays markdown", () => {
+    const msg = makeMessage({ role: "assistant", content: "[]" });
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Observer findings" })).toBeNull();
+  });
+
+  it("does NOT card-render while streaming (partial JSON must not flip mid-stream)", () => {
+    const msg = makeMessage({ role: "assistant", content: FINDINGS_TEXT, isStreaming: true });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.queryByRole("list", { name: "Observer findings" })).toBeNull();
+  });
+
+  // Observer review 2026-10-15 (checkpoint 150, STOP): the content-block
+  // path must honour the same streaming gate — a streaming message whose
+  // text arrives as contentBlocks must not card-render mid-stream either.
+  it("does NOT card-render a streaming message with contentBlocks", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      isStreaming: true,
+      contentBlocks: [{ type: "text", text: "[]" }],
+    });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

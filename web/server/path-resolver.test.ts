@@ -111,6 +111,23 @@ describe("captureUserShellPath", () => {
     );
   });
 
+  it("brace-delimits the PATH expansion in the capture command (regression)", () => {
+    // Regression for the silent-capture bug: `$PATH___PATH_END___` parses as
+    // ONE shell variable name (underscores are valid identifier chars), which
+    // is unset — so the END sentinel never printed, the regex never matched,
+    // and capture ALWAYS fell through to buildFallbackPath. On the prod box
+    // that fallback ordered /usr/bin before ~/.local/bin, pinning spawns to a
+    // stale Claude CLI (claude_code_version_too_old 400s on newer models).
+    // The fix is `${PATH}` — braces terminate the variable name.
+    mockExecSync.mockReturnValueOnce("___PATH_START___/usr/bin___PATH_END___\n");
+
+    captureUserShellPath();
+
+    const cmd = mockExecSync.mock.calls[0][0] as string;
+    expect(cmd).toContain("${PATH}___PATH_END___");
+    expect(cmd).not.toContain("$PATH___PATH_END___"); // bare form = the bug
+  });
+
   it("defaults to /bin/bash when $SHELL is not set", () => {
     delete process.env.SHELL;
     mockExecSync.mockReturnValueOnce(
@@ -211,6 +228,22 @@ describe("buildFallbackPath", () => {
     const result = buildFallbackPath();
     const dirs = result.split(":");
     expect(dirs.length).toBe(new Set(dirs).size);
+  });
+
+  it("orders user-local installs BEFORE system paths (regression)", () => {
+    // The module exists to prefer the user's self-updating installs
+    // (claude/codex in ~/.local/bin) over stale system copies. The original
+    // order put /usr/bin first, so when shell capture failed the fallback
+    // resolved `claude` to a stale /usr/bin symlink → version_too_old 400s.
+    mockExistsSync.mockImplementation((p: string) =>
+      ["/home/testuser/.local/bin", "/usr/bin", "/usr/local/bin"].includes(p as string),
+    );
+
+    const result = buildFallbackPath();
+    const dirs = result.split(":");
+    expect(dirs.indexOf("/home/testuser/.local/bin")).toBeGreaterThanOrEqual(0);
+    expect(dirs.indexOf("/home/testuser/.local/bin")).toBeLessThan(dirs.indexOf("/usr/bin"));
+    expect(dirs.indexOf("/home/testuser/.local/bin")).toBeLessThan(dirs.indexOf("/usr/local/bin"));
   });
 
   describe("Windows support", () => {

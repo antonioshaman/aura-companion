@@ -24,6 +24,7 @@ import {
   type EvalFindingSeverity,
   type EvalGroundingDowngrade,
   type EvalGroundingFailReason,
+  type EvalLineFacts,
   type EvalLabelRecord,
   type EvalLabelVerdict,
   type EvalManifestPartition,
@@ -41,6 +42,8 @@ const SEVERITIES: ReadonlySet<string> = new Set(["STOP", "WARN", "NOTE", "INFO"]
 const FAIL_REASONS: ReadonlySet<string> = new Set([
   "evidence_not_in_modified_set",
   "evidence_missing_on_disk",
+  "evidence_lines_out_of_range",
+  "evidence_lines_unchanged",
 ]);
 const VERDICTS: ReadonlySet<string> = new Set([
   "true_positive",
@@ -138,6 +141,50 @@ function parseExistenceMap(v: unknown): ParseResult<Record<string, boolean>> {
   return ok(out);
 }
 
+function isLineRange(v: unknown): v is [number, number] {
+  return (
+    Array.isArray(v) &&
+    v.length === 2 &&
+    Number.isInteger(v[0]) &&
+    Number.isInteger(v[1]) &&
+    (v[0] as number) >= 1 &&
+    (v[1] as number) >= (v[0] as number)
+  );
+}
+
+function parseLineFactsMap(v: unknown): ParseResult<Record<string, EvalLineFacts | null>> {
+  if (!isObject(v)) return fail("grounding_inputs.line_facts_by_path is not an object");
+  const out: Record<string, EvalLineFacts | null> = {};
+  for (const [path, facts] of Object.entries(v)) {
+    const at = `grounding_inputs.line_facts_by_path[${path}]`;
+    if (facts === null) {
+      out[path] = null;
+      continue;
+    }
+    if (!isObject(facts)) return fail(`${at} is not an object or null`);
+    if (!Number.isInteger(facts.line_count) || (facts.line_count as number) < 0) {
+      return fail(`${at}.line_count is not a non-negative integer`);
+    }
+    let changed: [number, number][] | null = null;
+    if (facts.changed_ranges !== null) {
+      if (!Array.isArray(facts.changed_ranges) || !facts.changed_ranges.every(isLineRange)) {
+        return fail(`${at}.changed_ranges is not null or an array of [start, end] ranges`);
+      }
+      changed = facts.changed_ranges.map((r) => [r[0], r[1]] as [number, number]);
+    }
+    if (!isObject(facts.cited_lines)) return fail(`${at}.cited_lines is not an object`);
+    const cited: Record<string, string> = {};
+    for (const [line, text] of Object.entries(facts.cited_lines)) {
+      if (!/^[1-9][0-9]*$/.test(line) || typeof text !== "string") {
+        return fail(`${at}.cited_lines[${line}] is not a line-number → string entry`);
+      }
+      cited[line] = text;
+    }
+    out[path] = { line_count: facts.line_count as number, changed_ranges: changed, cited_lines: cited };
+  }
+  return ok(out);
+}
+
 /**
  * Parse a sidecar artifact from its raw on-disk text. Size-caps BEFORE the
  * JSON parse (a hostile or corrupt file must not be able to make us allocate
@@ -202,6 +249,13 @@ export function parseSidecarArtifact(
   if (!isObject(v.grounding_inputs)) return fail("sidecar.grounding_inputs is not an object");
   const existence = parseExistenceMap((v.grounding_inputs as Record<string, unknown>).existence_by_path);
   if (!existence.ok) return existence;
+  const rawLineFacts = (v.grounding_inputs as Record<string, unknown>).line_facts_by_path;
+  let lineFacts: Record<string, EvalLineFacts | null> | undefined;
+  if (rawLineFacts !== undefined) {
+    const parsed = parseLineFactsMap(rawLineFacts);
+    if (!parsed.ok) return parsed;
+    lineFacts = parsed.value;
+  }
 
   return ok({
     eval_artifact_version: v.eval_artifact_version,
@@ -216,7 +270,10 @@ export function parseSidecarArtifact(
     manifest_partition: partition.value,
     raw_findings: rawFindings,
     grounding_downgrades: downgrades,
-    grounding_inputs: { existence_by_path: existence.value },
+    grounding_inputs: {
+      existence_by_path: existence.value,
+      ...(lineFacts !== undefined ? { line_facts_by_path: lineFacts } : {}),
+    },
   });
 }
 

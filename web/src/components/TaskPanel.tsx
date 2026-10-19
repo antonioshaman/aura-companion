@@ -120,6 +120,25 @@ function PanelSection({
 
 // ─── Shared progress meter ──────────────────────────────────────────────────
 
+// Utilization from /api/oauth/usage is a 0–100 percentage. Clamp to that range
+// and treat non-finite values as 0 so a bad number never yields "NaN%" width.
+function safePct(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(v, 100));
+}
+
+// Human-readable label for extra_usage.disabled_reason (verbatim API tokens).
+function extraDisabledLabel(reason: string): string {
+  switch (reason) {
+    case "out_of_credits":
+      return "Out of credits";
+    case "not_configured":
+      return "Not configured";
+    default:
+      return reason.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  }
+}
+
 function barColor(pct: number): string {
   if (pct > 80) return "bg-cc-error";
   if (pct > 50) return "bg-cc-warning";
@@ -133,26 +152,27 @@ function barLevel(pct: number): string {
 }
 
 function ProgressMeter({ label, pct, detail }: { label: string; pct: number; detail?: string }) {
+  const p = safePct(pct);
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-cc-muted uppercase tracking-wider">{label}</span>
         <span className="text-[11px] text-cc-muted tabular-nums">
-          {Math.round(pct)}%
+          {Math.round(p)}%
           {detail && <span className="ml-1 text-cc-muted">({detail})</span>}
         </span>
       </div>
       <div
         role="meter"
-        aria-label={`${label} usage — ${barLevel(pct)}`}
-        aria-valuenow={Math.round(pct)}
+        aria-label={`${label} usage — ${barLevel(p)}`}
+        aria-valuenow={Math.round(p)}
         aria-valuemin={0}
         aria-valuemax={100}
         className="w-full h-1.5 rounded-full bg-cc-hover overflow-hidden"
       >
         <div
-          className={`h-full rounded-full transition-all duration-500 ${barColor(pct)}`}
-          style={{ width: `${Math.min(pct, 100)}%` }}
+          className={`h-full rounded-full transition-all duration-500 ${barColor(p)}`}
+          style={{ width: `${p}%` }}
         />
       </div>
     </div>
@@ -191,7 +211,15 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
 
   const has5h = limits.five_hour !== null;
   const has7d = limits.seven_day !== null;
-  const hasExtra = !has5h && !has7d && limits.extra_usage?.is_enabled;
+  const extra = limits.extra_usage;
+  // Enabled overage meter stays low-clutter: only when there's no 5h/7d bar.
+  const showExtraMeter = !has5h && !has7d && extra?.is_enabled === true;
+  // But surface the overage-DISABLED state (e.g. out_of_credits) even alongside
+  // 5h/7d. That is the exact condition behind an "out of extra usage" 429, so
+  // hiding it makes the panel silently contradict a truthful rejection.
+  const showExtraDisabled =
+    extra != null && extra.is_enabled === false && !!extra.disabled_reason;
+  const hasExtra = showExtraMeter || showExtraDisabled;
 
   if (!has5h && !has7d && !hasExtra) return null;
 
@@ -211,29 +239,37 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
           detail={limits.seven_day.resets_at ? formatResetTime(limits.seven_day.resets_at) : undefined}
         />
       )}
-      {hasExtra && limits.extra_usage && (
+      {showExtraMeter && extra && (
         <div className="space-y-1">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-cc-muted uppercase tracking-wider">Extra</span>
             <span className="text-[11px] text-cc-muted tabular-nums">
-              ${limits.extra_usage.used_credits.toFixed(2)} / ${limits.extra_usage.monthly_limit}
+              ${extra.used_credits.toFixed(2)} / ${extra.monthly_limit}
             </span>
           </div>
-          {limits.extra_usage.utilization !== null && (
+          {extra.utilization !== null && (
             <div
               role="meter"
-              aria-label={`Extra usage — ${barLevel(limits.extra_usage.utilization)}`}
-              aria-valuenow={Math.round(limits.extra_usage.utilization)}
+              aria-label={`Extra usage — ${barLevel(safePct(extra.utilization))}`}
+              aria-valuenow={Math.round(safePct(extra.utilization))}
               aria-valuemin={0}
               aria-valuemax={100}
               className="w-full h-1.5 rounded-full bg-cc-hover overflow-hidden"
             >
               <div
-                className={`h-full rounded-full transition-all duration-500 ${barColor(limits.extra_usage.utilization)}`}
-                style={{ width: `${Math.min(limits.extra_usage.utilization, 100)}%` }}
+                className={`h-full rounded-full transition-all duration-500 ${barColor(safePct(extra.utilization))}`}
+                style={{ width: `${safePct(extra.utilization)}%` }}
               />
             </div>
           )}
+        </div>
+      )}
+      {showExtraDisabled && extra?.disabled_reason && (
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-cc-muted uppercase tracking-wider">Extra</span>
+          <span className="text-[11px] text-cc-warning tabular-nums">
+            Disabled · {extraDisabledLabel(extra.disabled_reason)}
+          </span>
         </div>
       )}
     </div>
@@ -312,6 +348,28 @@ function CodexTokenDetailsSection({ sessionId }: { sessionId: string }) {
       {details.modelContextWindow > 0 && (
         <ProgressMeter label="Context" pct={contextPct} />
       )}
+    </div>
+  );
+}
+
+// ─── Claude Context Usage ─────────────────────────────────────────────────────
+
+/**
+ * Context-window usage meter for Claude sessions. Codex surfaces context% inside
+ * its token-details section ({@link CodexTokenDetailsSection}); Claude never
+ * rendered it even though the value is already derived from each result frame's
+ * `modelUsage.contextWindow` and stored as `context_used_percent` (see ws.ts).
+ * Only shown once real usage exists (> 0) — a fresh Claude session before its
+ * first turn has no context data, so a "0%" meter there would be noise, not
+ * signal (Codex can show 0% because its context window is known from the first
+ * frame; Claude's is only known after a result).
+ */
+function ClaudeContextSection({ sessionId }: { sessionId: string }) {
+  const contextPct = useStore((s) => s.sessions.get(sessionId)?.context_used_percent ?? 0);
+  if (contextPct <= 0) return null;
+  return (
+    <div className="shrink-0 px-4 py-2.5 space-y-2">
+      <ProgressMeter label="Context" pct={contextPct} />
     </div>
   );
 }
@@ -819,7 +877,12 @@ function UsageLimitsRenderer({ sessionId }: { sessionId: string }) {
       </>
     );
   }
-  return <UsageLimitsSection sessionId={sessionId} />;
+  return (
+    <>
+      <UsageLimitsSection sessionId={sessionId} />
+      <ClaudeContextSection sessionId={sessionId} />
+    </>
+  );
 }
 
 /** Git branch info */
@@ -897,16 +960,22 @@ function GitBranchSection({ sessionId }: { sessionId: string }) {
 /** Threshold past which the task snapshot is flagged as possibly stale (5 min). */
 const TASKS_STALE_AFTER_MS = 5 * 60 * 1000;
 
-/** Tasks section — only visible for Claude Code sessions */
+/**
+ * Tasks section — shows the agent's task list and completion.
+ * Backend-agnostic: Claude drives it via TodoWrite frames; Codex drives it via
+ * plan updates the adapter re-emits as synthetic TodoWrite frames
+ * (codex-adapter.ts `handleTurnPlanUpdated`), both landing in `sessionTasks`.
+ */
 function TasksSection({ sessionId }: { sessionId: string }) {
   const tasks = useStore((s) => s.sessionTasks.get(sessionId) || EMPTY_TASKS);
   const updatedAt = useStore((s) => s.sessionTasksUpdatedAt.get(sessionId));
+  const runState = useStore((s) => s.sessionStatus.get(sessionId));
   const session = useStore((s) => s.sessions.get(sessionId));
-  const sdk = useSdkSession(sessionId);
-  const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
 
   // Re-render every 30s so the relative "updated N ago" hint keeps advancing
-  // while the session is idle and no new TodoWrite frame arrives.
+  // while the session is idle and no new task-list update arrives. The 5-min
+  // staleness threshold applies to both backends: Claude TodoWrite and Codex
+  // plan updates both stamp `sessionTasksUpdatedAt` with the frame time.
   const [, setNowTick] = useState(0);
   useEffect(() => {
     if (!updatedAt) return;
@@ -914,9 +983,50 @@ function TasksSection({ sessionId }: { sessionId: string }) {
     return () => clearInterval(id);
   }, [updatedAt]);
 
-  if (!session || isCodex) return null;
+  if (!session) return null;
 
   const isStale = updatedAt != null && Date.now() - updatedAt > TASKS_STALE_AFTER_MS;
+  const isRunning = runState === "running" || runState === "compacting";
+  // A single long-running in-progress step (big build, long test, deep-thinking
+  // turn) has NO task-state transition to report, so wall-clock staleness alone
+  // is not evidence the list is behind — the agent already told us what it is
+  // doing. Reserve the amber "may be behind" framing for the one state that is
+  // provably behind: running, stale, and nothing in-flight to explain the
+  // silence (Council Review 2026-07-05 #6 — avoid warning-fatigue on healthy
+  // long steps).
+  const hasInProgress = tasks.some((t) => t.status === "in_progress");
+  const listBehind = isStale && isRunning && !hasInProgress;
+
+  // Four honest states, each with its own sentence so a stale panel is never
+  // ambiguous between "agent crashed", "agent finished and abandoned the list",
+  // and "agent idle waiting for me" (Council Review 2026-07-05 #5/#7). The
+  // visible copy carries the "mirror, not ground truth" mental model directly —
+  // it does not depend on the hover tooltip to be understood.
+  let badgeTone: "behind" | "active" | "idle-stale" | "fresh";
+  let badgeCopy = "";
+  let badgeAnnounce = "";
+  if (updatedAt != null) {
+    const ago = timeAgo(updatedAt);
+    if (listBehind) {
+      badgeTone = "behind";
+      badgeCopy = `Agent active · list may be behind · ${ago}`;
+      badgeAnnounce = "Task list may be behind the agent's live progress";
+    } else if (isRunning) {
+      badgeTone = "active";
+      badgeCopy = `Agent active · updated ${ago}`;
+      badgeAnnounce = "Agent active";
+    } else if (isStale) {
+      badgeTone = "idle-stale";
+      badgeCopy = `Idle · list last updated ${ago}`;
+      badgeAnnounce = "Session idle, task list last updated a while ago";
+    } else {
+      badgeTone = "fresh";
+      badgeCopy = `Updated ${ago}`;
+      badgeAnnounce = "";
+    }
+  } else {
+    badgeTone = "fresh";
+  }
 
   return (
     <div className="px-3 py-2">
@@ -925,12 +1035,31 @@ function TasksSection({ sessionId }: { sessionId: string }) {
       ) : (
         <>
           {updatedAt != null && (
-            <p
-              className={`mb-1.5 px-2.5 text-[10px] ${isStale ? "text-cc-warning" : "text-cc-muted"}`}
-              title="The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
-            >
-              Snapshot · updated {timeAgo(updatedAt)}
-            </p>
+            <>
+              <p
+                className={`mb-1.5 px-2.5 text-[10px] flex items-center gap-1 ${badgeTone === "behind" ? "text-cc-warning" : "text-cc-muted"}`}
+                title={
+                  badgeTone === "behind"
+                    ? "The agent is actively working but hasn't refreshed its task list — this snapshot is behind live progress until the agent next updates it."
+                    : "The task list mirrors the agent's last task-list update — it may lag behind actual progress until the agent updates it."
+                }
+              >
+                {badgeTone === "behind" && (
+                  // Static, damped dot — the state is a heads-up, not an alarm.
+                  // An infinite full-saturation pulse read as alarm-grade
+                  // (Council Review 2026-07-05 #8).
+                  <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full bg-cc-warning/70" />
+                )}
+                {badgeCopy}
+              </p>
+              {/* Polite live region announces discrete state transitions to
+                  screen readers. It carries the state phrase WITHOUT the
+                  relative timestamp so the 30s "N ago" ticks do not re-announce
+                  (Council Review 2026-07-05 #13). */}
+              <span className="sr-only" aria-live="polite">
+                {badgeAnnounce}
+              </span>
+            </>
           )}
           <div className="space-y-0.5">
             {tasks.map((task) => (
@@ -1109,7 +1238,7 @@ function SectionWithBadge({
 
 // ─── Task Panel ─────────────────────────────────────────────────────────────
 
-export { CodexRateLimitsSection, CodexTokenDetailsSection };
+export { CodexRateLimitsSection, CodexTokenDetailsSection, ClaudeContextSection };
 
 export function TaskPanel({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions.get(sessionId));

@@ -3,6 +3,7 @@ process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 // Enrich process PATH at startup so binary resolution and `which` calls can find
 // binaries installed via version managers (nvm, volta, fnm, etc.).
 // Critical when running as a launchd/systemd service with a restricted PATH.
+import { VerifiedModelStore, VERIFIED_MODELS_PATH, getVerifiedModelStore, setVerifiedModelStore } from "./verified-models.js";
 import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
@@ -10,18 +11,17 @@ import { dirname, resolve } from "node:path";
 import { realpathSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
-import { CliLauncher } from "./cli-launcher.js";
+import { CliLauncher, claudeTransportMode } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore, migrateLegacyTmpdirSessions } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
 import { containerManager } from "./container-manager.js";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { startTelemetryHeartbeat } from "./telemetry.js";
+import { startTelemetryHeartbeat, startPresencePing } from "./telemetry.js";
 import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
@@ -30,24 +30,27 @@ import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
 import { IdleTimerManager } from "./idle-timer-manager.js";
+import { initServerLayerFlags, isDefaultLayerFlags } from "./layer-flags.js";
 import { SystemClock } from "./clock-source.js";
 import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
 import { log as appLog } from "./logger.js";
+import { gateBootResumeOnCrashLoop, markCleanShutdown } from "./boot-crash-guard.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
-import { authenticateManagedWebSocket } from "./ws-auth.js";
+import { authenticateManagedWebSocket, checkCliSocketUpgrade } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
-import { isOriginAllowed } from "./middleware/origin-allowlist.js";
+import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
+import { MAX_REQUEST_BODY_BYTES, originalRequest, requestBodyLimit } from "./middleware/body-limit.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
-import { reapOrphans } from "./orphan-reaper.js";
+import { reapOrphans, resolveOrphanReaperGate } from "./orphan-reaper.js";
 import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
-import { getToken, verifyToken } from "./auth-manager.js";
+import { getToken, verifyToken, isDirectLocalRequest, describeTokenSource } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -69,6 +72,9 @@ if (!process.env.COMPANION_SESSION_DIR) {
   migrateLegacyTmpdirSessions();
 }
 const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
+// Observed-working models (verified-models.ts): wired here, and only here,
+// so unit tests never touch the operator's real ~/.companion file.
+setVerifiedModelStore(new VerifiedModelStore({ path: VERIFIED_MODELS_PATH }));
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
 const worktreeTracker = new WorktreeTracker();
@@ -90,9 +96,23 @@ const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 // rehydrate path calls into manager — and late-injection is the cleanest
 // pattern for that without sacrificing type safety (a generic `Lazy<T>` or
 // proxy would push the cycle off the type system and onto runtime checks).
+// aura-meta-diet C3: resolve COMPANION_LAYER_* once at boot — unknown values
+// fail closed to the default and are warned about here.
+{
+  const { flags } = initServerLayerFlags();
+  if (!isDefaultLayerFlags(flags)) console.log(`[layer-flags] server defaults: ${JSON.stringify(flags)}`);
+}
+
+// Diagnostics drift feed (plan Task 4): created before the orchestrator so its
+// SessionRecovery can hand every silent_stdio_drift.* payload to it.
+const diagnosticsDriftFeed = new DriftFeed();
+
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,
+  onDriftEvent: (payload) => diagnosticsDriftFeed.record(payload),
+  // Usage-limit auto-resume schedules survive restarts in this file.
+  autoResume: { filePath: join(COMPANION_HOME, "auto-resume.json") },
 });
 
 const idleTimerManager = new IdleTimerManager({
@@ -228,9 +248,18 @@ wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
+// stdio transport: the launcher owns the child process, the bridge owns the
+// adapter (it holds the idle-clock closures). This hands the pipe over.
+launcher.setStdioCliOpener((sessionId, transport, opts) => wsBridge.handleCLIStdioOpen(sessionId, transport, opts));
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 containerManager.restoreState(CONTAINER_STATE_PATH);
+
+// W2 crash-loop guard: boot resume relaunches every session alive before the
+// restart. After repeated NON-graceful deaths (OOM-kill under Restart=always)
+// that would re-spawn the whole fleet on each respawn — skip it then; sessions
+// come back when a browser opens them.
+gateBootResumeOnCrashLoop(sessionStore.directory, () => launcher.takeBootResumeCandidates());
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
@@ -249,6 +278,9 @@ function readPackageVersion(): string {
   }
 }
 startTelemetryHeartbeat(readPackageVersion());
+// Presence ping — feeds the global "N online" figure. Only beats while a human
+// actually has the UI open (≥1 connected browser socket).
+startPresencePing(() => wsBridge.countDistinctBrowsers());
 
 // AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
 // AFTER bridge + orchestrator wiring (so the launcher's restored
@@ -262,11 +294,17 @@ startTelemetryHeartbeat(readPackageVersion());
 // matters — this seam sits between orchestrator.initialize() (boot
 // reconcile complete) and the CleanupScheduler.start() that arms
 // downstream sweeps.
-void reapOrphans({
-  loadedSessions: launcher.listSessions(),
-  sentinelRoot: sessionStore.directory,
-  sessionsRoot: sessionStore.directory,
-}).catch((err) => {
+const orphanReaperGate = resolveOrphanReaperGate(process.env.COMPANION_ORPHAN_REAPER);
+if (orphanReaperGate.warning) console.warn(`[orphan-reaper] ${orphanReaperGate.warning}`);
+if (!orphanReaperGate.enabled) console.log("[orphan-reaper] disabled by COMPANION_ORPHAN_REAPER");
+void (orphanReaperGate.enabled
+  ? reapOrphans({
+      loadedSessions: launcher.listSessions(),
+      sentinelRoot: sessionStore.directory,
+      sessionsRoot: sessionStore.directory,
+    })
+  : Promise.resolve()
+).catch((err) => {
   // The reaper is structurally never-throw (every per-pid path catches
   // its own errors); this .catch is a belt-and-braces guard so a future
   // refactor that introduces a top-level throw doesn't crash bun init.
@@ -361,8 +399,29 @@ if (managedAuthEnabled) {
 // response — including HTML, JSON, and 404s — carries the headers.
 app.use("/*", securityHeaders());
 
-app.use("/api/*", cors());
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
+// S9: cap request bodies (chunked ones too — see middleware/body-limit.ts).
+app.use("/*", requestBodyLimit());
+
+app.use("/api/*", apiCors());
+const runtimeSnapshotDeps: RuntimeSnapshotDeps = {
+  metrics: metricsCollector,
+  gauges: wsBridge,
+  activeTerminalCount: () => terminalManager.activeTerminalIds().length,
+  scheduler: cleanupScheduler,
+};
+
+// Diagnostics page + background KB analyzer (plan Task 13): one wiring seam.
+const diagnosticsService = createDiagnosticsService({
+  launcher,
+  wsBridge,
+  orchestrator,
+  runtime: runtimeSnapshotDeps,
+  driftFeed: diagnosticsDriftFeed,
+  settings: getSettings,
+  version: readPackageVersion(),
+});
+
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port, diagnosticsService.routes));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -391,9 +450,8 @@ app.get("/manifest.json", (c) => {
   } else {
     // Localhost bypass — always embed the token for same-machine installs
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
-    const ip = bunServer?.requestIP?.(c.req.raw);
-    const addr = ip?.address ?? "";
-    if (addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1") {
+    const ip = bunServer?.requestIP?.(originalRequest(c.req.raw));
+    if (isDirectLocalRequest(ip?.address, c.req.raw.headers)) {
       manifest.start_url = `/?token=${getToken()}`;
     }
   }
@@ -414,12 +472,32 @@ const server = Bun.serve<SocketData>({
   hostname: host,
   port,
   idleTimeout: 0, // Disable top-level idle timeout — it kills idle browser WebSockets (code 1006)
+  maxRequestBodySize: MAX_REQUEST_BODY_BYTES, // S9: 413 on an oversized Content-Length
   async fetch(req, server) {
-    const url = new URL(req.url);
+    // Guard against malformed request-lines from port scanners / malformed
+    // proxies. `new URL(req.url)` throws `TypeError [ERR_INVALID_URL]` on
+    // inputs like `/nice%20ports%2C/Tri%6Eity.txt%2ebak` or bare `/`; an
+    // uncaught throw inside the handler leaves the underlying socket in
+    // CLOSE_WAIT, and enough of them accumulate to distort the process's
+    // memory footprint over a long uptime. Return a bounded 400 instead.
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return new Response("Bad Request", { status: 400 });
+    }
 
     // ── CLI WebSocket — Claude Code CLI connects here via --sdk-url ────
     const cliMatch = url.pathname.match(/^\/ws\/cli\/([a-f0-9-]+)$/);
     if (cliMatch) {
+      const cliGate = checkCliSocketUpgrade({
+        address: server.requestIP(req)?.address,
+        headers: req.headers,
+        transportMode: claudeTransportMode(),
+      });
+      if (!cliGate.ok) {
+        return new Response(cliGate.body, { status: cliGate.status });
+      }
       const sessionId = cliMatch[1];
       const upgraded = server.upgrade(req, {
         data: { kind: "cli" as const, sessionId },
@@ -430,8 +508,7 @@ const server = Bun.serve<SocketData>({
 
     // Helper: check if request is from localhost (same machine)
     const reqIp = server.requestIP(req);
-    const reqAddr = reqIp?.address ?? "";
-    const isLocalhost = reqAddr === "127.0.0.1" || reqAddr === "::1" || reqAddr === "::ffff:127.0.0.1";
+    const isLocalhost = isDirectLocalRequest(reqIp?.address, req.headers);
 
     // Task 15a: shared Origin allowlist check applied to every
     // browser-facing WS upgrade. WebSocket bypasses same-origin policy
@@ -441,6 +518,30 @@ const server = Bun.serve<SocketData>({
     // not browser) is excluded — it carries no Origin header by design.
     const reqOrigin = req.headers.get("origin");
     const originOk = isOriginAllowed({ origin: reqOrigin, localhost: isLocalhost });
+    const getRequestCookie = (name: string): string | null => {
+      const cookieHeader = req.headers.get("cookie");
+      if (!cookieHeader) return null;
+      for (const part of cookieHeader.split(";")) {
+        const [rawName, ...rawValue] = part.trim().split("=");
+        if (rawName === name) {
+          const raw = rawValue.join("=");
+          // A malformed percent-escape (e.g. a lone "%") makes decodeURIComponent
+          // throw; a bad cookie must degrade to "no token" (→ 401), never a 500.
+          try {
+            return decodeURIComponent(raw);
+          } catch {
+            return raw;
+          }
+        }
+      }
+      return null;
+    };
+    const verifyLegacyWebSocketAuth = (): boolean => {
+      if (isLocalhost) return true;
+      const queryToken = url.searchParams.get("token");
+      const cookieToken = getRequestCookie("companion_auth");
+      return verifyToken(queryToken) || verifyToken(cookieToken);
+    };
 
     // ── Browser WebSocket — connects to a specific session ─────────────
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
@@ -454,14 +555,14 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
       const sessionId = browserMatch[1];
+      const clientId = url.searchParams.get("clientId")?.slice(0, 128) || undefined;
       const upgraded = server.upgrade(req, {
-        data: { kind: "browser" as const, sessionId },
+        data: { kind: "browser" as const, sessionId, clientId },
       });
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 400 });
@@ -479,8 +580,7 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
@@ -504,8 +604,7 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
@@ -564,13 +663,12 @@ const server = Bun.serve<SocketData>({
   },
 });
 
-const authToken = getToken();
+// Resolve (and persist on first run) the token, but never print it: show
+// where it lives instead (`bun run generate-token` prints it on demand).
+getToken();
 console.log(`Server running on http://${host}:${server.port}`);
 console.log();
-console.log(`  Auth token: ${authToken}`);
-if (process.env.COMPANION_AUTH_TOKEN) {
-  console.log("  (using COMPANION_AUTH_TOKEN env var)");
-}
+console.log(`  Auth token: ${describeTokenSource()}`);
 console.log();
 console.log(`  CLI WebSocket:     ws://localhost:${server.port}/ws/cli/:sessionId`);
 console.log(`  Browser WebSocket: ws://localhost:${server.port}/ws/browser/:sessionId`);
@@ -604,6 +702,17 @@ if (isRunningAsService()) {
   console.log("[server] Running as background service");
 }
 
+// ── Claude model list warm-up (fire-and-forget) ─────────────────────────────
+// Moves the cold Anthropic /v1/models fetch off the first New Session open
+// and seeds the disk tier used as stale fallback on later upstream failures.
+// Deferred a tick so it never competes with synchronous boot wiring.
+setTimeout(() => {
+  // warmAnthropicModelsCache never throws; the catch guards getSettings().
+  try {
+    void warmAnthropicModelsCache(getSettings().anthropicApiKey);
+  } catch { /* best-effort: the GET route fetches on demand */ }
+}, 1_000);
+
 // ── Bootstrap finished — /ready may now flip green (Deploy expert D5) ──────
 // All synchronous wiring is done above this point. Tailscale restoration is
 // best-effort (fire-and-forget) and not part of the readiness contract.
@@ -611,7 +720,13 @@ isReady = true;
 
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";
+import { warmAnthropicModelsCache } from "./anthropic-models-cache.js";
+import { getSettings } from "./settings-manager.js";
+import { installEventLoopLagMonitor, formatTopOperations, trackSync } from "./event-loop-lag-monitor.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { buildRuntimeSnapshot, noteRuntimeSnapshotLogged, type RuntimeSnapshotDeps } from "./diagnostics/runtime-snapshot.js";
+import { DriftFeed } from "./diagnostics/drift-feed.js";
+import { createDiagnosticsService } from "./diagnostics/diagnostics-service.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
 import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
 import {
@@ -630,10 +745,12 @@ import { sweepRetention } from "./cleanup/retention-sweeper.js";
 // convention as Phase E (registerSweep) plus the new registerReconcile
 // seam for the EC-8 sentinel-recovery half of the contract.
 import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { sweepArchivedProcesses } from "./cleanup/archived-process-reclaim.js";
 import { reconcileStaleReapingMarkers } from "./cleanup/sentinel-markers.js";
 import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
+
 
 // AURA-LOCAL: cleanup-subsystem config snapshot used by the 5-min
 // diagnostic tick's memory-pressure WARN. Loaded ONCE at module
@@ -730,6 +847,27 @@ cleanupScheduler.registerSweep("eviction-sweep", async () => {
       };
     },
     notifyArchived: (sid) => idleTimerManager.setArchived(sid),
+  });
+});
+
+// AURA-LOCAL: archived-session process reclamation. Closes the leak
+// eviction-sweep leaves open — an ARCHIVED session whose Companion-spawned
+// CLI process is still ALIVE (state != exited, identity matches). eviction
+// only reclaims the Map/disk row for archived+exited rows and deliberately
+// RETAINS a live matching process; this tier kills that process via
+// launcher.kill (EC-45 identity-verify inside), after which the eviction
+// tier reclaims the now-exited row on a later tick. Gated on the same
+// evictionGrace rubicon.
+cleanupScheduler.registerSweep("archived-process-reclaim", async () => {
+  await sweepArchivedProcesses(diagnosticsCleanupConfig, {
+    getLauncherSessions: () =>
+      launcher.listSessions().map((info) => ({
+        sessionId: info.sessionId,
+        pid: info.pid,
+        archived: info.archived,
+        state: info.state,
+      })),
+    killSession: (sid) => launcher.kill(sid),
   });
 });
 
@@ -831,56 +969,14 @@ let lastMemoryPressureWarnAt: number | null = null;
 // pending tick never keeps the process alive on exit, and wrap the body in
 // try/catch so a single snapshot/probe throw cannot kill the only diagnostic
 // timer for the rest of the process lifetime.
-const diagnosticsTimer = setInterval(() => {
+const diagnosticsTimer = setInterval(() => trackSync("diagnostics.tick", () => {
   try {
-  const snap = metricsCollector.getSnapshot(wsBridge);
-  const mem = snap.gauges.memory;
-  const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
-  const sessionStats = wsBridge.getSessionMemoryStats();
-  const topSessions = sessionStats
-    .sort((a, b) => b.historyLen - a.historyLen)
-    .slice(0, 3)
-    .map((s) => `${s.id.slice(0, 8)}(h=${s.historyLen},b=${s.browsers})`)
-    .join(", ");
-
-  // PLAN T6: proxy for "archived rows still in the wsBridge.sessions
-  // Map that Phase H eviction will reclaim." totalActiveSessions counts
-  // phase != "terminated"; the Map total includes terminated/archived
-  // rows the bridge still holds. Until Phase H ships, this delta is the
-  // most direct surface of the memory-leak symptom this PLAN targets.
-  const unevictedArchivedCount = Math.max(0, sessionStats.length - snap.gauges.totalActiveSessions);
-
-  log.info("diagnostics", "Runtime snapshot", {
-    rss: `${mb(mem.rss)}MB`,
-    heap: `${mb(mem.heapUsed)}/${mb(mem.heapTotal)}MB`,
-    external: `${mb(mem.external)}MB`,
-    sessions: snap.gauges.totalActiveSessions,
-    browsers: snap.gauges.connectedBrowsers,
-    historyMsgs: snap.gauges.totalHistoryMessages,
-    pendingMsgs: snap.gauges.totalPendingMessages,
-    eventBuffer: snap.gauges.totalEventBufferSize,
-    errors: Object.values(snap.counters.errors).reduce((a, b) => a + b, 0),
-    topSessions: topSessions || "none",
-    // ── PLAN T6: cleanup-subsystem counters (Phase B projection methods) ──
-    // Operator-facing API — pinned literally by the EC-19 canary in
-    // `index.diagnostics-emit.test.ts`. Renames without canary update
-    // are a structural failure.
-    evictedLastHour: metricsCollector.getEvictedLastHour(),
-    orphanReapedLastHour: metricsCollector.getOrphanReapedLastHour(),
-    drainedPendingLastHour: metricsCollector.getDrainedPendingLastHour(),
-    recordingsSoftArchivedLastHour: metricsCollector.getRecordingsSoftArchivedLastHour(),
-    recordingsHardDeletedLastHour: metricsCollector.getRecordingsHardDeletedLastHour(),
-    // ── reclamation plan T8: PTY-terminal observability ──
-    // `terminalCount` is the live gauge (in-memory Map size); the reaped
-    // counter rides the same EC-21 store as the sweeps above. Both pinned
-    // by the EC-19 canary alongside the cleanup counters.
-    terminalCount: terminalManager.activeTerminalIds().length,
-    terminalReapedLastHour: metricsCollector.getTerminalReapedLastHour(),
-    // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
-    lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
-    lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),
-    sweepInFlight: cleanupScheduler.getSweepInFlight(),
-  });
+  // Plan Task 5: one builder for the log line and the Diagnostics Backend card
+  // (EC-19 key names pinned in diagnostics/runtime-snapshot.ts).
+  const runtime = buildRuntimeSnapshot(runtimeSnapshotDeps);
+  const unevictedArchivedCount = runtime.unevictedArchivedCount;
+  log.info("diagnostics", "Runtime snapshot", runtime.payload);
+  noteRuntimeSnapshotLogged(Date.now());
 
   // ── PLAN T6: memory-pressure WARN with 30-min rate limit ──────────────
   // Folded into the 5-min diagnostic tick (per master HANDOFF Phase C
@@ -911,7 +1007,7 @@ const diagnosticsTimer = setInterval(() => {
       event: "cli.cleanup.memory_pressure",
       fullAvg300Us: pressureReading.fullAvg300Us,
       thresholdUs: warnCfg.us,
-      sessions: snap.gauges.totalActiveSessions,
+      sessions: runtime.totalActiveSessions,
       unevictedArchivedCount,
     });
     lastMemoryPressureWarnAt = pressureNowMs;
@@ -922,8 +1018,30 @@ const diagnosticsTimer = setInterval(() => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-}, DIAGNOSTICS_INTERVAL_MS);
+}), DIAGNOSTICS_INTERVAL_MS);
 diagnosticsTimer.unref();
+
+// AURA-LOCAL (P7/SERVER-STDOUT-STALL): event-loop lag detector. A blocked
+// loop starves every CLI stdout pump at once, which is one candidate cause of
+// the cross-session stdout stalls the drift detector sees. The WARN names the
+// slowest `trackSync`-wrapped operations since the previous tick; time not
+// covered by them is reported as `untrackedMs`.
+const eventLoopLagMonitor = installEventLoopLagMonitor({
+  onLag: (report) => {
+    const mem = process.memoryUsage();
+    const topMs = report.topOperations[0]?.durationMs ?? 0;
+    log.warn("diagnostics", "event loop lag", {
+      event: "server.event_loop_lag",
+      lagMs: Math.round(report.lagMs),
+      intervalMs: report.intervalMs,
+      topOperations: formatTopOperations(report.topOperations),
+      operationCount: report.operationCount,
+      untrackedMs: Math.max(0, Math.round(report.lagMs - topMs)),
+      rss: `${(mem.rss / 1024 / 1024).toFixed(1)}MB`,
+      heapUsed: `${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB`,
+    });
+  },
+});
 
 // ── Graceful shutdown — Council teardown + persist container state ───────────
 //
@@ -947,6 +1065,9 @@ async function gracefulShutdown() {
   // callback cannot race the teardown below (it reads wsBridge state that
   // shutdown is actively dismantling).
   clearInterval(diagnosticsTimer);
+  // Abort a running KB analysis (no report, lastRun unchanged) and stop its hourly check.
+  await diagnosticsService.dispose().catch(() => {});
+  eventLoopLagMonitor.stop();
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
     if (coordinator) {
@@ -961,6 +1082,15 @@ async function gracefulShutdown() {
       console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
     }
     wsBridge.flushSessionStorePendingSync();
+    getVerifiedModelStore()?.flush();
+    // W2: persist which sessions were alive BEFORE shutdownAllGroups kills
+    // the council pairs, so the next boot resumes them without a browser.
+    try {
+      const marked = orchestrator.markLiveSessionsForBootResume();
+      console.log(`[server] Marked ${marked} live session(s) for boot resume`);
+    } catch (err) {
+      console.error("[server] Boot-resume mark failed (continuing shutdown):", err);
+    }
     if (coordinator) {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
       const groupIds = coordinator.listGroupIds();
@@ -996,6 +1126,9 @@ async function gracefulShutdown() {
   } catch (err) {
     console.error("[server] Cleanup scheduler dispose error (continuing to container persist):", err);
   }
+  // W2: the next boot follows a graceful shutdown, not a crash — it does not
+  // count toward the boot-resume crash-loop guard.
+  markCleanShutdown(sessionStore.directory);
   console.log("[server] Persisting container state before shutdown...");
   containerManager.persistState(CONTAINER_STATE_PATH);
   cleanupTailscaleFunnel(port);
@@ -1004,4 +1137,3 @@ async function gracefulShutdown() {
 }
 process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);
-

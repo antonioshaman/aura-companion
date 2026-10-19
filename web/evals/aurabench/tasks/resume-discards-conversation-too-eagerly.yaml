@@ -1,0 +1,53 @@
+# AuraBench task mined from PR #194 ("fix(server): validate resume target before discarding cliSessionId (P2-1)").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: resume-discards-conversation-too-eagerly
+title: "A resumable conversation is not thrown away after two quick CLI crashes"
+start_commit: 33ac3f22f3eae3a22c4dd30b2b673c9391b00480
+prompt: |
+  When a Claude CLI spawned with `--resume` dies quickly, the launcher counts a
+  strike and, after 2 strikes, discards `cliSessionId` and starts a fresh session
+  — losing the user's whole conversation. A short burst of transient failures
+  (startup lag, memory pressure) trips this even though the resume transcript on
+  disk is perfectly fine.
+
+  In `web/server/cli-launcher.ts`:
+  - export `resumeTranscriptExists(path, stat?)`: true only when the transcript
+    file exists and is non-empty; an injected `stat` that throws means false;
+  - export `resumeFailureThresholdFor(backendType, transcriptExists)`: 4 for a
+    non-Codex session (including an undefined backend) whose transcript exists,
+    otherwise the existing base threshold of 2 (Codex has no jsonl transcript);
+  - `shouldClearResumeAfterExit` takes an optional 4th `threshold` argument
+    (default: the base threshold) and the exit path uses the per-session
+    threshold, so a genuinely unresumable transcript still falls back to a fresh
+    session at the higher bar.
+expected_files:
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "a session with a corrupt transcript is pinned on a resume that always crashes"
+  - "Codex sessions get the elevated threshold"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 194
+  merge_commit: 99152b9ff29af7e14b081d27f23e5a0c46dd46e9
+  class: bugfix
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:46:02.314Z"

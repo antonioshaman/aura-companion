@@ -74,7 +74,7 @@ export function selectDrainTargets(
   }
   const frame = buildCliFailedFrame(reason, session.id, {
     seq,
-    drainedCount: pendingCount,
+    drainedCount: countUserQueuedMessages(session.pendingMessages),
     firedAt,
     ...(details ? { details } : {}),
   });
@@ -82,12 +82,14 @@ export function selectDrainTargets(
 }
 
 /**
- * Suppression predicate per the Story 2 AC:
+ * Suppression predicate per the Story 2 AC (`drainedCount` is the
+ * user-message count, {@link countUserQueuedMessages}):
  *   "Given a session has zero queued messages on close, Then no
  *    spurious broadcast fires."
  *
  * Resolution:
- *   - `browser_closed_no_reconnect` with drainedCount === 0 -> SUPPRESS
+ *   - `browser_closed_no_reconnect` / `backend_dead` with
+ *     drainedCount === 0 -> SUPPRESS
  *     (no queued messages, no user-visible loss, no point waking
  *     the next-reconnecting browser with an empty-drain notice)
  *   - any other reason -> ALWAYS-FIRE (Realtime R2 silent-death
@@ -100,5 +102,34 @@ export function selectDrainTargets(
  * broadcast, no counter). The selector's output is discarded.
  */
 export function shouldSuppressDrain(reason: CliFailedReason, drainedCount: number): boolean {
-  return reason === "browser_closed_no_reconnect" && drainedCount === 0;
+  return (reason === "browser_closed_no_reconnect" || reason === "backend_dead") && drainedCount === 0;
+}
+
+/**
+ * P4/FIX-RECONNECT-RELAUNCH: queued frames the BROWSER sends on its own
+ * (status polls on tab open), not something the user typed or clicked. They
+ * still flush to the next backend, but they are not "your queued messages":
+ * two `mcp_get_status` polls once produced a "2 queued · You closed this tab
+ * too long" banner on a session whose user had sent nothing.
+ */
+export const SERVICE_QUEUED_MESSAGE_TYPES: ReadonlySet<string> = new Set(["mcp_get_status"]);
+
+/**
+ * Count queued frames that carry user intent — everything except
+ * {@link SERVICE_QUEUED_MESSAGE_TYPES}. An unparseable entry counts as the
+ * user's: hiding a lost message is worse than one spurious banner.
+ */
+export function countUserQueuedMessages(pending: readonly string[]): number {
+  let n = 0;
+  for (const raw of pending) {
+    let type: unknown;
+    try {
+      type = (JSON.parse(raw) as { type?: unknown } | null)?.type;
+    } catch {
+      type = undefined;
+    }
+    if (typeof type === "string" && SERVICE_QUEUED_MESSAGE_TYPES.has(type)) continue;
+    n++;
+  }
+  return n;
 }

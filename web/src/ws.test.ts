@@ -12,6 +12,8 @@ import type { ModelOption } from "./utils/backends.js";
 // frame per status makes a dropped mapping branch go red.
 import claudeResultErrorsRaw from "./__fixtures__/model-failover/claude-result-errors.jsonl?raw";
 import codexResultErrorRaw from "./__fixtures__/model-failover/codex-result-error.jsonl?raw";
+// UI-RESUME-NOISE — real `--resume` bookkeeping + api_error result frames.
+import resumeResultsRaw from "./__fixtures__/resume-interrupted/claude-resume-results.jsonl?raw";
 
 // Browser-safe mirror of replay.ts's getExpectedBrowserMessages over a raw
 // recording string: drop the header line, then keep `dir:"out" ch:"browser"`
@@ -25,6 +27,12 @@ function recordedBrowserResultFrames(recording: string): Array<Record<string, un
     .map((e) => JSON.parse(e.raw) as Record<string, unknown>);
 }
 
+// Spy on the completion chime so the resume-noise tests can assert it stays silent.
+const mockPlayNotificationSound = vi.hoisted(() => vi.fn());
+vi.mock("./utils/notification-sound.js", () => ({
+  playNotificationSound: mockPlayNotificationSound,
+}));
+
 // Mock the names utility before any imports
 vi.mock("./utils/names.js", () => ({
   generateUniqueSessionName: vi.fn(() => "Test Session"),
@@ -34,8 +42,10 @@ vi.mock("./utils/names.js", () => ({
 // imports `./api.js` so we mock the api surface here to capture the
 // fetchGroups call without touching the real REST client.
 const mockFetchGroups = vi.hoisted(() => vi.fn().mockResolvedValue({ groups: [] }));
+// FIX-AP-4: the `group_created` handler bootstraps findings (and restore gaps).
+const mockFetchGroupFindings = vi.hoisted(() => vi.fn());
 vi.mock("./api.js", () => ({
-  api: { fetchGroups: mockFetchGroups },
+  api: { fetchGroups: mockFetchGroups, fetchGroupFindings: mockFetchGroupFindings },
 }));
 
 let wsModule: typeof import("./ws.js");
@@ -134,7 +144,12 @@ describe("connectSession", () => {
   it("creates a WebSocket with the correct URL", () => {
     wsModule.connectSession("s1");
 
-    expect(lastWs.url).toBe("ws://localhost:3456/ws/browser/s1?token=");
+    // URL carries the session path + auth token, plus an anonymous per-browser
+    // clientId (random UUID from localStorage) used for the online-headcount
+    // presence dedupe. Match structurally so the random id doesn't make this brittle.
+    expect(lastWs.url).toMatch(
+      /^ws:\/\/localhost:3456\/ws\/browser\/s1\?token=&clientId=.+$/,
+    );
     expect(useStore.getState().connectionStatus.get("s1")).toBe("connecting");
   });
 
@@ -318,6 +333,43 @@ describe("handleMessage: user_message", () => {
     });
 
     expect(useStore.getState().promptSuggestions.has("s1")).toBe(false);
+  });
+});
+
+// ===========================================================================
+// handleMessage: connection promotion (Council review F11)
+// ===========================================================================
+// The promotion guard was widened from `=== "connecting"` to `!== "connected"`
+// so a replacement socket that starts receiving frames heals ANY non-connected
+// state, not just the initial "connecting" one. These tests pin that branch.
+describe("handleMessage: connection promotion", () => {
+  it("promotes a connecting session to connected on any parseable frame", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "connecting");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+
+  it("promotes a disconnected session to connected on any parseable frame", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "disconnected");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+
+  it("does not re-write connection status when already connected", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "connected");
+    const spy = vi.spyOn(useStore.getState(), "setConnectionStatus");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
   });
 });
 
@@ -845,6 +897,146 @@ describe("handleMessage: stream_event message_start", () => {
 });
 
 // ===========================================================================
+// handleMessage: session_update
+// ===========================================================================
+describe("handleMessage: session_update", () => {
+  it("clears stale CLI disconnected state when the server reports a live session", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "cli_disconnected" });
+
+    fireMessage({
+      type: "session_update",
+      session: { state: "connected" },
+    });
+
+    const state = useStore.getState();
+    expect(state.cliConnected.get("s1")).toBe(true);
+    expect(state.cliReconnecting.has("s1")).toBe(false);
+  });
+});
+
+// ===========================================================================
+// Context-usage meter (#193 fix)
+//
+// The Claude context meter must show how full the model's window is RIGHT NOW
+// and DROP after a /compact. These tests drive the two frames it derives from:
+//   - `assistant` carries per-turn `usage` (numerator = fresh input + cache
+//     read + cache write = tokens actually resident in the window this turn),
+//   - `result.modelUsage` carries the model-declared `contextWindow`
+//     (denominator).
+// The regression this guards: the original formula used the cumulative
+// `modelUsage` input+output counters, which only ever climb, so the meter
+// pinned high and never fell after compaction.
+// ===========================================================================
+describe("handleMessage: context meter", () => {
+  // Helper: fire one assistant turn with a given per-turn usage.
+  function fireAssistantTurn(usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+  }, id = "msg-ctx") {
+    fireMessage({
+      type: "assistant",
+      message: {
+        id,
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4-8",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage,
+      },
+      parent_tool_use_id: null,
+    });
+  }
+
+  // Helper: fire a result frame that declares the context window via modelUsage.
+  function fireResultWithWindow(models: Record<string, number>) {
+    const modelUsage: Record<string, unknown> = {};
+    for (const [model, contextWindow] of Object.entries(models)) {
+      modelUsage[model] = {
+        inputTokens: 999,
+        outputTokens: 999,
+        cacheReadInputTokens: 999,
+        cacheCreationInputTokens: 999,
+        contextWindow,
+        maxOutputTokens: 64000,
+        costUSD: 0.01,
+      };
+    }
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1,
+        duration_api_ms: 1,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage,
+        uuid: "u-ctx",
+        session_id: "s1",
+      },
+    });
+  }
+
+  it("derives context % from per-turn occupancy ÷ declared window (not cumulative counters)", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // 1000 fresh + 50000 cache-read + 9000 cache-write = 60000 resident tokens.
+    fireAssistantTurn({ input_tokens: 1000, output_tokens: 2000, cache_creation_input_tokens: 9000, cache_read_input_tokens: 50000 });
+    // Window unknown until a result frame declares it — no premature reading.
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(0);
+
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    // 60000 / 200000 = 30% (the cumulative counters in modelUsage are ignored).
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(30);
+  });
+
+  it("DROPS the meter after a /compact instead of pinning high", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // Turn 1: window nearly full (180k / 200k = 90%).
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 180000 }, "msg-1");
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(90);
+
+    // Turn 2 after compaction: occupancy collapses to 40k. The window is already
+    // known, so the assistant frame alone must pull the meter down to 20%.
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 40000 }, "msg-2");
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(20);
+  });
+
+  it("uses the largest window across models so a small side-model can't shrink the denominator", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 300000 });
+    // A title-gen Haiku (200k) must not override the main 1M window; otherwise
+    // 300000/200000 would clamp to a bogus 100%.
+    fireResultWithWindow({ "claude-opus-4-8": 1000000, "claude-haiku-4-5": 200000 });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(30);
+  });
+
+  it("clamps to 100 and never below 0", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 500000 });
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    // 500000/200000 = 250% → clamped to 100.
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(100);
+  });
+});
+
+// ===========================================================================
 // handleMessage: result
 // ===========================================================================
 describe("handleMessage: result", () => {
@@ -938,6 +1130,88 @@ describe("handleMessage: result", () => {
     expect(msgs[0].content).toBe("Error: Something went wrong, Another error");
   });
 
+  it("tags a real execution error from a live result as the red error variant", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "aborted_streaming",
+        errors: ["Stream closed unexpectedly"],
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: null,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u2",
+        session_id: "s1",
+      },
+    });
+
+    // Same terminal reason, but a human-readable error → still a real error.
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].systemVariant).toBe("error");
+  });
+
+  // UI-RESUME-NOISE live path: the REAL recorded frame arriving right after a
+  // relaunch becomes a muted note and does not fire the "Session completed"
+  // chime/desktop notification — nothing finished, a restart cut it off.
+  it("renders the recorded live --resume frame as a note and keeps notifications silent", () => {
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const NotificationMock = vi.fn();
+    Object.assign(NotificationMock, { permission: "granted" });
+    // Swap Notification by hand — vi.unstubAllGlobals() would also drop the
+    // suite's WebSocket stub and break every later test.
+    const g = globalThis as { Notification?: unknown };
+    const originalNotification = g.Notification;
+    g.Notification = NotificationMock;
+    mockPlayNotificationSound.mockClear();
+    try {
+      useStore.setState({ notificationSound: true, notificationDesktop: true });
+      wsModule.connectSession("s1");
+      fireMessage({ type: "session_init", session: makeSession("s1") });
+
+      const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+      fireMessage(aborted);
+
+      const msgs = useStore.getState().messages.get("s1")!;
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].systemVariant).toBe("resume-interrupted");
+      expect(mockPlayNotificationSound).not.toHaveBeenCalled();
+      expect(NotificationMock).not.toHaveBeenCalled();
+
+      // Control: a normal successful result in the same setup DOES chime, so
+      // the silence above is the resume guard, not a broken test harness.
+      fireMessage({
+        type: "result",
+        data: {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          duration_ms: 1000,
+          duration_api_ms: 800,
+          num_turns: 1,
+          total_cost_usd: 0.05,
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          uuid: "u3",
+          session_id: "s1",
+        },
+      });
+      expect(mockPlayNotificationSound).toHaveBeenCalledTimes(1);
+      expect(NotificationMock).toHaveBeenCalledTimes(1);
+    } finally {
+      hasFocus.mockRestore();
+      g.Notification = originalNotification;
+    }
+  });
+
   // Claude `set_model` is optimistic + unvalidated by the CLI, so an unusable
   // model only fails on the next turn via `api_error_status: 404`. When a
   // pending Claude switch is present, that 404 must revert the optimistic
@@ -991,6 +1265,39 @@ describe("handleMessage: result", () => {
     // System message explains the revert.
     const msgs = state.messages.get("s1")!;
     expect(msgs.some((m) => m.role === "system" && m.content.includes("claude-fable-5") && m.content.includes("claude-opus-4-8"))).toBe(true);
+  });
+
+  it("a reactive revert also raises the persistent fallback banner naming from→to and why (Task A.2)", () => {
+    // The system message scrolls away; the banner stays until dismissed.
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-5" });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 529,
+        result: "Overloaded",
+        duration_ms: 1000,
+        duration_api_ms: 800,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u-ovl",
+        session_id: "s1",
+      },
+    });
+
+    const notice = useStore.getState().modelSubstitutionNotices.get("s1");
+    expect(notice).toMatchObject({ requested: "claude-opus-5", applied: "claude-opus-4-8", reason: "overloaded" });
   });
 
   it("clears a pending Claude switch without reverting when the turn succeeds", () => {
@@ -1566,6 +1873,25 @@ describe("handleMessage: model_substitution", () => {
     expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
   });
 
+  it("substituted with reason cli-incompatible (broken-model table) keeps that reason on the notice", () => {
+    // The set_model gate now consults the broken-model table; the banner must
+    // say the CLI is the cause, not mislabel it as retired.
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    fireMessage({
+      type: "model_substitution",
+      requested: "claude-opus-5",
+      applied: "claude-opus-4-8",
+      outcome: "substituted",
+      reason: "cli-incompatible",
+    });
+    expect(useStore.getState().modelSubstitutionNotices.get("s1")!.reason).toBe("cli-incompatible");
+  });
+
   it("needs-user-action: reverts the optimistic switch, clears the marker, holds a cross-tier proposal", () => {
     useStore.setState({
       sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
@@ -2002,6 +2328,22 @@ describe("handleMessage: pendingCodexModelSwitch lifecycle", () => {
 // handleMessage: message_history
 // ===========================================================================
 describe("handleMessage: message_history", () => {
+  // Usage-limit auto-resume: the server tags its continuation prompt with
+  // origin "auto_resume" — both the live frame and the history replay must
+  // carry it to the ChatMessage so the bubble shows the automatic caption.
+  it("carries origin=auto_resume from live and replayed user_message frames", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "message_history",
+      messages: [{ type: "user_message", content: "Лимит сброшен", timestamp: 1000, origin: "auto_resume" }],
+    });
+    fireMessage({ type: "user_message", content: "again", timestamp: 2000, id: "u-live", origin: "auto_resume" });
+    fireMessage({ type: "user_message", content: "typed", timestamp: 3000, id: "u-typed" });
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs.map((m) => m.origin)).toEqual(["auto_resume", "auto_resume", undefined]);
+  });
+
   it("reconstructs chat messages from history", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
@@ -2121,6 +2463,46 @@ describe("handleMessage: message_history", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].role).toBe("system");
     expect(msgs[0].content).toBe("Error: Timed out");
+  });
+
+  // UI-RESUME-NOISE: after a relaunch with --resume the Claude CLI closes the
+  // turn the old process was killed in with an `aborted_streaming` result
+  // (`[ede_diagnostic] …`). Replaying the REAL recorded frame through the
+  // history path must yield a muted "resume-interrupted" note, while a real
+  // execution error in the same history stays a red "error".
+  it("marks the recorded --resume bookkeeping frame as resume-interrupted in history", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+    fireMessage({
+      type: "message_history",
+      messages: [
+        aborted,
+        {
+          type: "result",
+          data: {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            errors: ["Timed out"],
+            duration_ms: 100,
+            duration_api_ms: 50,
+            num_turns: 1,
+            total_cost_usd: 0,
+            stop_reason: null,
+            usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+            uuid: "u1",
+            session_id: "s1",
+          },
+        },
+      ],
+    });
+
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs.map((m) => m.systemVariant)).toEqual(["resume-interrupted", "error"]);
+    // The raw diagnostic is kept as the expandable detail.
+    expect(msgs[0].content).toContain("[ede_diagnostic]");
   });
 
   it("assigns stable IDs to error results based on history index", () => {
@@ -2450,6 +2832,49 @@ describe("task extraction: TodoWrite", () => {
     expect(tasks[0].activeForm).toBe("Fixing bug");
     expect(tasks[1].subject).toBe("Write tests");
     expect(tasks[1].status).toBe("pending");
+  });
+
+  it("accepts the Codex synthetic TodoWrite shape (no activeForm) — subject comes from content (review B-7)", () => {
+    // codex-adapter `handleTurnPlanUpdated` re-emits plan steps as TodoWrite
+    // with `{ content, status }` and only sometimes `activeForm`; the tool_use
+    // id is `codex-plan-<turnId>-<n>`. The Tasks section must get the content
+    // as the subject and no activeForm (TaskRow then shows the subject only).
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "codex-msg-plan-1",
+        type: "message",
+        role: "assistant",
+        model: "gpt-5.5",
+        content: [
+          {
+            type: "tool_use",
+            id: "codex-plan-turn-1-1",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "Inspect the adapter", status: "completed" },
+                { content: "Patch the parser", status: "in_progress" },
+                { content: "Run the tests", status: "pending" },
+              ],
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+    });
+    const tasks = useStore.getState().sessionTasks.get("s1")!;
+    expect(tasks.map((t) => [t.subject, t.status])).toEqual([
+      ["Inspect the adapter", "completed"],
+      ["Patch the parser", "in_progress"],
+      ["Run the tests", "pending"],
+    ]);
+    expect(tasks[1].activeForm).toBeUndefined();
+    expect(useStore.getState().sessionTasksUpdatedAt.get("s1")).toEqual(expect.any(Number));
   });
 });
 
@@ -2874,6 +3299,91 @@ describe("handleMessage: keep_alive", () => {
 });
 
 // ===========================================================================
+// Heartbeat watchdog: recover a half-open socket after a server restart
+// ===========================================================================
+// The server sends a `keep_alive` every 25s; the client arms a 60s watchdog
+// and re-arms it on every incoming frame. If the server vanishes behind a
+// proxy/VPN, the client's TCP can stay half-open — readyState OPEN, no onclose
+// — so nothing reconnects until the user sends a message. The watchdog breaks
+// that deadlock by force-closing the dead socket, which triggers reconnect.
+describe("heartbeat watchdog", () => {
+  beforeEach(() => {
+    // shouldReconnectSession must see s1 as a live, non-archived session.
+    useStore.getState().setSdkSessions([
+      { sessionId: "s1", state: "connected", cwd: "/", createdAt: 0 },
+    ]);
+  });
+
+  it("force-closes the socket after the heartbeat timeout when no frame arrives", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    expect(ws.close).not.toHaveBeenCalled();
+    // No frames at all (not even keep_alive) for 60s → watchdog force-closes.
+    vi.advanceTimersByTime(60_000);
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("re-arms on a keep_alive frame, so a live connection is never force-closed", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    // 59s in — just under the window — a keep_alive arrives and resets it.
+    vi.advanceTimersByTime(59_000);
+    fireMessage({ type: "keep_alive" });
+    // 59s more: 118s total but only 59s since the last frame → still alive.
+    vi.advanceTimersByTime(59_000);
+    expect(ws.close).not.toHaveBeenCalled();
+    // Now the server really goes silent past the 60s window.
+    vi.advanceTimersByTime(1_500);
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("recovers a half-open socket (readyState stays OPEN, no onclose fires)", () => {
+    // The exact user-reported bug: after a server restart behind a proxy the
+    // socket reads OPEN forever and emits no frames, so onclose never fires and
+    // the dialog never auto-restores until the user types. The watchdog fixes it.
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const dead = lastWs;
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    dead.readyState = MockWebSocket.OPEN; // half-open: never transitions to CLOSED on its own
+
+    vi.advanceTimersByTime(60_000);
+    expect(dead.close).toHaveBeenCalled();
+
+    // The real browser now surfaces the close → reconnect timer → fresh socket.
+    dead.readyState = MockWebSocket.CLOSED;
+    dead.onclose?.();
+    vi.advanceTimersByTime(2_000);
+    expect(lastWs).not.toBe(dead);
+  });
+
+  it("onclose reflects the drop in the UI (cliConnected → false, status disconnected)", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    useStore.getState().setCliConnected("s1", true);
+
+    ws.readyState = MockWebSocket.CLOSED;
+    ws.onclose?.();
+
+    expect(useStore.getState().cliConnected.get("s1")).toBe(false);
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("disconnected");
+  });
+
+  it("disconnectSession clears the watchdog — no force-close after teardown", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    wsModule.disconnectSession("s1");
+    ws.close.mockClear();
+    vi.advanceTimersByTime(120_000);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // assistant message: per-tool progress clearing (not blanket clear)
 // ===========================================================================
 describe("handleMessage: assistant clears only completed tool progress", () => {
@@ -2914,7 +3424,7 @@ describe("handleMessage: assistant clears only completed tool progress", () => {
 // Post-reconnect group bootstrap refetch (PR #68 friedman fix-pass)
 // ===========================================================================
 //
-// `BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
+// `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
 // if the App.tsx mount-effect `fetchGroups` call fails (network blip,
 // server 500), the user has no UI to retry. The friedman P2 fix says:
 // dispatch the same `fetchGroups → hydrateGroups` pipeline on every
@@ -2999,5 +3509,64 @@ describe("post-reconnect group bootstrap refetch", () => {
     // Drain the debounce window (armed at t=2000 for 250ms → fires at t=2250).
     await vi.advanceTimersByTimeAsync(300);
     expect(mockFetchGroups).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// handleMessage: group_convergence (P3/CONV-HONEST)
+// ===========================================================================
+describe("handleMessage: group_convergence", () => {
+  // The server marks a clean review that reviewed nothing as `not-counted`
+  // with a reason; the store keeps that reason on the GroupRecord so the
+  // UI can say "not counted". Any other transition clears it.
+  function seedGroup() {
+    useStore.getState().upsertGroup({
+      sessionGroupId: "grp_ws",
+      primarySessionId: "s1",
+      observerSessionId: "s1_obs",
+      pairing: "claude+codex",
+      status: "active",
+    } as never);
+  }
+
+  it("stores the not-counted reason, then clears it on a counted transition", () => {
+    wsModule.connectSession("s1");
+    seedGroup();
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "not-counted",
+      cycleNumber: 0, convergenceThreshold: 3, convergenceState: "in-progress",
+      notCountedReason: "no_files_read", timestamp: 1,
+    });
+    expect(useStore.getState().groups.get("grp_ws")?.lastReviewNotCounted).toBe("no_files_read");
+
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "cycle-progress",
+      cycleNumber: 1, convergenceThreshold: 3, convergenceState: "in-progress", timestamp: 2,
+    });
+    const g = useStore.getState().groups.get("grp_ws");
+    expect(g?.lastReviewNotCounted).toBeUndefined();
+    expect(g?.cycleNumber).toBe(1);
+  });
+});
+
+// ===========================================================================
+// FIX-AP-4 — restore gaps from the findings bootstrap
+// ===========================================================================
+// An incomplete auto-proceed hold restore can happen with NO parseable review
+// (reviewCount 0: the only file is broken). The bootstrap handler used to
+// return early on reviewCount 0; the gaps must reach the store anyway, or the
+// pause stays invisible — exactly the case FIX-AP-4 exists for.
+describe("group_created findings bootstrap → auto-proceed restore gaps", () => {
+  it("stores the gaps even when no review could be counted", async () => {
+    const gap = { gap: "review_unparseable:p-claude-observer.md", reason: "r", file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+    mockFetchGroupFindings.mockResolvedValue({
+      sessionGroupId: "grp_gap", findings: [], downgrades: [], reviewCount: 0, autoProceedRestoreGaps: [gap],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "group_created", sessionGroupId: "grp_gap", primarySessionId: "s1", observerSessionId: "s2", pairing: "claude+claude" });
+    await vi.waitFor(() => {
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_gap")).toEqual([gap]);
+    });
+    expect(mockFetchGroupFindings).toHaveBeenCalledWith("grp_gap");
   });
 });
