@@ -33,6 +33,8 @@ export const REPORT_MAX_BYTES = 8 * 1024 * 1024;
 export const STATE_FILE = "state.json";
 export const DECISIONS_FILE = "decisions.jsonl";
 export const INFLIGHT_FILE = ".inflight.json";
+/** Sentinel for an archive decision in progress (written before the KB move, cleared after the ledger line). */
+export const ARCHIVE_PENDING_FILE = "archive-pending.json";
 const TMP_RE = /^\.[0-9a-f]{16}\.tmp$/;
 export const STATE_SCHEMA_VERSION = 1;
 
@@ -191,7 +193,11 @@ export function clearInflightMarker(root: string): void {
  * the server. Consumes the marker and returns it; a marker from this boot is
  * left alone (it belongs to a live run).
  */
-export function consumeStaleInflightMarker(root: string, bootTimeMs: number): InflightMarker | null {
+export function consumeStaleInflightMarker(
+  root: string,
+  bootTimeMs: number,
+  isOtherProcessAlive: (pid: number) => boolean = defaultIsOtherProcessAlive,
+): InflightMarker | null {
   const p = resolveInside(root, INFLIGHT_FILE);
   if (!existsSync(p)) return null;
   let m: InflightMarker | null = null;
@@ -201,8 +207,21 @@ export function consumeStaleInflightMarker(root: string, bootTimeMs: number): In
     /* corrupt marker: treat as stale */
   }
   if (m && typeof m.bootTimeMs === "number" && m.bootTimeMs >= bootTimeMs) return null;
+  // Review A-1: an older marker whose writer is still alive is another
+  // server's LIVE run (e.g. a dev server on the same checkout) — not a crash.
+  if (m && typeof m.pid === "number" && m.pid > 0 && isOtherProcessAlive(m.pid)) return null;
   unlinkSync(p);
   return m ?? { runId: "unknown", pid: 0, bootTimeMs: 0, startedAt: 0 };
+}
+
+function defaultIsOtherProcessAlive(pid: number): boolean {
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /** Boot reconcile: remove `.<hex>.tmp` leftovers older than this boot (atomic-write orphans). */
@@ -219,6 +238,41 @@ export function sweepStaleTmp(root: string, bootTimeMs: number): string[] {
     }
   }
   return removed;
+}
+
+// ─── archive-pending.json (sentinel-before-act, EC-8) ───────────────────────
+
+export interface ArchivePending {
+  v: 1;
+  runId: string;
+  ts: number;
+  ids: string[];
+}
+
+/**
+ * The ONLY proof that an archive was interrupted. Written before the KB move,
+ * cleared after the decision line is appended. Boot reconcile finishes
+ * exactly these ids and nothing else — an entry the owner restored by hand
+ * (with or without the archive copy) is never re-archived.
+ */
+export function writeArchivePending(root: string, p: ArchivePending): void {
+  writeAtomicJson(resolveInside(root, ARCHIVE_PENDING_FILE), p, { maxBytes: 256 * 1024 });
+}
+
+export function readArchivePending(root: string): ArchivePending | null {
+  const path = resolveInside(root, ARCHIVE_PENDING_FILE);
+  if (!existsSync(path)) return null;
+  try {
+    const v = JSON.parse(readFileSync(path, "utf8")) as ArchivePending;
+    return v && v.v === 1 && Array.isArray(v.ids) && typeof v.runId === "string" && typeof v.ts === "number" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearArchivePending(root: string): void {
+  const path = resolveInside(root, ARCHIVE_PENDING_FILE);
+  if (existsSync(path)) unlinkSync(path);
 }
 
 // ─── decisions.jsonl ────────────────────────────────────────────────────────
@@ -253,12 +307,24 @@ export function appendDecisions(root: string, lines: DecisionLine[]): void {
   })();
   const text = fence + lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
   mkdirSync(root, { recursive: true, mode: 0o700 });
+  const created = !existsSync(path);
   const fd = openSync(path, "a", 0o600);
   try {
     writeSync(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
+  }
+  if (created) {
+    // First decision ever: make the new directory entry durable too.
+    const dirFd = openSync(root, "r");
+    try {
+      fsyncSync(dirFd);
+    } catch {
+      /* best effort: not every filesystem fsyncs directories */
+    } finally {
+      closeSync(dirFd);
+    }
   }
 }
 

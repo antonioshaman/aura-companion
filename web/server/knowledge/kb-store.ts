@@ -358,7 +358,9 @@ export type ArchiveOutcome =
   /** Was in BOTH (a crash between the two writes); only the live rewrite was finished. */
   | { id: string; file: string; status: "completed-partial" }
   /** In neither the live stores nor the archive. */
-  | { id: string; status: "not-found" };
+  | { id: string; status: "not-found" }
+  /** The id appears on more than one live line (same or different stores): refused, nothing moved. */
+  | { id: string; status: "ambiguous"; files: string[] };
 
 /** The live store changed between our read and our rename (a concurrent /learn append). */
 export class KbStoreConflictError extends Error {
@@ -420,6 +422,23 @@ export function archiveEntries(
     identities.set(f, fileIdentity(join(kbDir, f)));
   }
   const load = loadKb(kbDir);
+  // An archive decision names ONE line. An id on several live lines (an
+  // append-as-update /learn, a merge artefact) is refused, never bulk-moved.
+  const occurrences = new Map<string, string[]>();
+  for (const store of load.stores) {
+    for (const line of store.lines) {
+      if (line.kind === "entry" && wanted.has(line.entry.id)) {
+        occurrences.set(line.entry.id, [...(occurrences.get(line.entry.id) ?? []), store.file]);
+      }
+    }
+  }
+  for (const [id, files] of occurrences) {
+    if (files.length > 1) {
+      wanted.delete(id);
+      found.add(id);
+      outcomes.push({ id, status: "ambiguous", files });
+    }
+  }
   for (const store of load.stores) {
     const livePath = join(kbDir, store.file);
     const archivePath = join(kbDir, ARCHIVE_DIR, store.file);

@@ -3,7 +3,7 @@
  * server-side and resolved once (EC-7 resolving wrapper; hunt 2, ritchie B6):
  *
  *   KB root      `<repo>/.agents/knowledge`                  read + archive move
- *   reports root `<COMPANION_HOME>/diagnostics/kb-analysis`  read / write
+ *   reports root `<COMPANION_HOME>/diagnostics/kb-analysis/<repo slug>`  read / write
  *   memory root  `~/.claude/projects/<repo slug>/memory`     READ ONLY
  *
  * No request ever supplies a path component. Ids from a request are looked up
@@ -74,7 +74,10 @@ export interface DiagnosticsRoots {
 export function defaultDiagnosticsRoots(overrides: Partial<DiagnosticsRoots> = {}): DiagnosticsRoots {
   return {
     kb: resolveRootPath(overrides.kb ?? join(REPO_ROOT, ".agents", "knowledge")),
-    reports: resolveRootPath(overrides.reports ?? join(COMPANION_HOME, "diagnostics", "kb-analysis")),
+    // Namespaced by checkout (review B-3): the KB is per checkout, so its
+    // reports, state and decisions must not be shared with another checkout
+    // or worktree server run by the same user.
+    reports: resolveRootPath(overrides.reports ?? join(COMPANION_HOME, "diagnostics", "kb-analysis", claudeProjectSlug(REPO_ROOT))),
     memory: resolveRootPath(
       overrides.memory ?? join(homedir(), ".claude", "projects", claudeProjectSlug(REPO_ROOT), "memory"),
     ),

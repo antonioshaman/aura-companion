@@ -128,6 +128,9 @@ describe("analyzeMemoryDir", () => {
     expect(src).not.toMatch(/from\s+["']node:fs/);
     expect(src).not.toMatch(/from\s+["']fs/);
     expect(src).not.toMatch(/require\(/);
+    // Review beck #1: no other write channel either.
+    expect(src).not.toMatch(/\bBun\.(write|file)\b/);
+    expect(src).not.toMatch(/\bimport\s*\(/);
   });
 });
 

@@ -140,7 +140,8 @@ describe("KbAnalysisRunner", () => {
 
   it("a run that died with the server pauses automatic runs until a manual run succeeds", async () => {
     writeState(join(base, "reports"), emptyState());
-    writeInflightMarker(join(base, "reports"), { runId: "dead", pid: 1, bootTimeMs: now - 1000, startedAt: now - 2000 });
+    // pid 2^22+1 is above the default pid_max: certainly not a live process.
+    writeInflightMarker(join(base, "reports"), { runId: "dead", pid: 4194305, bootTimeMs: now - 1000, startedAt: now - 2000 });
     const r = new KbAnalysisRunner(deps());
     r.init();
     expect(r.status()).toMatchObject({ autoTriggerSuppressed: true, lastFailure: { reason: "the previous run died with the server" } });

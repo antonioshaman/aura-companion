@@ -133,11 +133,21 @@ describe("state + reconcile", () => {
   });
 
   it("consumes a marker from an earlier boot and leaves this boot's marker alone", () => {
-    writeInflightMarker(root, { runId: "cafebabe", pid: 1, bootTimeMs: 100, startedAt: 150 });
-    expect(consumeStaleInflightMarker(root, 100)).toBeNull();
+    const dead = () => false;
+    writeInflightMarker(root, { runId: "cafebabe", pid: 4242, bootTimeMs: 100, startedAt: 150 });
+    expect(consumeStaleInflightMarker(root, 100, dead)).toBeNull();
     expect(existsSync(join(root, ".inflight.json"))).toBe(true);
-    expect(consumeStaleInflightMarker(root, 200)).toMatchObject({ runId: "cafebabe" });
+    expect(consumeStaleInflightMarker(root, 200, dead)).toMatchObject({ runId: "cafebabe" });
     expect(existsSync(join(root, ".inflight.json"))).toBe(false);
+  });
+
+  // Review A-1: an older marker whose writer is still alive is another
+  // server's live run (dev server on the same checkout), not a crash.
+  it("leaves an older marker alone while its writer process is alive", () => {
+    writeInflightMarker(root, { runId: "cafebabe", pid: 4242, bootTimeMs: 100, startedAt: 150 });
+    const alive = (pid: number) => pid === 4242;
+    expect(consumeStaleInflightMarker(root, 200, alive)).toBeNull();
+    expect(existsSync(join(root, ".inflight.json"))).toBe(true);
   });
 
   it("sweeps temp files older than this boot only", () => {

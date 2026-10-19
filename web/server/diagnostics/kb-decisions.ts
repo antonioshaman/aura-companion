@@ -14,11 +14,10 @@
  * Memory findings accept only "seen" and never touch the memory dir.
  */
 
-import { join } from "node:path";
 import { log } from "../logger.js";
-import { ARCHIVE_DIR, archiveEntries, archivedIds, entriesOf, KbStoreConflictError, loadKb, type ArchiveOutcome } from "../knowledge/kb-store.js";
+import { ARCHIVE_DIR, archiveEntries, KbStoreConflictError, type ArchiveOutcome } from "../knowledge/kb-store.js";
+import { clearArchivePending, readArchivePending, type ArchivePending } from "./kb-analysis-store.js";
 import { DECISION_LINE_VERSION, KB_DECISIONS, type Decision, type DecisionLine, type KbAnalysisReport } from "./diagnostics-types.js";
-import type { FoldedDecision } from "./kb-analyzer.js";
 
 export const MAX_DECISIONS_PER_BATCH = 500;
 
@@ -90,15 +89,33 @@ export interface AppliedDecision {
 
 export type ApplyResult =
   | { ok: true; applied: AppliedDecision[] }
-  /** Intent is recorded, the archive move did not complete; boot reconcile or a retry finishes it. */
+  /**
+   * An archive did not complete. Its intent is kept in the pending sentinel
+   * (finished at the next server start) and NO decision line was written, so
+   * the page keeps showing the finding instead of claiming "archived".
+   */
   | { ok: false; recorded: true; error: string; applied: AppliedDecision[] };
 
-export function applyDecisions(
-  v: { runId: string; items: ValidDecision[] },
-  deps: { kbRoot: string; append: (lines: DecisionLine[]) => void; now: () => number },
-): ApplyResult {
+export interface ApplyDeps {
+  kbRoot: string;
+  append: (lines: DecisionLine[]) => void;
+  pending: { write: (p: ArchivePending) => void; clear: () => void };
+  now: () => number;
+}
+
+const COMPLETED: ReadonlySet<ArchiveOutcome["status"]> = new Set(["archived", "completed-partial", "already-archived"]);
+
+/**
+ * Order (ritchie B-1/B-2, review 2026-10-19-1110):
+ *   keep / merge / seen — one ledger line each, nothing else is written;
+ *   archive — pending sentinel → archiveEntries → ledger line for each id that
+ *   really moved → clear the sentinel. The ledger therefore never claims an
+ *   archive that did not happen, and the boot reconcile only ever finishes
+ *   what the sentinel proves was interrupted.
+ */
+export function applyDecisions(v: { runId: string; items: ValidDecision[] }, deps: ApplyDeps): ApplyResult {
   const ts = deps.now();
-  const lines: DecisionLine[] = v.items.map((i) => ({
+  const line = (i: ValidDecision): DecisionLine => ({
     v: DECISION_LINE_VERSION,
     ts,
     runId: v.runId,
@@ -106,39 +123,54 @@ export function applyDecisions(
     decision: i.decision,
     ...(i.mergeInto ? { mergeInto: i.mergeInto } : {}),
     by: "owner",
-  }));
-  deps.append(lines); // durable intent first
-
-  const applied: AppliedDecision[] = v.items.map((i) => ({ entryId: i.entryId, decision: i.decision }));
-  const archives = v.items.filter((i) => i.decision === "archive");
-  if (archives.length > 0) {
-    const requests = archives.map((i) => ({ id: i.entryId, reason: `owner decision (diagnostics report ${v.runId})` }));
-    let outcomes: ArchiveOutcome[];
-    try {
-      outcomes = archiveWithRetry(deps.kbRoot, requests, ts);
-    } catch (err) {
-      const error = err instanceof KbStoreConflictError ? "the KB file changed while archiving; retry" : "archive failed";
-      log.warn("kb-analysis", "archive decision recorded but not applied", {
-        event: err instanceof KbStoreConflictError ? "kb_analysis.archive_conflict" : "kb_analysis.archive_failed",
-        runId: v.runId,
-        count: archives.length,
-      });
-      return { ok: false, recorded: true, error, applied };
-    }
-    for (const o of outcomes) {
-      const a = applied.find((x) => x.entryId === o.id);
-      if (!a) continue;
-      a.archive = o.status;
-      if ("file" in o) a.archivedTo = `.agents/knowledge/${ARCHIVE_DIR}/${o.file}`;
-    }
-  }
-  log.info("kb-analysis", "owner decisions applied", {
-    event: "kb_analysis.decision_applied",
-    runId: v.runId,
-    count: v.items.length,
-    archived: applied.filter((a) => a.archive === "archived" || a.archive === "completed-partial").length,
   });
+  const applied: AppliedDecision[] = v.items.map((i) => ({ entryId: i.entryId, decision: i.decision }));
+  const others = v.items.filter((i) => i.decision !== "archive");
+  if (others.length > 0) deps.append(others.map(line));
+
+  const archives = v.items.filter((i) => i.decision === "archive");
+  if (archives.length === 0) {
+    logApplied(v.runId, v.items.length, 0);
+    return { ok: true, applied };
+  }
+  deps.pending.write({ v: 1, runId: v.runId, ts, ids: archives.map((i) => i.entryId) });
+  let outcomes: ArchiveOutcome[];
+  try {
+    outcomes = archiveWithRetry(deps.kbRoot, archives.map((i) => ({ id: i.entryId, reason: `owner decision (diagnostics report ${v.runId})` })), ts);
+  } catch (err) {
+    const conflict = err instanceof KbStoreConflictError;
+    log.warn("kb-analysis", "archive decision not applied; kept as pending", {
+      event: conflict ? "kb_analysis.archive_conflict" : "kb_analysis.archive_failed",
+      runId: v.runId,
+      count: archives.length,
+    });
+    return {
+      ok: false,
+      recorded: true,
+      error: conflict ? "the KB file changed while archiving — press Archive again" : "archive failed — check that the server can write .agents/knowledge",
+      applied,
+    };
+  }
+  const done: ValidDecision[] = [];
+  const refused: string[] = [];
+  for (const o of outcomes) {
+    const a = applied.find((x) => x.entryId === o.id);
+    if (!a) continue;
+    a.archive = o.status;
+    if ("file" in o) a.archivedTo = `.agents/knowledge/${ARCHIVE_DIR}/${o.file}`;
+    const item = archives.find((i) => i.entryId === o.id);
+    if (item && COMPLETED.has(o.status)) done.push(item);
+    else refused.push(o.status === "ambiguous" ? `${o.id} is on more than one line (${o.files.join(", ")})` : `${o.id} was not found`);
+  }
+  if (done.length > 0) deps.append(done.map(line));
+  deps.pending.clear();
+  logApplied(v.runId, v.items.length, done.length);
+  if (refused.length > 0) return { ok: false, recorded: true, error: `not archived: ${refused.join("; ")}`, applied };
   return { ok: true, applied };
+}
+
+function logApplied(runId: string, count: number, archived: number): void {
+  log.info("kb-analysis", "owner decisions applied", { event: "kb_analysis.decision_applied", runId, count, archived });
 }
 
 function archiveWithRetry(kbRoot: string, requests: { id: string; reason: string }[], ts: number): ArchiveOutcome[] {
@@ -151,24 +183,25 @@ function archiveWithRetry(kbRoot: string, requests: { id: string; reason: string
 }
 
 /**
- * Boot reconcile for the crash window between "archive appended" and "live
- * store rewritten": finish ONLY ids whose last decision is archive AND that
- * are present in BOTH the live store and the archive. An id that is only live
- * (the owner moved it back by hand) is left alone.
+ * Boot reconcile: finish an archive the pending sentinel proves was
+ * interrupted (crash, kill, unwritable KB), then write its decision lines and
+ * clear the sentinel. Without a sentinel nothing happens — a restored entry
+ * is the owner's choice, never undone at boot.
  */
-export function reconcileArchiveDecisions(kbRoot: string, decisions: Map<string, FoldedDecision>): string[] {
-  const wanted = [...decisions].filter(([, d]) => d.decision === "archive").map(([id]) => id);
-  if (wanted.length === 0) return [];
-  const load = loadKb(kbRoot);
-  const halfDone: string[] = [];
-  for (const store of load.stores) {
-    const inArchive = archivedIds(join(kbRoot, ARCHIVE_DIR, store.file));
-    for (const e of entriesOf({ stores: [store], errors: [] })) {
-      if (wanted.includes(e.id) && inArchive.has(e.id)) halfDone.push(e.id);
-    }
+export function reconcileArchivePending(kbRoot: string, reportsRoot: string, append: (lines: DecisionLine[]) => void): string[] {
+  const p = readArchivePending(reportsRoot);
+  if (!p) return [];
+  const outcomes = archiveEntries(kbRoot, p.ids.map((id) => ({ id, reason: `owner decision (diagnostics report ${p.runId}, finished at boot)` })));
+  const done = outcomes.filter((o) => COMPLETED.has(o.status)).map((o) => o.id);
+  if (done.length > 0) {
+    append(done.map((entryId) => ({ v: DECISION_LINE_VERSION, ts: p.ts, runId: p.runId, entryId, decision: "archive" as const, by: "owner" as const })));
   }
-  if (halfDone.length === 0) return [];
-  archiveEntries(kbRoot, halfDone.map((id) => ({ id, reason: "owner decision (reconciled at boot)" })));
-  log.warn("kb-analysis", "finished archive decisions interrupted by a crash", { event: "kb_analysis.archive_reconciled", count: halfDone.length });
-  return halfDone;
+  clearArchivePending(reportsRoot);
+  log.warn("kb-analysis", "finished an archive decision interrupted before it completed", {
+    event: "kb_analysis.archive_reconciled",
+    runId: p.runId,
+    finished: done.length,
+    requested: p.ids.length,
+  });
+  return done;
 }

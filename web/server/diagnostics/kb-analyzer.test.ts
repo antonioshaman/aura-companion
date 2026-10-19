@@ -129,7 +129,7 @@ describe("analyzeKb", () => {
     expect(f.suggested).toBeNull();
   });
 
-  it("honours owner decisions: keep suppresses 90 days unless changed, merge becomes a task, archive drops", () => {
+  it("honours owner decisions: keep suppresses 90 days unless changed, merge becomes a task, a still-live archived entry comes back", () => {
     writeKb([
       e("got-kept", { usageCount: 0, createdAt: iso(60), updatedAt: iso(60) }),
       e("got-kept-changed", { usageCount: 0, createdAt: iso(60), updatedAt: iso(1) }),
@@ -143,8 +143,24 @@ describe("analyzeKb", () => {
       ["got-archived", { decision: "archive", ts: NOW - DAY }],
     ]);
     const r = run(decisions);
-    expect(r.findings.map((f) => f.entryId)).toEqual(["got-kept-changed"]);
+    // got-archived is still in the live store: the owner restored it, or the
+    // move never happened — either way it is shown again, never hidden.
+    expect(r.findings.map((f) => f.entryId)).toEqual(["got-archived", "got-kept-changed"]);
     expect(r.mergeTasks).toEqual([{ entryId: "got-merge", mergeInto: "got-kept", decidedAt: NOW - DAY }]);
+  });
+
+  // Review beck #5: the keep suppression EXPIRES after 90 days.
+  it("a keep older than 90 days lets the finding come back", () => {
+    writeKb([e("got-old-keep", { usageCount: 0, createdAt: iso(200), updatedAt: iso(200) })]);
+    const r = run(new Map([["got-old-keep", { decision: "keep", ts: NOW - 91 * DAY }]]));
+    expect(r.findings.map((f) => f.entryId)).toEqual(["got-old-keep"]);
+  });
+
+  // Review beck #5: never-used must honour usage.log, not only usageCount.
+  it("an entry surfaced in usage.log is not never-used even with usageCount 0", () => {
+    writeKb([e("got-used", { usageCount: 0, createdAt: iso(60) })]);
+    writeFileSync(join(dir, "usage.log"), JSON.stringify({ session: "s1", at: iso(1), ids: ["got-used"] }) + "\n");
+    expect(signalsOf(run(), "got-used")).toEqual([]);
   });
 
   it("AC7: analysis writes nothing under the KB dir", () => {

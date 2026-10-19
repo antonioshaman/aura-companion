@@ -47,7 +47,7 @@ import {
 } from "./kb-analysis-store.js";
 import { countNewEntries, evaluateTrigger, formatProgress } from "./kb-analysis-trigger.js";
 import { analyzeKb } from "./kb-analyzer.js";
-import { reconcileArchiveDecisions } from "./kb-decisions.js";
+import { reconcileArchivePending } from "./kb-decisions.js";
 import { analyzeMemoryDir, type ReadOnlyDir } from "./memory-report.js";
 import { resolveInside, type DiagnosticsRoots } from "./roots.js";
 
@@ -115,9 +115,11 @@ export class KbAnalysisRunner {
       return;
     }
     this.state = s;
-    // Finish archive decisions a crash interrupted (in BOTH files only).
+    // Finish an archive decision the pending sentinel proves was interrupted.
     try {
-      if (existsSync(this.deps.roots.kb)) reconcileArchiveDecisions(this.deps.roots.kb, foldDecisions(readDecisions(root).lines));
+      if (existsSync(this.deps.roots.kb)) {
+        reconcileArchivePending(this.deps.roots.kb, root, (lines) => appendDecisions(root, lines));
+      }
     } catch (err) {
       log.warn("kb-analysis", "archive reconcile failed", {
         event: "kb_analysis.archive_reconcile_failed",

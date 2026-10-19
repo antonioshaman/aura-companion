@@ -6722,5 +6722,14 @@ describe("Diagnostics routes — auth", () => {
     expect(diag.overview).not.toHaveBeenCalled();
     expect(diag.requestRun).not.toHaveBeenCalled();
     expect(diag.apply).not.toHaveBeenCalled();
+
+    // Positive control (review beck #2): with a valid token the same routes
+    // reach their handlers — so the 401s above prove "behind auth", not "missing".
+    diag.overview.mockReturnValue({ generatedAt: 1 });
+    diag.status.mockReturnValue({ inFlight: null });
+    const ov = await protectedApp.request("/api/diagnostics/overview");
+    expect(ov.status).toBe(200);
+    expect(diag.overview).toHaveBeenCalledTimes(1);
+    expect((await protectedApp.request("/api/diagnostics/kb-analysis/latest")).status).toBe(200);
   });
 });

@@ -17,7 +17,7 @@ import type { CompanionSettings } from "../settings-manager.js";
 import type { ContextAdvisoryView, RuntimeSnapshotView } from "./diagnostics-types.js";
 import type { DriftFeed } from "./drift-feed.js";
 import { KbAnalysisRunner, repoExistsPredicate } from "./kb-analysis-runner.js";
-import { appendDecisions } from "./kb-analysis-store.js";
+import { appendDecisions, clearArchivePending, writeArchivePending } from "./kb-analysis-store.js";
 import { applyDecisions, validateDecisions } from "./kb-decisions.js";
 import { buildDiagnosticsOverview } from "./overview.js";
 import { buildPairsSnapshot } from "./pairs-snapshot.js";
@@ -26,6 +26,7 @@ import { buildRuntimeSnapshot, getRuntimeSnapshotLoggedAt, type RuntimeSnapshotD
 import { globalStatsUpstream, usageLimitsUpstream } from "./upstream-status.js";
 
 export const KB_ANALYSIS_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+export const BOOT_CHECK_DELAY_MS = 2 * 60 * 1000;
 
 export interface DiagnosticsServiceDeps {
   launcher: CliLauncher;
@@ -65,6 +66,11 @@ export function createDiagnosticsService(deps: DiagnosticsServiceDeps) {
   const scheduler = new CleanupScheduler({ label: "kb-analysis", intervalMs: KB_ANALYSIS_CHECK_INTERVAL_MS });
   scheduler.registerSweep("kb-analysis-check", async () => runner.hourlyCheck());
   scheduler.start();
+  // Review A-3: the scheduler's first tick is an hour away; a server that
+  // restarts more often than hourly would never evaluate the trigger. Check
+  // once shortly after boot too (the age test uses the persisted lastRun).
+  const bootCheck = setTimeout(() => runner.hourlyCheck(), BOOT_CHECK_DELAY_MS);
+  bootCheck.unref?.();
 
   const runtimeView = (): RuntimeSnapshotView => ({
     pid: process.pid,
@@ -121,17 +127,28 @@ export function createDiagnosticsService(deps: DiagnosticsServiceDeps) {
     isRunning: () => runner.isRunning(),
     currentReport: () => runner.currentReport(),
     validate: validateDecisions,
-    apply: (v) => applyDecisions(v, { kbRoot: roots.kb, append: (lines) => appendDecisions(roots.reports, lines), now: () => Date.now() }),
+    apply: (v) =>
+      applyDecisions(v, {
+        kbRoot: roots.kb,
+        append: (lines) => appendDecisions(roots.reports, lines),
+        pending: { write: (p) => writeArchivePending(roots.reports, p), clear: () => clearArchivePending(roots.reports) },
+        now: () => Date.now(),
+      }),
     afterDecisions: () => runner.refresh(),
   };
 
   return {
     runner,
     routes,
+    /**
+     * Review A-2: called early in gracefulShutdown, so it must not hold up the
+     * session-store flush — abort the run and wait at most 300 ms for it.
+     */
     async dispose(): Promise<void> {
+      clearTimeout(bootCheck);
       offExited();
       await scheduler.dispose();
-      await runner.dispose();
+      await runner.dispose(300);
     },
   };
 }

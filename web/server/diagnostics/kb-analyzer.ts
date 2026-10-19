@@ -157,7 +157,9 @@ export function analyzeKb(input: AnalyzeKbInput): AnalyzeKbResult {
       const changedSince = (Date.parse(str(e.updatedAt)) || 0) > d.ts;
       return changedSince || now - d.ts >= KEEP_SUPPRESS_DAYS * DAY;
     }
-    return d.decision !== "archive";
+    // An entry with an "archive" decision that is still live was either
+    // restored by the owner or never moved: show it again, never hide it.
+    return true;
   });
 
   const hits = new Map<string, SignalHit[]>();
