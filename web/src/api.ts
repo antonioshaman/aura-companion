@@ -533,6 +533,10 @@ export interface AppSettings {
   autoResumeAfterLimit?: boolean;
   /** W15: global default for the Council second-opinion reviewer. */
   councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
+  /** Diagnostics: KB-analysis accumulation thresholds. */
+  kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
+  /** Diagnostics: report-only memory analysis switch (default off). */
+  diagnosticsMemoryReport?: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1272,6 +1276,8 @@ export const api = {
     kbAutoPrime?: boolean;
     autoResumeAfterLimit?: boolean;
     councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
+    kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
+    diagnosticsMemoryReport?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

@@ -6,6 +6,7 @@ import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "..
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import type { SdkSessionInfo } from "../types.js";
 import { SessionDefaultsSettings, type DefaultSessionMode } from "./SessionDefaultsSettings.js";
+import { KnowledgeAnalysisSettings, type KbAnalysisThresholds } from "./KnowledgeAnalysisSettings.js";
 import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 
 interface SettingsPageProps {
@@ -58,6 +59,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // aura-diet defaults: solo sessions, KB consulted on demand.
   const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
   const [kbAutoPrime, setKbAutoPrime] = useState(false);
+  const [kbAnalysis, setKbAnalysis] = useState<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
+  const [diagnosticsMemoryReport, setDiagnosticsMemoryReport] = useState(false);
   const [secondReviewer, setSecondReviewer] = useState<SecondReviewerConfig>({ reviewer: "off", scope: "review-implement" });
   const [autoResumeAfterLimit, setAutoResumeAfterLimit] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
@@ -199,6 +202,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
         if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
+        if (s.kbAnalysis) setKbAnalysis(s.kbAnalysis);
+        if (typeof s.diagnosticsMemoryReport === "boolean") setDiagnosticsMemoryReport(s.diagnosticsMemoryReport);
         if (s.councilSecondReviewer) setSecondReviewer(s.councilSecondReviewer);
         if (typeof s.autoResumeAfterLimit === "boolean") setAutoResumeAfterLimit(s.autoResumeAfterLimit);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
@@ -535,6 +540,33 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   }
                 }}
               />
+              <div className="mt-4" id="knowledge-analysis">
+                <KnowledgeAnalysisSettings
+                  thresholds={kbAnalysis}
+                  memoryReport={diagnosticsMemoryReport}
+                  disabled={loading}
+                  onThresholdsChange={async (next) => {
+                    const prev = kbAnalysis;
+                    setKbAnalysis(next);
+                    try {
+                      const saved = await api.updateSettings({ kbAnalysis: next });
+                      if (saved.kbAnalysis) setKbAnalysis(saved.kbAnalysis);
+                    } catch (e: unknown) {
+                      setKbAnalysis(prev);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                  onMemoryReportChange={async (next) => {
+                    setDiagnosticsMemoryReport(next);
+                    try {
+                      await api.updateSettings({ diagnosticsMemoryReport: next });
+                    } catch (e: unknown) {
+                      setDiagnosticsMemoryReport(!next);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                />
+              </div>
               <div className="mt-4">
                 <SecondReviewerSettings
                   value={secondReviewer}
