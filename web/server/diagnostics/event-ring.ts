@@ -19,7 +19,7 @@ export class EventRing<T extends TimedEvent> {
   constructor(
     readonly capacity: number,
     readonly windowMs: number,
-    now: () => number = Date.now,
+    now: () => number = () => Date.now(),
   ) {
     if (!Number.isInteger(capacity) || capacity < 1) throw new Error("EventRing: capacity must be a positive integer");
     this.startedAt = now();

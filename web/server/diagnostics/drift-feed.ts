@@ -16,7 +16,7 @@ const MAX_FIELD_CHARS = 200;
 export class DriftFeed {
   private readonly ring: EventRing<DriftEventView>;
 
-  constructor(private readonly now: () => number = Date.now) {
+  constructor(private readonly now: () => number = () => Date.now()) {
     this.ring = new EventRing<DriftEventView>(DRIFT_FEED_CAPACITY, DRIFT_FEED_WINDOW_MS, now);
   }
 

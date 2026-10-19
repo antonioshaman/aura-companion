@@ -1,3 +1,4 @@
+import { classifyFetchError, usageLimitsUpstream } from "./diagnostics/upstream-status.js";
 import { execSync, execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -199,15 +200,21 @@ export async function fetchUsageLimits(
       },
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      usageLimitsUpstream.recordFailure(response.status === 401 ? "oauth-expired" : "http", response.status);
+      return null;
+    }
 
     const data = await response.json();
+    usageLimitsUpstream.recordOk();
     return {
       five_hour: data.five_hour || null,
       seven_day: data.seven_day || null,
       extra_usage: data.extra_usage || null,
     };
-  } catch {
+  } catch (err) {
+    usageLimitsUpstream.recordFailure(classifyFetchError(err));
     return null;
   }
 }
@@ -224,7 +231,11 @@ export async function getUsageLimits(): Promise<UsageLimits> {
     }
 
     const token = await getValidAccessToken();
-    if (!token) return empty;
+    if (!token) {
+      // Diagnostics: no credentials file at all vs an expired / unrefreshable token.
+      usageLimitsUpstream.recordFailure(readRawCredentials() ? "oauth-expired" : "no-credentials");
+      return empty;
+    }
 
     const limits = await fetchUsageLimits(token);
     if (!limits) return empty;

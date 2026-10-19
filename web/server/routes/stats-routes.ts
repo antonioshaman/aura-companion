@@ -1,5 +1,10 @@
 import type { Hono } from "hono";
 import { getStatsBaseUrl } from "../telemetry.js";
+import {
+  classifyFetchError,
+  classifyStatsHttpFailure,
+  globalStatsUpstream,
+} from "../diagnostics/upstream-status.js";
 
 /**
  * Public proxy for the global usage counter.
@@ -11,7 +16,9 @@ import { getStatsBaseUrl } from "../telemetry.js";
  * app shell (and shared landing) may read it.
  *
  * On any upstream failure it returns nulls with 200 so the UI can render a
- * graceful "—" rather than surface an error for a vanity metric.
+ * graceful "—" rather than surface an error for a vanity metric. The outcome
+ * of every upstream fetch is ALSO recorded in `globalStatsUpstream`, which the
+ * authenticated Diagnostics page reads (this public response is unchanged).
  */
 
 interface GlobalStats {
@@ -36,8 +43,20 @@ async function fetchGlobalStats(): Promise<GlobalStats> {
     const res = await fetch(`${getStatsBaseUrl()}/stats/global`, {
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`stats upstream ${res.status}`);
-    const body = (await res.json()) as Partial<GlobalStats>;
+    if (!res.ok) {
+      // Drain the body (frees the connection) and use it only to classify.
+      const text = await res.text().catch(() => "");
+      globalStatsUpstream.recordFailure(classifyStatsHttpFailure(res.status, text), res.status);
+      throw new UpstreamRecordedError(`stats upstream ${res.status}`);
+    }
+    let body: Partial<GlobalStats>;
+    try {
+      body = (await res.json()) as Partial<GlobalStats>;
+    } catch (err) {
+      globalStatsUpstream.recordFailure("parse");
+      throw new UpstreamRecordedError(err instanceof Error ? err.message : "parse");
+    }
+    globalStatsUpstream.recordOk();
     return {
       activeInstances30d:
         typeof body.activeInstances30d === "number" ? body.activeInstances30d : null,
@@ -45,10 +64,16 @@ async function fetchGlobalStats(): Promise<GlobalStats> {
       totalInstances: typeof body.totalInstances === "number" ? body.totalInstances : null,
       generatedAt: Date.now(),
     };
+  } catch (err) {
+    if (!(err instanceof UpstreamRecordedError)) globalStatsUpstream.recordFailure(classifyFetchError(err));
+    throw err;
   } finally {
     clearTimeout(timer);
   }
 }
+
+/** A failure already recorded in `globalStatsUpstream` (so the catch-all does not re-classify it). */
+class UpstreamRecordedError extends Error {}
 
 export function registerStatsRoutes(api: Hono): void {
   api.get("/stats/global", async (c) => {
