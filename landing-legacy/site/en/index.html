@@ -532,7 +532,7 @@
   body::after {
     content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 3;
     background: repeating-linear-gradient(0deg, rgba(0,0,0,0), rgba(0,0,0,0) 2px, rgba(0, 18, 0, 0.30) 3px);
-    mix-blend-mode: multiply; opacity: 0.4;
+    opacity: 0.4; /* no mix-blend-mode here: a blend on a fixed full-viewport layer forces the browser to re-blend the whole scrolling page under it every frame (scroll flicker/stutter). Over this palette multiply vs normal differs by <=2/255 in green only */
   }
 
   /* Free + donate blocks (were inline styles) */
