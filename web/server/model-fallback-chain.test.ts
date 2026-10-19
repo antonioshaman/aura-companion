@@ -4,6 +4,8 @@ import {
   classifyFallbackReason,
   computeSilenceRotation,
   nextModelInChain,
+  findModelTableInconsistencies,
+  assertModelTablesInSync,
 } from "./model-fallback-chain.js";
 import { BROKEN_MODEL_SUBSTITUTIONS } from "./broken-model-substitution.js";
 
@@ -56,6 +58,61 @@ describe("nextModelInChain", () => {
       const lastSonnet = chain.length - 1 - [...chain].reverse().findIndex((m) => m.startsWith("claude-sonnet"));
       expect(firstHaiku).toBeGreaterThan(lastSonnet);
     }
+  });
+});
+
+// The fallback chain and BROKEN_MODEL_SUBSTITUTIONS are two hand-maintained
+// tables that must agree: a downgrade target the substitution table rewrites
+// would bounce back on relaunch (2026-09-09 Silent Cliff). The module runs
+// `assertModelTablesInSync()` at load, so the live tables are checked the
+// moment anything imports this file; these tests pin the checker itself with
+// injected tables (the live substitution table is empty since 2026-10-16).
+describe("model table sync check", () => {
+  const CHAIN = ["m-a", "m-b", "m-c", "m-d"] as const;
+
+  it("the live tables are in sync (also enforced at module load)", () => {
+    expect(findModelTableInconsistencies()).toEqual([]);
+    expect(() => assertModelTablesInSync()).not.toThrow();
+  });
+
+  it("accepts a substituted chain member because nextModelInChain steps past it", () => {
+    // m-b is rewritten to m-a; next(m-a) must skip m-b and land on m-c.
+    const table = [{ from: "m-b", to: "m-a", reason: "fixture" }];
+    expect(nextModelInChain("m-a", table, CHAIN)).toBe("m-c");
+    expect(findModelTableInconsistencies(CHAIN, table)).toEqual([]);
+  });
+
+  it("flags a duplicated chain entry", () => {
+    const problems = findModelTableInconsistencies(["m-a", "m-b", "m-a"], []);
+    expect(problems.some((p) => p.includes("m-a more than once"))).toBe(true);
+  });
+
+  it("flags a substitution that maps a model to itself", () => {
+    const problems = findModelTableInconsistencies(CHAIN, [{ from: "m-b", to: "m-b", reason: "fixture" }]);
+    expect(problems.some((p) => p.includes("maps a model to itself"))).toBe(true);
+  });
+
+  it("flags a duplicated substitution `from`", () => {
+    const problems = findModelTableInconsistencies(CHAIN, [
+      { from: "m-b", to: "m-a", reason: "fixture" },
+      { from: "m-b", to: "m-c", reason: "fixture" },
+    ]);
+    expect(problems.some((p) => p.includes("m-b more than once"))).toBe(true);
+  });
+
+  it("flags a chained substitution (the spawn rewrite is single-hop)", () => {
+    // m-c -> m-b, but m-b is itself broken (-> m-a): spawning m-c would land
+    // on the broken m-b.
+    const problems = findModelTableInconsistencies(CHAIN, [
+      { from: "m-b", to: "m-a", reason: "fixture" },
+      { from: "m-c", to: "m-b", reason: "fixture" },
+    ]);
+    expect(problems.some((p) => p.includes("m-c -> m-b targets another substituted model"))).toBe(true);
+  });
+
+  it("assertModelTablesInSync throws a named error listing every problem", () => {
+    expect(() => assertModelTablesInSync(["m-a", "m-a"], [{ from: "m-b", to: "m-b", reason: "fixture" }]))
+      .toThrow(/out of sync[\s\S]*m-a more than once[\s\S]*maps a model to itself/);
   });
 });
 
