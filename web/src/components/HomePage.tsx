@@ -223,6 +223,9 @@ export function HomePage() {
   // once per open — never on every render, so it can't fight user scrolling.
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
+  // Repository to clone into `cwd` if that folder doesn't exist on the
+  // server yet; set only by the folder picker's manual-path mode.
+  const [repoUrl, setRepoUrl] = useState("");
   const [showBranchingControls, setShowBranchingControls] = useState(false);
   const [resumeSessionAt, setResumeSessionAt] = useState("");
   const [forkSession, setForkSession] = useState(true);
@@ -791,6 +794,7 @@ export function HomePage() {
           branch: effectiveBranch,
           createBranch: effectiveCreateBranch ? true : undefined,
           useWorktree: effectiveUseWorktree ? true : undefined,
+          repoUrl: !launchOverride?.cwd && repoUrl ? repoUrl : undefined,
           // Server default is `auto` (isolate only if another live session
           // uses this tree); the user can explicitly opt out.
           isolation: isolationChoice === "shared" ? "shared" : "auto",
@@ -850,6 +854,8 @@ export function HomePage() {
 
       // Save cwd to recent dirs
       if (effectiveCwd) addRecentDir(effectiveCwd);
+      // The clone (if any) happened; the folder exists now.
+      setRepoUrl("");
 
       // Bump the onboarding session-create counter; the OnboardingTip
       // initializer auto-dismisses once this reaches 3.
@@ -926,6 +932,7 @@ export function HomePage() {
     setError("");
     setPullError("");
     setCwd(candidate.cwd);
+    setRepoUrl("");
     setUseWorktree(false);
     setIsNewBranch(false);
     setSelectedBranch(candidate.gitBranch || "");
@@ -1211,11 +1218,19 @@ export function HomePage() {
                   <path d="M1 3.5A1.5 1.5 0 012.5 2h3.379a1.5 1.5 0 011.06.44l.622.621a.5.5 0 00.353.146H13.5A1.5 1.5 0 0115 4.707V12.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z" />
                 </svg>
                 <span className="max-w-[80px] sm:max-w-[140px] truncate font-mono-code">{dirLabel}</span>
+                {repoUrl && (
+                  <span
+                    className="px-1 rounded bg-cc-primary/10 text-cc-primary text-[10px]"
+                    title={`Clones ${repoUrl} if the folder doesn't exist yet`}
+                  >
+                    clone
+                  </span>
+                )}
               </button>
               {showFolderPicker && (
                 <FolderPicker
                   initialPath={cwd || ""}
-                  onSelect={(path) => { setCwd(path); }}
+                  onSelect={(path, opts) => { setCwd(path); setRepoUrl(opts?.repoUrl ?? ""); }}
                   onClose={() => setShowFolderPicker(false)}
                 />
               )}

@@ -5,8 +5,21 @@ import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 
 interface FolderPickerProps {
   initialPath: string;
-  onSelect: (path: string) => void;
+  /** `repoUrl` is set when the user asked to clone a repository into a
+   *  folder that does not exist yet (manual path mode). */
+  onSelect: (path: string, opts?: { repoUrl?: string }) => void;
   onClose: () => void;
+}
+
+/** True for a pasted git remote: https://host/owner/repo or git@host:owner/repo. */
+export function looksLikeRepoUrl(value: string): boolean {
+  return /^(https:\/\/[^\s/]+\/[^\s]+|git@[^\s:]+:[^\s]+)$/.test(value.trim());
+}
+
+/** Folder name a clone would get: ".../owner/repo.git" → "repo". */
+export function repoNameFromUrl(url: string): string {
+  const tail = url.trim().replace(/\/+$/, "").split(/[/:]/).pop() || "";
+  return tail.replace(/\.git$/, "");
 }
 
 /** Split an absolute path into clickable breadcrumb segments.
@@ -31,6 +44,10 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   const [browseError, setBrowseError] = useState("");
   const [dirInput, setDirInput] = useState("");
   const [showDirInput, setShowDirInput] = useState(false);
+  const [repoInput, setRepoInput] = useState("");
+  // While true, typing a repo URL keeps the path at <browsed dir>/<repo name>;
+  // editing the path by hand turns it off.
+  const [pathFollowsRepo, setPathFollowsRepo] = useState(true);
   const [filter, setFilter] = useState("");
   const [focusIndex, setFocusIndex] = useState(-1);
   const [closing, setClosing] = useState(false);
@@ -164,12 +181,31 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
     }
   }, [focusIndex]);
 
-  function selectDir(path: string) {
+  function selectDir(path: string, opts?: { repoUrl?: string }) {
     addRecentDir(path);
     setRecentDirs(getRecentDirs());
-    onSelect(path);
+    if (opts) onSelect(path, opts);
+    else onSelect(path);
     // Close immediately — no exit animation on selection (instant feedback)
     onClose();
+  }
+
+  function clonePathFor(url: string): string {
+    const name = repoNameFromUrl(url);
+    const base = browsePath === "/" ? "" : browsePath;
+    return name ? `${base}/${name}` : dirInput;
+  }
+
+  function updateRepo(url: string) {
+    setRepoInput(url);
+    if (pathFollowsRepo && looksLikeRepoUrl(url)) setDirInput(clonePathFor(url));
+  }
+
+  function submitManual() {
+    const path = dirInput.trim();
+    if (!path) return;
+    const repoUrl = repoInput.trim();
+    selectDir(path, repoUrl ? { repoUrl } : undefined);
   }
 
   const segments = pathSegments(browsePath);
@@ -245,10 +281,21 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
               type="text"
               aria-label="Type a directory path"
               value={dirInput}
-              onChange={(e) => setDirInput(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                // A repo URL pasted into the path field means "clone it here".
+                if (looksLikeRepoUrl(value)) {
+                  setRepoInput(value.trim());
+                  setPathFollowsRepo(true);
+                  setDirInput(clonePathFor(value));
+                  return;
+                }
+                setPathFollowsRepo(false);
+                setDirInput(value);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && dirInput.trim()) {
-                  selectDir(dirInput.trim());
+                  submitManual();
                 }
                 if (e.key === "Escape") {
                   e.stopPropagation();
@@ -292,7 +339,7 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
               <button
                 type="button"
                 aria-label="Type path manually"
-                onClick={() => { setShowDirInput(true); setDirInput(browsePath); }}
+                onClick={() => { setShowDirInput(true); setDirInput(browsePath); setPathFollowsRepo(true); }}
                 className="w-6 h-6 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer shrink-0"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
@@ -302,6 +349,55 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
             </>
           )}
         </div>
+
+        {/* ─── Manual path: new folder / clone a repository ───────────────── */}
+        {showDirInput && (
+          <div className="px-4 py-3 flex flex-col gap-2.5 font-sans-ui">
+            <p className="text-[11px] text-cc-muted leading-relaxed">
+              A folder that doesn&apos;t exist yet is created on the server when the session starts.
+            </p>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-cc-fg font-medium">
+                Git repository <span className="text-cc-muted font-normal">(optional)</span>
+              </span>
+              <input
+                type="text"
+                value={repoInput}
+                onChange={(e) => updateRepo(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && dirInput.trim()) submitManual();
+                  if (e.key === "Escape") {
+                    e.stopPropagation();
+                    setShowDirInput(false);
+                  }
+                }}
+                placeholder="https://github.com/owner/repo"
+                aria-describedby="folder-picker-repo-hint"
+                className="w-full px-2 py-1 text-base sm:text-xs bg-cc-input-bg border border-cc-border rounded-md text-cc-fg font-mono-code placeholder:text-cc-muted focus:outline-none focus:border-cc-primary/50"
+              />
+              <span id="folder-picker-repo-hint" className="text-[10px] text-cc-muted">
+                Cloned into the folder above if that folder doesn&apos;t exist yet.
+              </span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDirInput(false)}
+                className="px-3 py-1.5 rounded-md text-xs text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={submitManual}
+                disabled={!dirInput.trim()}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-cc-primary text-white hover:bg-cc-primary-hover transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {repoInput.trim() ? "Use folder & clone" : "Use folder"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ─── Directory browser ──────────────────────────────────────────── */}
         {!showDirInput && (
