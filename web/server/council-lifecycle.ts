@@ -15,6 +15,7 @@ import { SessionGroupCoordinator, type IdleTimerEnactor } from "./session-group-
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import { ensureProjectDir, projectDirExists } from "./project-dir.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
@@ -1195,6 +1196,14 @@ export class CouncilLifecycle {
       throw new Error(
         "createCouncilGroup: explicit cwd is required for Council Mode session creation; refusing to fall back to process.cwd()",
       );
+    }
+    // Create a missing workspace (cloning `repoUrl` into it when given)
+    // BEFORE the coordinator writes `.council/` and spawns either half — a
+    // missing cwd would otherwise fail the spawn as "ENOENT posix_spawn
+    // '<cli binary>'". No-op for an existing folder.
+    if (!req.base.sandboxEnabled && !req.base.container?.image && !projectDirExists(req.base.cwd)) {
+      const prepared = await ensureProjectDir({ cwd: req.base.cwd, repoUrl: req.base.repoUrl });
+      if (!prepared.ok) return { ok: false, error: prepared.error, status: prepared.status };
     }
     try {
       const group = await coordinator.createGroup({

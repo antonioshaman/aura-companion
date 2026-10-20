@@ -13,6 +13,7 @@ import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as worktreeIsolation from "./worktree-isolation.js";
+import { ensureProjectDir, projectDirExists } from "./project-dir.js";
 import type { IsolationMode, IsolationPreview } from "./worktree-isolation.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
@@ -150,6 +151,11 @@ export interface CreateSessionRequest {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
+  /**
+   * Git repository to clone into `cwd` when that folder does not exist yet
+   * (see project-dir.ts). Ignored when the folder already exists.
+   */
+  repoUrl?: string;
   /**
    * Working-tree isolation (see worktree-isolation.ts). `auto` creates a
    * dedicated git worktree only when another LIVE session already uses the
@@ -1283,6 +1289,41 @@ export class SessionOrchestrator {
     return this.councilLifecycle.createCouncilGroup(req);
   }
 
+  /**
+   * Create a missing project folder (cloning `repoUrl` into it when given)
+   * and report it as a creation step. Shared by solo sessions and council
+   * pairs; does nothing when the folder already exists.
+   */
+  async prepareProjectDir(
+    cwd: string,
+    repoUrl: string | undefined,
+    onProgress?: ProgressCallback,
+  ): Promise<{ ok: true } | { ok: false; error: string; status: number }> {
+    if (projectDirExists(cwd)) return { ok: true };
+    const willClone = typeof repoUrl === "string" && repoUrl.trim().length > 0;
+    if (onProgress) {
+      await onProgress(
+        "preparing_project",
+        willClone ? "Cloning repository..." : "Creating project folder...",
+        "in_progress",
+      );
+    }
+    const result = await ensureProjectDir({ cwd, repoUrl });
+    if (!result.ok) {
+      if (onProgress) await onProgress("preparing_project", "Project folder setup failed", "error", result.error);
+      return { ok: false, error: result.error, status: result.status };
+    }
+    if (onProgress) {
+      await onProgress(
+        "preparing_project",
+        result.cloned ? "Repository cloned" : "Project folder created",
+        "done",
+        cwd,
+      );
+    }
+    return { ok: true };
+  }
+
   private async doCreateSession(
     body: CreateSessionRequest,
     onProgress?: ProgressCallback,
@@ -1372,6 +1413,16 @@ export class SessionOrchestrator {
       // Validate branch name to prevent command injection
       if (body.branch && !/^[a-zA-Z0-9/_.\-]+$/.test(body.branch)) {
         return { ok: false, error: "Invalid branch name", status: 400 };
+      }
+
+      // --- Step: Make sure the project folder exists (host only) ---
+      // A missing cwd would otherwise surface from Bun.spawn as
+      // "ENOENT posix_spawn '<cli binary>'". No-op for an existing folder,
+      // so council halves (folder already prepared by createCouncilGroup)
+      // pass straight through.
+      if (!isDockerSession && cwd) {
+        const prepared = await this.prepareProjectDir(cwd, body.repoUrl, onProgress);
+        if (!prepared.ok) return prepared;
       }
 
       // --- Step: Worktree isolation (host only, solo sessions) ---

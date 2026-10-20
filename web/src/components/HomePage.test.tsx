@@ -82,9 +82,10 @@ vi.mock("./EnvManager.js", () => ({
   ),
 }));
 vi.mock("./FolderPicker.js", () => ({
-  FolderPicker: ({ onSelect, onClose }: { onSelect: (p: string) => void; onClose: () => void }) => (
+  FolderPicker: ({ onSelect, onClose }: { onSelect: (p: string, opts?: { repoUrl?: string }) => void; onClose: () => void }) => (
     <div data-testid="folder-picker">
       <button onClick={() => onSelect("/new-project")}>Select Folder</button>
+      <button onClick={() => onSelect("/root/new-repo", { repoUrl: "https://github.com/o/new-repo" })}>Select And Clone</button>
       <button onClick={onClose}>Close Picker</button>
     </div>
   ),
@@ -754,6 +755,52 @@ describe("HomePage", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("folder-picker")).not.toBeInTheDocument();
     });
+  });
+
+  it("sends the picked repo URL with the new session, then forgets it", async () => {
+    // The folder picker can return a repo to clone into a folder that doesn't
+    // exist on the server yet. HomePage must mark the folder ("clone"), send
+    // repoUrl with the create request, and drop it once the session exists so
+    // a later session doesn't try to clone again.
+    createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/root/new-repo" });
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText("repo")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("repo").closest("button")!);
+    fireEvent.click(screen.getByText("Select And Clone"));
+    expect(screen.getByText("clone")).toBeInTheDocument();
+
+    const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    fireEvent.change(textarea, { target: { value: "Start" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: "/root/new-repo", repoUrl: "https://github.com/o/new-repo" }),
+        expect.any(Function),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("clone")).not.toBeInTheDocument();
+    });
+  });
+
+  it("a plain folder pick sends no repo URL", async () => {
+    createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/new-project" });
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText("repo")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("repo").closest("button")!);
+    fireEvent.click(screen.getByText("Select Folder"));
+    expect(screen.queryByText("clone")).not.toBeInTheDocument();
+
+    const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    fireEvent.change(textarea, { target: { value: "Start" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    expect(createSessionStreamMock.mock.calls[0]![0].repoUrl).toBeUndefined();
   });
 
   // ─── Backend toggle ─────────────────────────────────────────────────────────

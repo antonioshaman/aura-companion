@@ -38,7 +38,7 @@ vi.mock("../utils/recent-dirs.js", () => ({
 
 import { api } from "../api.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
-import { FolderPicker } from "./FolderPicker.js";
+import { FolderPicker, looksLikeRepoUrl, repoNameFromUrl } from "./FolderPicker.js";
 
 const mockListDirs = api.listDirs as ReturnType<typeof vi.fn>;
 const mockGetRecentDirs = getRecentDirs as ReturnType<typeof vi.fn>;
@@ -367,6 +367,82 @@ describe("FolderPicker", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  // ─── New folder / clone a repository (manual mode) ──────────────────────
+  // A typed folder that doesn't exist is created by the server when the
+  // session starts; an optional repo URL is cloned into it. The picker only
+  // collects the pair — it never checks the server or clones itself.
+
+  async function openManual() {
+    await waitFor(() => {
+      expect(screen.getByLabelText("Type path manually")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByLabelText("Type path manually"));
+  }
+
+  it("passes accessibility scan in manual mode with the repository field", async () => {
+    const { axe } = await import("vitest-axe");
+    setup();
+    await openManual();
+    expect(screen.getByLabelText(/Git repository/)).toBeInTheDocument();
+    const results = await axe(screen.getByRole("dialog"));
+    expect(results).toHaveNoViolations();
+  });
+
+  it("tells the user a missing folder will be created", async () => {
+    setup();
+    await openManual();
+    expect(screen.getByText(/doesn.t exist yet is created on the server/)).toBeInTheDocument();
+  });
+
+  it("a repo URL fills the path as <current folder>/<repo name> and selects with the repo", async () => {
+    const { onSelect } = setup();
+    await openManual();
+    fireEvent.change(screen.getByLabelText(/Git repository/), {
+      target: { value: "https://github.com/antonioshaman/li-voice-agent.git" },
+    });
+    expect(screen.getByLabelText("Type a directory path")).toHaveValue("/home/user/project/li-voice-agent");
+    fireEvent.click(screen.getByRole("button", { name: "Use folder & clone" }));
+    expect(onSelect).toHaveBeenCalledWith("/home/user/project/li-voice-agent", {
+      repoUrl: "https://github.com/antonioshaman/li-voice-agent.git",
+    });
+  });
+
+  it("a repo URL pasted into the path field moves to the repo field (the user's natural paste target)", async () => {
+    const { onSelect } = setup();
+    await openManual();
+    const pathInput = screen.getByLabelText("Type a directory path");
+    fireEvent.change(pathInput, { target: { value: "git@github.com:o/my-app.git" } });
+    expect(pathInput).toHaveValue("/home/user/project/my-app");
+    expect(screen.getByLabelText(/Git repository/)).toHaveValue("git@github.com:o/my-app.git");
+    fireEvent.keyDown(pathInput, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith("/home/user/project/my-app", { repoUrl: "git@github.com:o/my-app.git" });
+  });
+
+  it("a hand-edited path is not overwritten by later repo edits", async () => {
+    setup();
+    await openManual();
+    const pathInput = screen.getByLabelText("Type a directory path");
+    fireEvent.change(pathInput, { target: { value: "/srv/custom" } });
+    fireEvent.change(screen.getByLabelText(/Git repository/), { target: { value: "https://github.com/o/r" } });
+    expect(pathInput).toHaveValue("/srv/custom");
+  });
+
+  it("without a repo the button reads 'Use folder' and selects the path alone", async () => {
+    const { onSelect } = setup();
+    await openManual();
+    fireEvent.change(screen.getByLabelText("Type a directory path"), { target: { value: "/root/new-proj" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use folder" }));
+    expect(onSelect).toHaveBeenCalledWith("/root/new-proj");
+  });
+
+  it("Back leaves manual mode without selecting", async () => {
+    const { onSelect } = setup();
+    await openManual();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.queryByLabelText("Type a directory path")).not.toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   // ─── Close behavior ─────────────────────────────────────────────────────
 
   it("triggers close animation when close button is clicked", async () => {
@@ -465,5 +541,26 @@ describe("FolderPicker", () => {
     // Validates empty initialPath results in an undefined path call
     setup({ initialPath: "" });
     expect(mockListDirs).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("repo URL helpers", () => {
+  // Decide when a pasted value is a git remote and which folder name a clone gets.
+  it.each([
+    ["https://github.com/o/r", true],
+    ["git@github.com:o/r.git", true],
+    ["/root/project", false],
+    ["github.com/o/r", false],
+  ])("looksLikeRepoUrl(%s) → %s", (value, expected) => {
+    expect(looksLikeRepoUrl(value as string)).toBe(expected);
+  });
+
+  it.each([
+    ["https://github.com/o/li-voice-agent", "li-voice-agent"],
+    ["https://github.com/o/li-voice-agent.git", "li-voice-agent"],
+    ["https://github.com/o/repo/", "repo"],
+    ["git@github.com:o/app.git", "app"],
+  ])("repoNameFromUrl(%s) → %s", (url, name) => {
+    expect(repoNameFromUrl(url)).toBe(name);
   });
 });

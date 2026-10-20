@@ -37,6 +37,14 @@ vi.mock("./worktree-isolation.js", async (importOriginal) => {
   };
 });
 
+// Session tests use made-up folders ("/repo", "/test"); by default treat
+// them as existing so the "create missing project folder" step stays out
+// of the way. The "project folder preparation" describe overrides this.
+vi.mock("./project-dir.js", () => ({
+  projectDirExists: vi.fn(() => true),
+  ensureProjectDir: vi.fn(async () => ({ ok: true, created: false, cloned: false })),
+}));
+
 vi.mock("./session-names.js", () => ({
   getName: vi.fn(() => undefined),
   setName: vi.fn(),
@@ -156,6 +164,7 @@ import * as envManager from "./env-manager.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as worktreeIsolation from "./worktree-isolation.js";
+import * as projectDir from "./project-dir.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
 import * as settingsManager from "./settings-manager.js";
@@ -2562,6 +2571,63 @@ describe("SessionOrchestrator", () => {
   // ── getSession ────────────────────────────────────────────────────────────
 
   // ── Worktree isolation (default when another live session shares the tree) ──
+
+  // A folder typed into the picker may not exist on the server yet. Without
+  // this step Bun.spawn reported the missing cwd as "ENOENT posix_spawn
+  // '<claude binary>'" (prod, 2026-10-20: /root/li-voice-agent). The step
+  // must run before the CLI launches, stop the launch on failure, and stay
+  // silent for folders that already exist. `*Once` overrides keep the
+  // file-level default ("folder exists") for every other test.
+  describe("project folder preparation", () => {
+    const pd = vi.mocked(projectDir);
+
+    it("creates a missing folder (cloning the repo) before launching, and reports it as a step", async () => {
+      pd.projectDirExists.mockReturnValueOnce(false);
+      pd.ensureProjectDir.mockResolvedValueOnce({ ok: true, created: true, cloned: true });
+      const onProgress = vi.fn(async (..._args: unknown[]) => {});
+      const result = await orchestrator.createSessionStreaming(
+        { cwd: "/root/new-proj", repoUrl: "https://github.com/o/new-proj" },
+        onProgress,
+      );
+      expect(result.ok).toBe(true);
+      expect(pd.ensureProjectDir).toHaveBeenCalledWith({ cwd: "/root/new-proj", repoUrl: "https://github.com/o/new-proj" });
+      expect(onProgress).toHaveBeenCalledWith("preparing_project", "Cloning repository...", "in_progress");
+      expect(onProgress).toHaveBeenCalledWith("preparing_project", "Repository cloned", "done", "/root/new-proj");
+      // Folder prepared first, then the CLI launched in it.
+      const ensureOrder = pd.ensureProjectDir.mock.invocationCallOrder[0];
+      const launchOrder = vi.mocked(deps.launcher.launch).mock.invocationCallOrder[0];
+      expect(ensureOrder).toBeLessThan(launchOrder);
+    });
+
+    it("stops before launching the CLI when the folder cannot be prepared (Claude and Codex)", async () => {
+      for (const backend of ["claude", "codex"] as const) {
+        pd.projectDirExists.mockReturnValueOnce(false);
+        pd.ensureProjectDir.mockResolvedValueOnce({ ok: false, error: "No permission to create /root/x", status: 403 });
+        const result = await orchestrator.createSession({ cwd: "/root/x", backend });
+        expect(result).toMatchObject({ ok: false, status: 403, error: "No permission to create /root/x" });
+      }
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("leaves an existing folder alone (no ensure call, no extra progress step)", async () => {
+      const onProgress = vi.fn(async (..._args: unknown[]) => {});
+      await orchestrator.createSessionStreaming({ cwd: "/repo", repoUrl: "https://github.com/o/r" }, onProgress);
+      expect(pd.ensureProjectDir).not.toHaveBeenCalled();
+      expect(onProgress.mock.calls.some(([step]) => step === "preparing_project")).toBe(false);
+    });
+
+    it("skips container sessions (the folder lives inside the container)", async () => {
+      // Not `Once`: the container path never asks, so a Once override would
+      // leak into the next test. Restore the file default explicitly.
+      pd.projectDirExists.mockReturnValue(false);
+      try {
+        await orchestrator.createSession({ cwd: "/root/x", sandboxEnabled: true });
+        expect(pd.ensureProjectDir).not.toHaveBeenCalled();
+      } finally {
+        pd.projectDirExists.mockReturnValue(true);
+      }
+    });
+  });
 
   describe("worktree isolation", () => {
     const iso = vi.mocked(worktreeIsolation);
@@ -6351,6 +6417,22 @@ describe("SessionOrchestrator", () => {
       if (!result.ok) {
         expect(result.status).toBe(400);
       }
+    });
+
+    it("prepares a missing workspace once, before either half spawns, and stops the pair if that fails", async () => {
+      // Both halves run in one folder; a missing one used to fail each
+      // spawn as "ENOENT posix_spawn '<claude binary>'".
+      const pd = vi.mocked(projectDir);
+      pd.projectDirExists.mockReturnValueOnce(false);
+      pd.ensureProjectDir.mockResolvedValueOnce({ ok: false, error: "No permission to create /root/x", status: 403 });
+      const result = await orchestrator.createCouncilGroup({
+        pairing: "claude+codex",
+        base: { cwd: "/root/x", repoUrl: "https://github.com/o/x" },
+      });
+      expect(result).toMatchObject({ ok: false, status: 403, error: "No permission to create /root/x" });
+      expect(pd.ensureProjectDir).toHaveBeenCalledTimes(1);
+      expect(pd.ensureProjectDir).toHaveBeenCalledWith({ cwd: "/root/x", repoUrl: "https://github.com/o/x" });
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
     });
   });
 

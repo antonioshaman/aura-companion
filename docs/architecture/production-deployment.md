@@ -20,3 +20,10 @@ For self-hosting on a Linux VPS or any non-loopback origin, two things matter be
 
 If a user reports timeouts at the last step of session creation while earlier steps (`Environment resolved` / `Fetch complete` / `Session started`) report green, the first canary is the producer-side fanout count in periodic `[diagnostics]` log lines: `browsers=0` with active sessions means the Origin allowlist is rejecting the UI, not a subprocess problem.
 
+## Project folders (`COMPANION_FS_ALLOWED_BASES`, `COMPANION_PROJECT_DIR_SUDO`)
+
+A new session or council pair whose folder does not exist on the server gets it created before the CLI spawns, and a git repository entered in the folder picker (manual path → "Git repository") is cloned into it (`web/server/project-dir.ts`). Without this the spawn fails as `ENOENT … posix_spawn '<claude binary>'` — Bun reports a missing **cwd** that way. An existing folder is never touched.
+
+- Folders are created only inside the folder-picker allowlist: the service user's home, the server cwd, and the colon-separated `COMPANION_FS_ALLOWED_BASES`.
+- When projects live in a directory the service user cannot write (e.g. `/root` with `COMPANION_FS_ALLOWED_BASES=/root`), set `COMPANION_PROJECT_DIR_SUDO=1`: the server then runs `sudo -n install -d -o <service uid> -g <service gid> -- <folder>` (requires passwordless sudo for that command). Without the flag the error names the command to run by hand.
+- Private repositories clone with the service user's git credentials; `GIT_TERMINAL_PROMPT=0` makes a missing credential fail fast instead of hanging the create request.

@@ -1082,6 +1082,7 @@ export interface PermissionRequest {
 
 export type CreationStepId =
   | "resolving_env"
+  | "preparing_project"
   | "fetching_git"
   | "checkout_branch"
   | "pulling_git"

@@ -237,6 +237,8 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
+  /** Git repository cloned into `cwd` when that folder does not exist on the server yet. */
+  repoUrl?: string;
   /** Worktree isolation: `auto` (server default) isolates only when another live session uses the tree. */
   isolation?: "auto" | "isolate" | "shared";
   backend?: "claude" | "codex";
