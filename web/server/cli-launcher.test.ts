@@ -596,6 +596,10 @@ describe("launch", () => {
     ["codex", "stdio", true], ["codex", "ws", true],
   ] as const)("passes browser idle cleanup to %s/%s (container=%s)", async (backendType, transport, container) => {
     vi.stubEnv("AGENT_BROWSER_IDLE_TIMEOUT_MS", "3600000");
+    // The unbounded host policy is Linux-only (see browser-lifecycle-env.ts);
+    // pin the platform so the macOS CI runner checks the same path.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux" });
     try {
       process.env.COMPANION_CLAUDE_TRANSPORT = transport;
       process.env.COMPANION_CODEX_TRANSPORT = transport;
@@ -627,6 +631,7 @@ describe("launch", () => {
         expect(spawnOptions.env.AURA_BROWSER_SESSION_ID).toBe("test-session-id");
       }
     } finally {
+      Object.defineProperty(process, "platform", platform);
       vi.unstubAllEnvs();
     }
   });
