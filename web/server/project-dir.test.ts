@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureProjectDir, isValidRepoUrl, type CommandRunner } from "./project-dir.js";
@@ -129,6 +129,71 @@ describe("ensureProjectDir", () => {
       ["-n", "install", "-d", "-o", String(process.getuid!()), "-g", String(process.getgid!()), "--", cwd],
       expect.any(Object),
     );
+  });
+
+  // Fake sudo for the locked-parent cases: performs install -d / rmdir by
+  // briefly unlocking the parent, the way real root would ignore its mode.
+  function sudoRunner(parent: string, opts: { rmdirOk: boolean }): CommandRunner {
+    return async (file, args) => {
+      if (file === "git") return { ok: false, output: "fatal: repository not found" };
+      const target = args[args.length - 1]!;
+      if (args[1] === "rmdir" && !opts.rmdirOk) return { ok: false, output: "sudo: a password is required" };
+      chmodSync(parent, 0o755);
+      if (args[1] === "install") mkdirSync(target);
+      else rmdirSync(target);
+      chmodSync(parent, 0o555);
+      return { ok: true, output: "" };
+    };
+  }
+
+  it.skipIf(asRoot)("removes a sudo-created folder via sudo rmdir when the clone fails", async () => {
+    // Prod: /root is root-owned, so the service user's own rmdir fails there.
+    // Without sudo rmdir the empty folder stayed and a retry started a session
+    // in it without cloning (the folder "already exists").
+    const parent = join(base, "locked");
+    mkdirSync(parent);
+    chmodSync(parent, 0o555);
+    const cwd = join(parent, "proj");
+    const sudoRun = vi.fn(sudoRunner(parent, { rmdirOk: true }));
+    const res = await ensureProjectDir({
+      cwd,
+      repoUrl: "https://github.com/o/proj",
+      allowedBases: [base],
+      env: { COMPANION_PROJECT_DIR_SUDO: "1" },
+      run: sudoRun,
+    });
+    chmodSync(parent, 0o755);
+    expect(res).toMatchObject({ ok: false, status: 500 });
+    expect(sudoRun).toHaveBeenCalledWith("sudo", ["-n", "rmdir", "--", cwd], expect.any(Object));
+    expect(existsSync(cwd)).toBe(false);
+    expect((res as { error: string }).error).not.toContain("still there");
+  });
+
+  it.skipIf(asRoot)("says the empty folder is left behind when even sudo rmdir fails", async () => {
+    // The user must learn why a retry would not clone, instead of a silent empty session.
+    const parent = join(base, "locked");
+    mkdirSync(parent);
+    chmodSync(parent, 0o555);
+    const cwd = join(parent, "proj");
+    const res = await ensureProjectDir({
+      cwd,
+      repoUrl: "https://github.com/o/proj",
+      allowedBases: [base],
+      env: { COMPANION_PROJECT_DIR_SUDO: "1" },
+      run: sudoRunner(parent, { rmdirOk: false }),
+    });
+    chmodSync(parent, 0o755);
+    expect(existsSync(cwd)).toBe(true);
+    expect((res as { error: string }).error).toContain(`The empty folder ${cwd} is still there`);
+  });
+
+  it("does not call sudo rmdir for a folder the service user created itself", async () => {
+    // Plain rmdir works there; sudo is only for folders created via sudo.
+    const cwd = join(base, "proj");
+    run.mockResolvedValueOnce({ ok: false, output: "fatal: repository not found" });
+    await ensureProjectDir({ cwd, repoUrl: "https://github.com/o/proj", allowedBases: [base], env: { COMPANION_PROJECT_DIR_SUDO: "1" }, run });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(existsSync(cwd)).toBe(false);
   });
 });
 

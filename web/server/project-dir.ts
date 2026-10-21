@@ -129,6 +129,7 @@ export async function ensureProjectDir(opts: EnsureProjectDirOptions): Promise<P
     };
   }
 
+  let createdViaSudo = false;
   try {
     await mkdir(abs, { recursive: true });
   } catch (err) {
@@ -152,6 +153,7 @@ export async function ensureProjectDir(opts: EnsureProjectDirOptions): Promise<P
     if (!sudo.ok) {
       return { ok: false, error: `Could not create ${abs} via sudo: ${sudo.output}`, status: 500 };
     }
+    createdViaSudo = true;
   }
   log.info("project-dir", "created missing project folder", { event: "project_dir.created", cwd: abs });
 
@@ -166,9 +168,24 @@ export async function ensureProjectDir(opts: EnsureProjectDirOptions): Promise<P
   if (!clone.ok) {
     // Leave no empty shell behind so a retry starts clean; rmdir refuses a
     // non-empty dir, so nothing but our own empty folder can be removed.
-    await rmdir(abs).catch(() => {});
-    log.warn("project-dir", "git clone failed", { event: "project_dir.clone_failed", cwd: abs, repoUrl });
-    return { ok: false, error: `git clone ${repoUrl} failed: ${clone.output}`, status: 500 };
+    // A folder made via sudo sits in a parent the service user cannot write,
+    // so plain rmdir fails there and a retry would find an existing empty
+    // folder and start the session in it without cloning.
+    let removed = await rmdir(abs).then(
+      () => true,
+      () => false,
+    );
+    if (!removed && createdViaSudo) {
+      removed = (await run("sudo", ["-n", "rmdir", "--", abs], { timeoutMs: SUDO_TIMEOUT_MS })).ok;
+    }
+    log.warn("project-dir", "git clone failed", {
+      event: "project_dir.clone_failed",
+      cwd: abs,
+      repoUrl,
+      emptyFolderRemoved: removed,
+    });
+    const leftover = removed ? "" : ` The empty folder ${abs} is still there; remove it before retrying.`;
+    return { ok: false, error: `git clone ${repoUrl} failed: ${clone.output}.${leftover}`, status: 500 };
   }
   log.info("project-dir", "cloned repository into project folder", { event: "project_dir.cloned", cwd: abs, repoUrl });
   return { ok: true, created: true, cloned: true };
