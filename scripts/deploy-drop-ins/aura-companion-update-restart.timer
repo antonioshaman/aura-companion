@@ -1,0 +1,8 @@
+[Unit]
+Description=Coalesce Aura Companion package-update restarts
+
+[Timer]
+OnActiveSec=2min
+AccuracySec=5s
+RemainAfterElapse=no
+Unit=aura-companion-update-restart.service

@@ -1,0 +1,8 @@
+[Unit]
+Description=Recover Aura Companion after service failure or start limiting
+After=apt-daily-upgrade.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/aura-recover
+TimeoutStartSec=120

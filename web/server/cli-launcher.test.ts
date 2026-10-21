@@ -589,6 +589,48 @@ describe("launch", () => {
     expect(options.env.CLAUDECODE).toBeUndefined();
   });
 
+  it.each([
+    ["claude", "stdio", false], ["claude", "ws", false],
+    ["claude", "stdio", true], ["claude", "ws", true],
+    ["codex", "stdio", false], ["codex", "ws", false],
+    ["codex", "stdio", true], ["codex", "ws", true],
+  ] as const)("passes browser idle cleanup to %s/%s (container=%s)", async (backendType, transport, container) => {
+    vi.stubEnv("AGENT_BROWSER_IDLE_TIMEOUT_MS", "3600000");
+    try {
+      process.env.COMPANION_CLAUDE_TRANSPORT = transport;
+      process.env.COMPANION_CODEX_TRANSPORT = transport;
+      if (backendType === "codex") {
+        mockResolveBinary.mockReturnValue("/opt/fake/codex");
+        if (transport === "ws") {
+          mockSpawn.mockReturnValueOnce(createMockProc(2001))
+            .mockReturnValueOnce(createPendingCodexWsProxyProc(2002).proc);
+          if (container) {
+            mockGetContainerById.mockReturnValue({ portMappings: [{ containerPort: 4502, hostPort: 55021 }] });
+          }
+        } else {
+          mockSpawn.mockReturnValueOnce(createMockCodexProc());
+        }
+      }
+      launcher.launch({
+        backendType, cwd: "/tmp/project",
+        ...(container ? { containerId: "test-container" } : {}),
+      });
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+      const [command, spawnOptions] = mockSpawn.mock.calls[0];
+      if (container) {
+        expect(command).toContain("AGENT_BROWSER_IDLE_TIMEOUT_MS=3600000");
+        expect(command).toContain("AGENT_BROWSER_SESSION=aura-test-session-id");
+        expect(command).toContain("AURA_BROWSER_SESSION_ID=test-session-id");
+      } else {
+        expect(spawnOptions.env.AGENT_BROWSER_IDLE_TIMEOUT_MS).toBe("0");
+        expect(spawnOptions.env.AGENT_BROWSER_SESSION).toBe("aura-test-session-id");
+        expect(spawnOptions.env.AURA_BROWSER_SESSION_ID).toBe("test-session-id");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("enables Codex web search when codexInternetAccess=true", () => {
     // Use a fake path where no sibling `node` exists, so the spawn uses
     // the codex binary directly (the explicit-node path is tested separately).
