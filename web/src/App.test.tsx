@@ -391,6 +391,30 @@ describe("App", () => {
         expect(navigateToSession).toHaveBeenCalledWith("newest-live", true);
       });
     });
+
+    it("does not redirect to an old session after the user pressed + before the list loaded", () => {
+      // Regression: on a slow link (phone, mobile network) the first
+      // /api/sessions poll can land AFTER the user tapped "+" (newSession bumps
+      // homeResetKey). The one-shot recovery used to fire then and navigate to
+      // the newest live session, so "+" appeared to open some existing empty
+      // session instead of the new-session form.
+      setStoreValues({ currentSessionId: null, sdkSessions: [] });
+      const { rerender } = render(<App />);
+
+      // User taps "+": still on home, no session selected, reset key bumped.
+      setStoreValues({ homeResetKey: 1 });
+      rerender(<App />);
+
+      // The slow session list finally arrives with a live session.
+      setStoreValues({
+        sdkSessions: [
+          { sessionId: "live", state: "connected", cwd: "/repo", createdAt: 100, archived: false },
+        ],
+      });
+      rerender(<App />);
+
+      expect(navigateToSession).not.toHaveBeenCalled();
+    });
   });
 
   describe("archived auto-restore bounce", () => {
