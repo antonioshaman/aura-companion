@@ -52,16 +52,26 @@ export interface SessionBrowserCleanupDeps {
   now: () => number;
 }
 
-export async function closeSessionBrowser(browser: SessionBrowser): Promise<void> {
-  await execFileAsync(`/proc/${browser.pid}/exe`, ["--session", browser.name, "close"], {
+/** Seams for tests; production uses the real daemon binary and /proc. */
+export interface CloseSessionBrowserOptions {
+  exec?: (file: string, args: string[], options: { timeout: number; env: NodeJS.ProcessEnv }) => Promise<unknown>;
+  read?: (name: string) => Promise<SessionBrowser | null>;
+  exitTimeoutMs?: number;
+  pollMs?: number;
+}
+
+export async function closeSessionBrowser(browser: SessionBrowser, options: CloseSessionBrowserOptions = {}): Promise<void> {
+  const exec = options.exec ?? execFileAsync;
+  const read = options.read ?? ((name: string) => readSessionBrowser(name));
+  await exec(`/proc/${browser.pid}/exe`, ["--session", browser.name, "close"], {
     timeout: 5000,
     env: { ...process.env, AGENT_BROWSER_SESSION: browser.name },
   });
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + (options.exitTimeoutMs ?? 3000);
   while (Date.now() < deadline) {
-    const current = await readSessionBrowser(browser.name);
+    const current = await read(browser.name);
     if (!current || current.pid !== browser.pid || current.startTicks !== browser.startTicks) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 50));
   }
   throw new Error("Browser daemon did not exit after close");
 }
@@ -107,21 +117,28 @@ export function createSessionBrowserCleanup(deps: SessionBrowserCleanupDeps) {
   };
 }
 
+/** Every daemon in the pidfile directory that proves ownership by an Aura session. */
+export async function scanSessionBrowsers(
+  directory = join(homedir(), ".agent-browser"),
+  procRoot = "/proc",
+  platform: NodeJS.Platform = process.platform,
+): Promise<SessionBrowser[]> {
+  if (platform !== "linux") return [];
+  let names: string[];
+  try { names = await readdir(directory); } catch { return []; }
+  const browsers = await Promise.all(names.filter((name) => name.endsWith(".pid"))
+    .map((name) => readSessionBrowser(name.slice(0, -4), directory, procRoot)));
+  return browsers.filter((browser): browser is SessionBrowser => browser !== null);
+}
+
 export function startSessionBrowserCleanup(getSession: SessionBrowserCleanupDeps["getSession"]) {
   const directory = join(homedir(), ".agent-browser");
   const cleanup = createSessionBrowserCleanup({
     getSession,
     now: Date.now,
     read: (name) => readSessionBrowser(name, directory),
-    async scan() {
-      if (process.platform !== "linux") return [];
-      let names: string[];
-      try { names = await readdir(directory); } catch { return []; }
-      const browsers = await Promise.all(names.filter((name) => name.endsWith(".pid"))
-        .map((name) => readSessionBrowser(name.slice(0, -4), directory)));
-      return browsers.filter((browser): browser is SessionBrowser => browser !== null);
-    },
-    close: closeSessionBrowser,
+    scan: () => scanSessionBrowsers(directory),
+    close: (browser) => closeSessionBrowser(browser),
   });
   const timer = setInterval(() => { void cleanup.sweep(); }, 60_000);
   timer.unref();

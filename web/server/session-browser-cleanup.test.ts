@@ -2,7 +2,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSessionBrowserCleanup, readSessionBrowser, type SessionBrowser } from "./session-browser-cleanup.js";
+import {
+  closeSessionBrowser, createSessionBrowserCleanup, readSessionBrowser, scanSessionBrowsers, startSessionBrowserCleanup,
+  type SessionBrowser,
+} from "./session-browser-cleanup.js";
 
 const sessionId = "40f03a1e-2b12-48f0-bf91-7c33c2631c6a";
 const browser: SessionBrowser = {
@@ -144,5 +147,76 @@ describe("browser ownership evidence", () => {
     symlinkSync(join(directory, "target"), join(directory, `${browser.name}.pid`));
     expect(await readSessionBrowser(browser.name, directory, procRoot)).toBeNull();
     expect(await readSessionBrowser("../other", directory, procRoot)).toBeNull();
+  });
+});
+
+describe("scanning the pidfile directory", () => {
+  it("returns only daemons that prove ownership, ignoring other files", async () => {
+    const { directory, procRoot } = fixture();
+    // A non-pidfile and a pidfile whose process is gone must not show up.
+    writeFileSync(join(directory, "socket.sock"), "");
+    writeFileSync(join(directory, "aura-gone.pid"), "999");
+    expect(await scanSessionBrowsers(directory, procRoot, "linux")).toEqual([
+      expect.objectContaining({ name: browser.name, pid: 123, sessionId }),
+    ]);
+  });
+
+  it("finds nothing when the pidfile directory does not exist yet", async () => {
+    expect(await scanSessionBrowsers(join(tmpdir(), "no-such-agent-browser-dir"), "/proc", "linux")).toEqual([]);
+  });
+
+  it("never scans off Linux: ownership is proven through /proc", async () => {
+    const { directory, procRoot } = fixture();
+    expect(await scanSessionBrowsers(directory, procRoot, "darwin")).toEqual([]);
+  });
+});
+
+describe("graceful close", () => {
+  it("runs the daemon's own close command for its browser name, then waits for it to exit", async () => {
+    const exec = vi.fn(async () => {});
+    // First poll: still the same daemon; second poll: gone.
+    const read = vi.fn<(name: string) => Promise<SessionBrowser | null>>()
+      .mockResolvedValueOnce(browser).mockResolvedValueOnce(null);
+    await closeSessionBrowser(browser, { exec, read, pollMs: 1 });
+    expect(exec).toHaveBeenCalledExactlyOnceWith(
+      "/proc/123/exe", ["--session", browser.name, "close"],
+      expect.objectContaining({ env: expect.objectContaining({ AGENT_BROWSER_SESSION: browser.name }) }),
+    );
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a different process under the same name as the old daemon having exited", async () => {
+    const read = vi.fn(async () => ({ ...browser, pid: 456 }));
+    await expect(closeSessionBrowser(browser, { exec: async () => {}, read })).resolves.toBeUndefined();
+  });
+
+  it("fails (so a later sweep retries) when the daemon does not exit in time", async () => {
+    await expect(closeSessionBrowser(browser, {
+      exec: async () => {}, read: async () => browser, exitTimeoutMs: 20, pollMs: 1,
+    })).rejects.toThrow("did not exit");
+  });
+
+  it("propagates a failed close command without waiting", async () => {
+    const read = vi.fn(async () => browser);
+    await expect(closeSessionBrowser(browser, {
+      exec: async () => { throw new Error("no daemon"); }, read,
+    })).rejects.toThrow("no daemon");
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("scheduled cleanup", () => {
+  it("sweeps every minute and stops on dispose", async () => {
+    vi.useFakeTimers();
+    try {
+      const getSession = vi.fn(() => ({ archived: false }));
+      const handle = startSessionBrowserCleanup(getSession);
+      // Nothing runs before the first interval, and dispose clears the timer.
+      expect(vi.getTimerCount()).toBe(1);
+      handle.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
