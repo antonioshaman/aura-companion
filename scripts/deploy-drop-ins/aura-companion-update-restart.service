@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Aura Companion once after package updates
+After=apt-daily-upgrade.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/systemctl is-enabled --quiet aura-companion.service
+ExecStart=/usr/bin/systemctl try-restart aura-companion.service
+TimeoutStartSec=120

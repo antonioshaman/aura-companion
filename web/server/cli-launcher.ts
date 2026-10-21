@@ -56,6 +56,7 @@ import {
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
 import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+import { browserLifecycleEnv } from "./browser-lifecycle-env.js";
 import {
   buildLayerSpawnConfig,
   composeSystemPrompt,
@@ -1848,6 +1849,7 @@ export class CliLauncher {
     args: string[],
     isContainerized: boolean,
   ): { spawnCmd: string[]; spawnEnv: Record<string, string | undefined>; spawnCwd: string | undefined } {
+    options = { ...options, env: browserLifecycleEnv(info.sessionId, options.env, process.env, isContainerized) };
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
     let spawnCwd: string | undefined;
@@ -2271,6 +2273,7 @@ export class CliLauncher {
    * Codex listens on `ws://127.0.0.1:PORT`, Companion connects as a client.
    */
   private async spawnCodexWs(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): Promise<void> {
+    options = { ...options, env: browserLifecycleEnv(sessionId, options.env, process.env, !!options.containerId) };
     const isContainerized = !!options.containerId;
     const connectTimeoutMs = Math.max(1000, parseInt(process.env.COMPANION_CODEX_WS_CONNECT_TIMEOUT_MS ?? "", 10) || 30000);
     const pongTimeoutMs = Math.max(1000, parseInt(process.env.COMPANION_CODEX_PONG_TIMEOUT_MS ?? "", 10) || 30000);
@@ -2624,6 +2627,7 @@ export class CliLauncher {
    * Unlike Claude Code (which connects back via WebSocket), Codex uses stdin/stdout.
    */
   private spawnCodexStdio(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
+    options = { ...options, env: browserLifecycleEnv(sessionId, options.env, process.env, !!options.containerId) };
     const isContainerized = !!options.containerId;
 
     let binary = options.codexBinary || "codex";

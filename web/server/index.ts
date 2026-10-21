@@ -15,6 +15,7 @@ import { serveStatic } from "hono/bun";
 import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
 import { CliLauncher, claudeTransportMode } from "./cli-launcher.js";
+import { startSessionBrowserCleanup } from "./session-browser-cleanup.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore, migrateLegacyTmpdirSessions } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
@@ -263,6 +264,7 @@ gateBootResumeOnCrashLoop(sessionStore.directory, () => launcher.takeBootResumeC
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+const sessionBrowserCleanup = startSessionBrowserCleanup((id) => launcher.getSession(id));
 
 // ── Anonymous opt-in usage heartbeat (default off) ───────────────────────────
 // Feeds the global "N people use Aura Companion" counter. No-op unless the
@@ -1065,6 +1067,7 @@ async function gracefulShutdown() {
   // callback cannot race the teardown below (it reads wsBridge state that
   // shutdown is actively dismantling).
   clearInterval(diagnosticsTimer);
+  sessionBrowserCleanup.dispose();
   // Abort a running KB analysis (no report, lastRun unchanged) and stop its hourly check.
   await diagnosticsService.dispose().catch(() => {});
   eventLoopLagMonitor.stop();

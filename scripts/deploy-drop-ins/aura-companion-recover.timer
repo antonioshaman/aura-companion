@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry failed Aura Companion service with a cooldown
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=10s
+Unit=aura-companion-recover.service
+
+[Install]
+WantedBy=timers.target

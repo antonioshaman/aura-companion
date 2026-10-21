@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+systemctl is-enabled --quiet aura-companion.service || exit 0
+systemctl restart aura-companion-update-restart.timer
+printf '[aura-update] restart deferred until package updates settle\n'
