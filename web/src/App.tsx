@@ -183,10 +183,13 @@ export default function App() {
   // route to the newest active session once. Sidebar polling still owns the
   // session list; this closes the gap where messages stream and ack in the
   // background while the main panel remains on the empty home route.
+  // An explicit "+" (newSession bumps homeResetKey) also disarms it: on a slow
+  // link the first session list can land after the user already chose to start
+  // a new session, and redirecting then would yank them into an old session.
   useEffect(() => {
     if (initialServerSessionRecoveryRef.current) return;
     if (!isAuthenticated) return;
-    if (route.page !== "home" || currentSessionId !== null) {
+    if (route.page !== "home" || currentSessionId !== null || homeResetKey !== 0) {
       initialServerSessionRecoveryRef.current = true;
       return;
     }
@@ -199,7 +202,7 @@ export default function App() {
     if (latestActive) {
       navigateToSession(latestActive.sessionId, true);
     }
-  }, [currentSessionId, isAuthenticated, route.page, sdkSessions]);
+  }, [currentSessionId, homeResetKey, isAuthenticated, route.page, sdkSessions]);
 
   // Keep git changed-files count in sync for the badge regardless of which tab is active.
   // DiffPanel does the same when mounted; this covers the case where the diff tab is closed.
