@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.8.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.2...aura-companion-v2.8.0) (2026-10-21)
+
+
+### Features
+
+* **landing:** show npm downloads for the last 30 days in the footer ([#419](https://github.com/antonioshaman/aura-companion/issues/419)) ([414b548](https://github.com/antonioshaman/aura-companion/commit/414b548c81d33bf480756d3892f3c38f6bebf5e4))
+* **sessions:** create a missing project folder and clone its repo on session start ([#420](https://github.com/antonioshaman/aura-companion/issues/420)) ([a45e11b](https://github.com/antonioshaman/aura-companion/commit/a45e11bcd5714fd3d5f5f2177e5bd178f7c454e5))
+
+
+### Bug Fixes
+
+* **app:** keep the new-session form open when "+" is tapped before the session list loads ([#422](https://github.com/antonioshaman/aura-companion/issues/422)) ([d570554](https://github.com/antonioshaman/aura-companion/commit/d570554e7aeb217c6fcb6431ae64bfdbfcabe9ee))
+* **landing:** stop scroll flicker in Chrome on macOS by dropping the header backdrop blur and the ambient glow blur ([#417](https://github.com/antonioshaman/aura-companion/issues/417)) ([2be44d5](https://github.com/antonioshaman/aura-companion/commit/2be44d5194a9011698dd3d9b2301da487e25a509))
+* **landing:** stop the grey full-page flash near the screenshot carousel in Chrome on macOS ([#418](https://github.com/antonioshaman/aura-companion/issues/418)) ([5836252](https://github.com/antonioshaman/aura-companion/commit/583625297b9fd4e36aaee6e7829b0dff1ad0d2a3))
+* **server:** recover from package-update restart storms and keep agent browsers per session until archive ([#423](https://github.com/antonioshaman/aura-companion/issues/423)) ([8c9917a](https://github.com/antonioshaman/aura-companion/commit/8c9917aa9e4738b9ea8bc7f07d2ddfb9783c99d8))
+* **sessions:** remove a sudo-created project folder when its clone fails ([#421](https://github.com/antonioshaman/aura-companion/issues/421)) ([2175a6d](https://github.com/antonioshaman/aura-companion/commit/2175a6d4938860e194c52e57aa3bb902e7dab37e))
+* **sidebar:** show "Continue in new session" in the row menu of active sessions ([#414](https://github.com/antonioshaman/aura-companion/issues/414)) ([e91b5df](https://github.com/antonioshaman/aura-companion/commit/e91b5df25e90fe1b6b7c4253532495c779fa077e))
+
 ## [2.7.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.1...aura-companion-v2.7.2) (2026-10-19)
 
 
