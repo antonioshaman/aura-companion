@@ -384,6 +384,17 @@ describe("commitCorpus — the old corpus survives any failure until the new man
     expect(existsSync(staging)).toBe(false);
   });
 
+  it("a failure AFTER the directories were swapped (manifest rename) restores the old corpus", () => {
+    const { root, target, staging, manifest } = setup();
+    const failingRename = () => {
+      throw new Error("EXDEV");
+    };
+    expect(() => commitCorpus({ staging, target, manifestPath: manifest, manifestText: "NEW", rename: failingRename })).toThrow(/EXDEV/);
+    expect(readFileSync(join(target, "a-src.txt"), "utf8")).toBe("old text");
+    expect(readFileSync(manifest, "utf8")).toBe("OLD MANIFEST");
+    expect(readdirSync(root).sort()).toEqual(["corpus", "manifest.json"]);
+  });
+
   it("on success the new texts and the new manifest are both in place and no backup is left", () => {
     const { root, target, staging, manifest } = setup();
     commitCorpus({ staging, target, manifestPath: manifest, manifestText: "NEW" });

@@ -507,9 +507,11 @@ export function commitCorpus(opts: {
   /** New manifest text, or null when the manifest is unchanged (rebuild). */
   manifestText: string | null;
   write?: (path: string, text: string) => void;
+  rename?: (from: string, to: string) => void;
 }): void {
   const { staging, target, manifestPath, manifestText } = opts;
   const write = opts.write ?? writeFileSync;
+  const rename = opts.rename ?? renameSync;
   const tmpManifest = `${manifestPath}.tmp-${process.pid}`;
   const old = `${target}.old-${process.pid}`;
   let moved = false;
@@ -520,7 +522,7 @@ export function commitCorpus(opts: {
       moved = true;
     }
     renameSync(staging, target);
-    if (manifestText !== null) renameSync(tmpManifest, manifestPath);
+    if (manifestText !== null) rename(tmpManifest, manifestPath);
   } catch (err) {
     if (moved) {
       if (existsSync(target)) rmSync(target, { recursive: true, force: true });
