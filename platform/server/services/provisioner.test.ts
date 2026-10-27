@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Provisioner } from "./provisioner";
 
 const FAKE_AUTH_SECRET = "ab".repeat(32);
+// One-time bootstrap credentials the route layer passes to provision(); the
+// provisioner must embed these (and no long-lived secret) in user_data.
+const TEST_BOOTSTRAP = { url: "https://cloud.example.com/api/instance-bootstrap", token: "one-time-token" };
 vi.mock("node:crypto", () => ({
   randomBytes: vi.fn((size?: number) => ({
     toString: (encoding: string) => {
@@ -117,19 +120,24 @@ describe("Provisioner (hetzner)", () => {
       region: "iad",
       hostname: "demo",
       loginUrl: "https://example.com/login",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
+    // authSecret is no longer generated/returned by the provisioner: the
+    // route layer owns it and delivers it via the bootstrap exchange.
     expect(result).toEqual({
       providerMachineId: "801",
       providerVolumeId: "901",
-      authSecret: FAKE_AUTH_SECRET,
       hostname: "demo",
     });
 
     const serverCall = fetchMock.mock.calls.find((c: any[]) => c[0] === `${HETZNER_BASE}/servers`);
     const body = JSON.parse(serverCall![1].body);
     expect(body.server_type).toBe("cpx11");
-    expect(body.user_data).toContain("COMPANION_AUTH_TOKEN=");
+    // Long-lived secrets must NOT be in user_data; only the one-time token.
+    expect(body.user_data).not.toContain("COMPANION_AUTH_TOKEN=");
+    expect(body.user_data).not.toContain(FAKE_AUTH_SECRET);
+    expect(body.user_data).toContain("COMPANION_BOOTSTRAP_TOKEN=one-time-token");
     expect(body.user_data).toContain("COMPANION_AUTH_ENABLED=0");
 
     const volumeCall = fetchMock.mock.calls.find((c: any[]) => c[0] === `${HETZNER_BASE}/volumes`);
@@ -145,6 +153,7 @@ describe("Provisioner (hetzner)", () => {
       region: "iad",
       hostname: "",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
     expect(result.hostname).toBe("1.2.3.4");
   });
@@ -180,6 +189,7 @@ describe("Provisioner (hetzner)", () => {
       region: "iad",
       hostname: "demo",
       loginUrl: "https://ok.example.com\nMALICIOUS",
+      bootstrap: TEST_BOOTSTRAP,
       tailscaleAuthKey: "tskey\nMALICIOUS",
     });
 
@@ -239,6 +249,7 @@ describe("Provisioner (hetzner)", () => {
       region: "iad",
       hostname: "demo",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
     const createVolumeBodies = fetchMock.mock.calls
@@ -309,6 +320,7 @@ describe("Provisioner (hetzner)", () => {
       region: "iad",
       hostname: "demo",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
     expect(result.providerVolumeId).toBe("902");
@@ -374,6 +386,7 @@ describe("Provisioner (hetzner)", () => {
       region: "cdg",
       hostname: "demo",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
     const createdServerBodies = fetchMock.mock.calls
@@ -440,6 +453,7 @@ describe("Provisioner (hetzner)", () => {
       region: "cdg",
       hostname: "demo",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
     const createdServerBodies = fetchMock.mock.calls
@@ -511,6 +525,7 @@ describe("Provisioner (hetzner)", () => {
       region: "cdg",
       hostname: "demo",
       loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
     });
 
     const createdServerBodies = fetchMock.mock.calls
@@ -548,6 +563,7 @@ describe("Provisioner (hetzner)", () => {
         region: "cdg",
         hostname: "demo",
         loginUrl: "",
+        bootstrap: TEST_BOOTSTRAP,
       }),
     ).rejects.toThrow(/location/);
 
@@ -557,5 +573,110 @@ describe("Provisioner (hetzner)", () => {
     const attemptedLocations = createVolumeBodies.map((b: any) => b.location);
     expect(new Set(attemptedLocations)).toEqual(new Set(["fsn1", "nbg1", "hel1"]));
     expect(attemptedLocations).not.toContain("ash");
+  });
+
+  // ── Secrets / bootstrap ─────────────────────────────────────────────────────
+
+  it("refuses to provision without bootstrap credentials (no secret-less or plaintext fallback)", async () => {
+    const provisioner = makeProvisioner();
+    await expect(
+      provisioner.provision({ organizationId: "org-1", plan: "starter", region: "iad", hostname: "demo", loginUrl: "" }),
+    ).rejects.toThrow(/bootstrap/);
+    // Nothing billable was created.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never embeds a Tailscale auth key in user_data and wires the one-time exchange", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const provisioner = makeProvisioner();
+    await provisioner.provision({
+      organizationId: "org-1",
+      plan: "starter",
+      region: "iad",
+      hostname: "demo",
+      loginUrl: "",
+      bootstrap: TEST_BOOTSTRAP,
+      tailscaleAuthKey: "tskey-auth-SECRET",
+    });
+    const serverCall = fetchMock.mock.calls.find((c: any[]) => c[0] === `${HETZNER_BASE}/servers`);
+    const userData: string = JSON.parse(serverCall![1].body).user_data;
+    expect(userData).not.toContain("tskey-auth-SECRET");
+    expect(userData).not.toContain("TAILSCALE_AUTH_KEY");
+    // The run script exchanges the token at TEST_BOOTSTRAP.url, then deletes the bootstrap file.
+    expect(userData).toContain(`COMPANION_BOOTSTRAP_URL=${TEST_BOOTSTRAP.url}`);
+    expect(userData).toContain('curl -fsS');
+    expect(userData).toContain("rm -f \"$TMP\" /etc/companion-bootstrap.env");
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("provision.tailscale_key_ignored"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  // ── Labels for the orphan reconciler ────────────────────────────────────────
+
+  it("stamps instance/managed-by/organization labels on server and volume", async () => {
+    const provisioner = makeProvisioner();
+    await provisioner.provision({
+      organizationId: "org-1",
+      plan: "starter",
+      region: "iad",
+      hostname: "demo",
+      loginUrl: "",
+      instanceId: "inst-uuid-1",
+      bootstrap: TEST_BOOTSTRAP,
+    });
+    const expected = { app: "companion", "managed-by": "companion-cloud", organization: "org-1", instance: "inst-uuid-1" };
+    const serverCall = fetchMock.mock.calls.find((c: any[]) => c[0] === `${HETZNER_BASE}/servers`);
+    const volumeCall = fetchMock.mock.calls.find((c: any[]) => c[0] === `${HETZNER_BASE}/volumes`);
+    expect(JSON.parse(serverCall![1].body).labels).toEqual(expected);
+    expect(JSON.parse(volumeCall![1].body).labels).toEqual(expected);
+  });
+
+  // ── Cleanup failures are logged, not swallowed ──────────────────────────────
+
+  it("logs a structured error when cleanup of a failed attempt fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    fetchMock.mockImplementation((url: string, opts: RequestInit) => {
+      const method = opts.method ?? "GET";
+      if (url === `${HETZNER_BASE}/volumes` && method === "POST") {
+        return Promise.resolve(okResponse({ volume: { id: 901, name: "companion_test", size: 10 } }));
+      }
+      if (url === `${HETZNER_BASE}/servers` && method === "POST") {
+        return Promise.resolve(okResponse({ server: { id: 801, status: "starting" } }));
+      }
+      if (url === `${HETZNER_BASE}/servers/801` && method === "GET") {
+        // Non-retryable failure after the server exists → cleanup path.
+        return Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve("boom") } as unknown as Response);
+      }
+      if (url === `${HETZNER_BASE}/servers/801` && method === "DELETE") {
+        return Promise.resolve(okResponse({}));
+      }
+      if (url === `${HETZNER_BASE}/volumes/901` && method === "DELETE") {
+        return Promise.resolve({ ok: false, status: 503, text: () => Promise.resolve("unavailable") } as unknown as Response);
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("unexpected") } as unknown as Response);
+    });
+
+    const provisioner = makeProvisioner();
+    await expect(
+      provisioner.provision({
+        organizationId: "org-1",
+        plan: "starter",
+        region: "iad",
+        hostname: "demo",
+        loginUrl: "",
+        instanceId: "inst-1",
+        bootstrap: TEST_BOOTSTRAP,
+      }),
+    ).rejects.toThrow(/500/);
+
+    const errors = errorSpy.mock.calls.map((c) => JSON.parse(String(c[0])));
+    const volumeFailure = errors.find((e) => e.event === "provision.cleanup.volume_delete_failed");
+    expect(volumeFailure).toMatchObject({ level: "error", instanceId: "inst-1", volumeId: 901, organizationId: "org-1" });
+    expect(volumeFailure.error).toContain("503");
+    // The server delete succeeded and is logged as such.
+    const infos = logSpy.mock.calls.map((c) => JSON.parse(String(c[0])));
+    expect(infos.some((e) => e.event === "provision.cleanup.server_deleted" && e.serverId === 801)).toBe(true);
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
   });
 });

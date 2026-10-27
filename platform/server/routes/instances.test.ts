@@ -16,6 +16,7 @@ const findFirstMock = vi.fn();
 const insertReturningMock = vi.fn();
 const insertValuesMock = vi.fn(() => ({ returning: insertReturningMock }));
 const insertMock = vi.fn(() => ({ values: insertValuesMock }));
+const updateReturningMock = vi.fn();
 const updateWhereMock = vi.fn();
 const updateSetMock = vi.fn(() => ({ where: updateWhereMock }));
 const updateMock = vi.fn(() => ({ set: updateSetMock }));
@@ -80,11 +81,18 @@ describe("instances routes (hetzner)", () => {
     delete process.env.HETZNER_SERVER_TYPE_PRO;
     delete process.env.HETZNER_SERVER_TYPE_ENTERPRISE;
     delete process.env.COMPANION_LOGIN_URL;
+    // Instances fetch their secrets from this origin via a one-time token.
+    process.env.COMPANION_CLOUD_PUBLIC_URL = "https://cloud.example.com";
 
     findManyMock.mockResolvedValue([]);
     findFirstMock.mockResolvedValue(null);
     insertReturningMock.mockResolvedValue([]);
-    updateWhereMock.mockResolvedValue(undefined);
+    // where() is awaited directly by start/stop and chained to .returning()
+    // by the create path, so return a promise that also has .returning.
+    updateReturningMock.mockResolvedValue([{ id: "inst-1", hostname: "1.2.3.4", authSecret: "s3cret" }]);
+    updateWhereMock.mockImplementation(() =>
+      Object.assign(Promise.resolve(undefined), { returning: updateReturningMock }),
+    );
     deleteWhereMock.mockResolvedValue(undefined);
     createInstanceTokenMock.mockResolvedValue("token-abc");
   });
@@ -104,7 +112,7 @@ describe("instances routes (hetzner)", () => {
       authSecret: "secret-123",
       hostname: "1.2.3.4",
     });
-    insertReturningMock.mockResolvedValue([{ id: "inst-1", hostname: "1.2.3.4" }]);
+    insertReturningMock.mockResolvedValue([{ id: "inst-1" }]);
 
     const res = await instances.request("/", {
       method: "POST",
@@ -119,13 +127,25 @@ describe("instances routes (hetzner)", () => {
         companionImage: "registry.example.com/aura-companion-server:latest",
       }),
     );
+    // The row is inserted as "provisioning" BEFORE Hetzner resources exist...
     expect(insertValuesMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        providerMachineId: "srv-123",
-        providerVolumeId: "vol-123",
+        machineStatus: "provisioning",
         config: { plan: "starter", provider: "hetzner", authMode: "static_token" },
       }),
     );
+    // ...and the resource ids are recorded once provisioning succeeds.
+    expect(updateSetMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerMachineId: "srv-123",
+        providerVolumeId: "vol-123",
+        hostname: "1.2.3.4",
+        machineStatus: "started",
+      }),
+    );
+    // Secrets never leave the API in the create response.
+    const body = await res.json();
+    expect(body.instance.authSecret).toBeUndefined();
   });
 
   it("returns 500 when required env vars are missing", async () => {

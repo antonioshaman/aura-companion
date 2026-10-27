@@ -5,6 +5,7 @@ import {
   timestamp,
   boolean,
   jsonb,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // Re-export Better Auth tables so Drizzle's fullSchema includes them.
@@ -32,6 +33,20 @@ export const organizationBilling = pgTable("organization_billing", {
 // organizationId and ownerId reference Better Auth-managed tables by text ID.
 // No Drizzle FK constraints on those — they are separate table systems.
 
+//
+// Provisioning lifecycle: a row is inserted with machineStatus="provisioning"
+// BEFORE any Hetzner resource is created, so the row (and its id, which is
+// stamped on the Hetzner resources as the `instance` label) is the durable
+// record the orphan reconciler checks against.
+//
+// idempotencyKey: optional client-supplied `Idempotency-Key`, unique per org,
+// so a retried create returns the existing row instead of a second server.
+//
+// bootstrapTokenHash/bootstrapTokenExpiresAt: sha256 of the one-time token
+// placed in cloud-init user_data. The instance exchanges it once (POST
+// /api/instance-bootstrap) for its real secrets; both columns are nulled on
+// use so the token cannot be replayed.
+
 export const instances = pgTable("instances", {
   id: uuid("id").defaultRandom().primaryKey(),
   organizationId: text("organization_id").notNull(),
@@ -50,9 +65,14 @@ export const instances = pgTable("instances", {
   tailscaleEnabled: boolean("tailscale_enabled").default(false),
   tailscaleHostname: text("tailscale_hostname"),
   hasActiveCrons: boolean("has_active_crons").default(false),
+  idempotencyKey: text("idempotency_key"),
+  bootstrapTokenHash: text("bootstrap_token_hash").unique(),
+  bootstrapTokenExpiresAt: timestamp("bootstrap_token_expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("instances_org_idempotency_key_uidx").on(table.organizationId, table.idempotencyKey),
+]);
 
 // ─── Instance Events (audit log) ─────────────────────────────────────────────
 
