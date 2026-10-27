@@ -53,6 +53,12 @@ export interface SkillExposure {
   version?: string;
   /** Claude only: the plugin dir passed with `--plugin-dir`. */
   pluginDir?: string;
+  /**
+   * Set when the LAST spawn could not deliver an "on" decision (plugin dir not
+   * buildable, decided version gone, Codex sync failed); cleared by a spawn that
+   * delivers. The UI labels the session "Toolkit unavailable" while it is set.
+   */
+  deliveryError?: string;
   items: SkillExposureItem[];
   decidedAt: number;
 }
@@ -110,7 +116,7 @@ export function parseSkillExposure(raw: unknown): SkillExposure | undefined {
   if (r.backend !== "claude" && r.backend !== "codex") return undefined;
   if (r.status !== "on" && r.status !== "off" && r.status !== "unavailable") return undefined;
   if (!Array.isArray(r.items) || typeof r.decidedAt !== "number") return undefined;
-  for (const k of ["reason", "version", "pluginDir"] as const) {
+  for (const k of ["reason", "version", "pluginDir", "deliveryError"] as const) {
     if (r[k] !== undefined && typeof r[k] !== "string") return undefined;
   }
   const items: SkillExposureItem[] = [];

@@ -4679,6 +4679,48 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
+  // Observer STOP (checkpoint council-implement-180-272c26fd): a delivery failure
+  // after the decision must reach the UI state — the session spawned without the
+  // toolkit, so it must not keep reading as "on" with no label.
+  it("Claude: a plugin dir that cannot be built marks the session's delivery as failed; a later success clears it", async () => {
+    const version = await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    const info = launcher.launch({ cwd: tempDir });
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+    // The decided version is damaged before the relaunch: verifyVersionDir fails.
+    const vdir = join(launcher.skillPackRoot, "versions", version);
+    spawnSyncChmod(vdir);
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "tampered\n");
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    await launcher.relaunch(info.sessionId);
+    expect(pluginDirOf(argvOf(mockSpawn.mock.calls.length - 1))).toBeUndefined();
+    expect(info.skillExposure?.status).toBe("on");
+    expect(info.skillExposure?.deliveryError).toMatch(/version/);
+    // Repaired → the next spawn delivers again and the failure is cleared.
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "---\nname: polish\n---\nbody\n");
+    mockSpawn.mockReturnValueOnce(createMockProc(12347));
+    await launcher.relaunch(info.sessionId);
+    expect(pluginDirOf(argvOf(mockSpawn.mock.calls.length - 1))).toBeDefined();
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+  });
+
+  it("Codex: a decided version that no longer verifies marks the delivery as failed", async () => {
+    const version = await installFixturePack();
+    const home = join(tempDir, "codex-home");
+    mkdirSync(home);
+    const info = { sessionId: "codex-sid", cwd: tempDir } as unknown as SdkSessionInfo;
+    const apply = (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): object;
+    }).applyCodexSkillExposure.bind(launcher);
+    apply("codex-sid", info, { layers: ALL_ON }, home, false);
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+    const vdir = join(launcher.skillPackRoot, "versions", version);
+    spawnSyncChmod(vdir);
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "tampered\n");
+    apply("codex-sid", info, { layers: ALL_ON }, home, false);
+    expect(info.skillExposure?.deliveryError).toMatch(/version/);
+  });
+
   it("Codex: places marked copies of Codex-compatible skills; Claude-only ones are labelled, not copied", async () => {
     await installFixturePack();
     const home = join(tempDir, "codex-home");

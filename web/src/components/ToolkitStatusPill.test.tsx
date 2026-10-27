@@ -22,6 +22,18 @@ describe("ToolkitStatusPill", () => {
     expect(screen.getByText(/does not support --plugin-dir/)).toHaveClass("sr-only");
   });
 
+  // Observer STOP: decided "on" but the spawn could not deliver it → still labelled.
+  it("labels a session whose toolkit delivery failed even though the decision was on", () => {
+    render(<ToolkitStatusPill exposure={{ status: "on", deliveryError: "version 0123: SKILL.md differs" }} />);
+    expect(screen.getByTestId("toolkit-status-pill")).toHaveAttribute("title", "version 0123: SKILL.md differs");
+  });
+
+  // Observer WARN: the label must not be hidden on narrow (mobile) screens.
+  it("is visible at every breakpoint", () => {
+    render(<ToolkitStatusPill exposure={{ status: "unavailable", reason: "container" }} />);
+    expect(screen.getByTestId("toolkit-status-pill").className).not.toMatch(/(^|\s)hidden(\s|$)/);
+  });
+
   it("renders nothing for on, off, or a session without a decision", () => {
     for (const exposure of [{ status: "on" as const }, { status: "off" as const }, undefined]) {
       const { container, unmount } = render(<ToolkitStatusPill exposure={exposure} />);

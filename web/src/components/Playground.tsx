@@ -3691,8 +3691,9 @@ function CouncilModeSection() {
           <UiuxToolkitSettings enabled onEnabledChange={() => {}} view={{ installed: false, error: "no valid current.json", rows: [] }} />
         </Card>
         <Card label="ToolkitStatusPill — TopBar label when a session could not get the toolkit (Task 7)">
-          <div className="flex items-center gap-2 p-2 [&>span]:!inline-flex">
+          <div className="flex items-center gap-2 p-2">
             <ToolkitStatusPill exposure={{ status: "unavailable", reason: "the installed Claude Code CLI does not support --plugin-dir" }} />
+            <ToolkitStatusPill exposure={{ status: "on", deliveryError: "version 0123456789abcdef: polish/SKILL.md differs" }} />
           </div>
         </Card>
         <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">

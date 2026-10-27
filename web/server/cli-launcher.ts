@@ -2267,9 +2267,11 @@ export class CliLauncher {
         log.warn("skill-exposure", "toolkit plugin dir unavailable for this spawn", {
           event: "skill_exposure.plugin_dir_failed", sessionId, version: exposure.version, error: built.error,
         });
+        this.setDeliveryError(exposure, built.error);
         return options;
       }
       exposure.pluginDir = built.dir;
+      this.setDeliveryError(exposure, undefined);
       return {
         ...options,
         skillPluginDir: built.dir,
@@ -2277,11 +2279,21 @@ export class CliLauncher {
         env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" },
       };
     } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
       log.warn("skill-exposure", "toolkit exposure failed; spawning without it", {
-        event: "skill_exposure.failed", sessionId, error: err instanceof Error ? err.message : String(err),
+        event: "skill_exposure.failed", sessionId, error,
       });
+      if (info.skillExposure) this.setDeliveryError(info.skillExposure, error);
       return options;
     }
+  }
+
+  /** Record (or clear) a delivery failure on the persisted decision; persist only on change. */
+  private setDeliveryError(exposure: SkillExposure, error: string | undefined): void {
+    if (exposure.deliveryError === error) return;
+    if (error === undefined) delete exposure.deliveryError;
+    else exposure.deliveryError = error.slice(0, 300);
+    this.persistState();
   }
 
   /**
@@ -2328,6 +2340,7 @@ export class CliLauncher {
         log.warn("skill-exposure", "decided pack version no longer verifies; Codex copies left as they are", {
           event: "skill_exposure.version_missing", sessionId, version: exposure.version, errors: v.errors.slice(0, 3),
         });
+        this.setDeliveryError(exposure, `version ${exposure.version}: ${v.errors.slice(0, 3).join("; ")}`);
         return options;
       }
       syncCopies({
@@ -2336,11 +2349,14 @@ export class CliLauncher {
         manifest: v.manifest,
         plan: exposure.items.map((i) => ({ name: i.name, outcome: i.outcome === "provide" ? "provide" : "disabled", reasons: i.reasons })),
       });
+      this.setDeliveryError(exposure, undefined);
       return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" } };
     } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
       log.warn("skill-exposure", "Codex toolkit sync failed; spawning without changes", {
-        event: "skill_exposure.failed", sessionId, error: err instanceof Error ? err.message : String(err),
+        event: "skill_exposure.failed", sessionId, error,
       });
+      if (info.skillExposure) this.setDeliveryError(info.skillExposure, error);
       return options;
     }
   }
