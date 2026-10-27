@@ -1,0 +1,14 @@
+# Council-experts catalog should never carry secrets — explicit deny list
+# per Hunt's defence #6 (Council Review β 2026-05-15-beta-catalog).
+*.env
+*.token
+*.key
+id_*
+.ssh/
+credentials*.json
+*.pem
+*.p12
+# Sibling skill dirs that contain runtime caches / auth — should never be
+# referenced from a catalog file
+.auth-cache/
+*.auth-token

@@ -1,0 +1,8 @@
+creator: "Karri Saarinen"
+stack: [common]
+paired_with: friedman
+tension_axis: "design-craft-aesthetic ↔ functional-state-discipline"
+schema_version: 2
+capabilities:
+  signals: [browser-spa, react, telegram-mini-app, telegram-bot]
+  domains: [ui-visual-quality]

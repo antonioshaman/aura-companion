@@ -9,28 +9,22 @@
 // scenario). See IMPLEMENTATION-LOG "RESOLVED DESIGN FINDING (variant B)".
 
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { composeCouncil } from "./advisor-scorer.js";
 import { buildAdvisorBrief } from "./advisor-brief.js";
 import { loadCatalog } from "./capability-catalog.js";
+import { loadProfiles } from "./dispatch-policy.js";
 import type { AdvisorProfile, Vocabulary } from "./capability-catalog";
 import type { Fingerprint } from "./fingerprint";
 
-// --- frozen catalog snapshot: the 14 seated profiles, checked in under
-// __fixtures__/council-catalog/ so the AC1.4 superset gates HERMETICALLY in the aura
-// repo's CI (observer WARN 2 — the earlier inline copy had no CI link to reality).
-// Regenerate via `bun run scripts/build-council-catalog-snapshot.ts`; the freshness
-// canary below asserts this snapshot still equals the live catalog where present.
-const PROFILES: AdvisorProfile[] = (
-  JSON.parse(
-    readFileSync(
-      join(dirname(new URL(import.meta.url).pathname), "__fixtures__", "council-catalog", "profiles.json"),
-      "utf8",
-    ),
-  ) as { profiles: AdvisorProfile[] }
-).profiles;
+// --- the seated profiles, loaded from the IN-REPO catalog (packs/skills/_council-experts,
+// PLAN-aura-uiux-agent-enrichment Task 4) so the AC1.4 superset gates hermetically in the
+// aura repo's CI against the real catalog — the frozen __fixtures__/council-catalog
+// snapshot this used to read is retired (one source of truth, EC-20).
+// loadProfiles() is the engine's own fail-loud loader for the in-repo catalog.
+const PROFILES: AdvisorProfile[] = loadProfiles();
 
 const AURA_10 = ["hunt", "fowler", "dahl", "ritchie", "abramov", "watson", "saarinen", "friedman", "willison", "hashimoto"];
 const PYTHON_9 = ["hunt", "fowler", "durov", "vanrossum", "brandur", "hashimoto", "willison", "saarinen", "friedman"];
@@ -71,26 +65,26 @@ describe("AC1.4 back-compat superset — Python/aiogram", () => {
   });
 });
 
-// Freshness canary (beck #3): the hermetic superset tests above score the FROZEN
-// inline PROFILES, so a live meta.yaml that loses a capability would leave them green
-// against a stale copy. When the live catalog is present (operator machine + the
-// pre-commit hook), assert the inline PROFILES still MATCH what the catalog loads —
-// so drift between this frozen baseline and reality fails loudly. Skipped in bare CI
-// (no ~/.claude); the authoritative live gate remains the catalog verifier/CI.
-describe("catalog snapshot stays in sync with the live catalog (beck #3 / observer WARN 2)", () => {
+// Transition drift canary (beck #3): the superset tests above score the IN-REPO
+// catalog (PROFILES). During the transition the
+// operator box still runs its own copy in ~/.claude/skills (Phase B moves sessions onto
+// the repo copy). Where that box copy is present, assert it still MATCHES the repo — so
+// a meta.yaml edited on the box but not ported to the repo fails loudly. Skipped in
+// bare CI (no ~/.claude); the in-repo verify-catalog CI job is the authoritative gate.
+describe("box catalog stays in sync with the in-repo catalog (beck #3 / observer WARN 2)", () => {
   const catalogRoot =
     process.env.COUNCIL_CATALOG ?? join(homedir(), ".claude", "skills", "_council-experts");
   const havePresent = existsSync(catalogRoot);
   const norm = (p: AdvisorProfile) => ({ id: p.id, signals: [...p.signals].sort(), domains: [...p.domains].sort() });
 
-  it.skipIf(!havePresent)("inline PROFILES equal the loaded catalog profiles (ids + signals + domains)", () => {
+  it.skipIf(!havePresent)("in-repo PROFILES equal the box catalog profiles (ids + signals + domains)", () => {
     const live = loadCatalog(catalogRoot);
     expect(live.errors, `catalog load errors: ${JSON.stringify(live.errors)}`).toEqual([]);
     const liveNorm = live.profiles.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
-    const frozenNorm = PROFILES.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const repoNorm = PROFILES.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
     expect(
-      frozenNorm,
-      "back-compat.golden PROFILES drifted from the live catalog meta.yaml — re-freeze them",
+      repoNorm,
+      "box catalog meta.yaml drifted from packs/skills/_council-experts — port the edit into the repo",
     ).toEqual(liveNorm);
   });
 });

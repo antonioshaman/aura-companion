@@ -1,0 +1,720 @@
+# _phase2-coverage-tokens.yml — semantic-coverage ground-truth (Phase 2c-N1).
+#
+# Read by `.verify/c10-coverage.py`, run as C10 from verify-catalog.sh.
+#
+#   targets.<id>.tokens             — MUST appear ≥1 time across ANY of
+#                                     `targets.<id>.search_paths` (OR across
+#                                     paths; the paths are mirrors of one doc,
+#                                     and C11 separately proves they are
+#                                     byte-identical, which is what makes the
+#                                     OR safe rather than sloppy).
+#   targets.<id>.structural_anchors — MUST appear ≥`min_count` (default 1) in
+#                                     EACH listed path (AND across paths).
+#   forbidden[].pattern             — MUST appear 0 times in EACH listed path.
+#
+# Token kinds:
+#   - kind: fixed   (default) — plain substring count, no metacharacters
+#   - kind: regex             — pattern must match SAFE_REGEX_SHAPE in
+#                               c10-coverage.py (literals, escaped dots, `\w+`
+#                               placeholders, `|` alternation, `/`, `-`).
+#                               Quantifiers outside `\w+` cannot be expressed in
+#                               that alphabet, so catastrophic backtracking is
+#                               unreachable by construction per Hunt REC-3.
+#
+# Matching is in-process (str.count / re.findall over the file body), not a
+# grep subprocess: there is no shell, no argv, and no timeout to tune.
+#
+# Every path here is shape-checked against REF_PATH_REGEX and bounded to the
+# skills root before it is opened. A data file that names a file to read is an
+# instruction to read it, and an unchecked one would be a file-read primitive
+# with a hit-count oracle.
+#
+# Path convention (Phase 2a-N2 ratified, captured in HANDOFF-phase-2b-after-N3):
+#   - dahl   B1 → 3 Aura dispatcher mirrors (no catalog-side canonical)
+#   - ritchie B1 → 3 Aura dispatcher mirrors (no catalog-side canonical)
+#   - hashimoto B2 → 1 catalog-side canonical (mirrors materialised by Phase
+#                    2c-N2 build runner; canary intentionally targets canonical
+#                    so first-run is green pre-N2 and a `git diff --exit-code`
+#                    in N2 enforces byte-identity post-cp).
+
+targets:
+  dahl:
+    search_paths:
+      - council-plan-aura/references/quality-dahl.md
+      - council-review-aura/references/quality-dahl.md
+      - council-implement-aura/references/quality-dahl.md
+    structural_anchors:
+      - { text: "## §A Bun/Hono runtime surface",          source: backend-ts,        min_count: 1 }
+      - { text: "## §B NDJSON/WS protocol correctness",    source: realtime-ndjson,   min_count: 1 }
+    tokens:
+      # backend-ts clusters (10) — async-error discipline, Hono surface, Bun runtime
+      - { text: "unhandled rejection",     source: backend-ts, cluster: async-error-discipline }
+      - { text: "Bun.serve",               source: backend-ts, cluster: bun-runtime }
+      - { text: "Hono",                    source: backend-ts, cluster: hono-middleware }
+      - { text: "NDJSON framing",          source: backend-ts, cluster: ndjson-framing-discipline }
+      - { text: "pendingBuffer",           source: backend-ts, cluster: line-splitting }
+      - { text: "dedup window",            source: backend-ts, cluster: dedup-window }
+      - { text: "keep-alive",              source: backend-ts, cluster: keep-alive-cadence }
+      - { text: "broadcast fan-out",       source: backend-ts, cluster: broadcast-isolation }
+      - { text: "backpressure",            source: backend-ts, cluster: backpressure }
+      - { text: "Bun-vs-Node",             source: backend-ts, cluster: bun-vs-node-drift }
+      # realtime-ndjson clusters (9) — protocol parser discipline + Codex/Claude adapters
+      - { text: "newline-delimited JSON",  source: realtime-ndjson, cluster: ndjson-protocol-shape }
+      - { text: "sequence",                source: realtime-ndjson, cluster: sequence-ordering }
+      - { text: "replay buffer",           source: realtime-ndjson, cluster: replay-buffer }
+      - { text: "two-protocol adapter",    source: realtime-ndjson, cluster: protocol-adapter }
+      - { text: "control_request",         source: realtime-ndjson, cluster: control-request-ack }
+      - { text: "control_response",        source: realtime-ndjson, cluster: control-response-ack }
+      - { text: "Codex JSON-RPC",          source: realtime-ndjson, cluster: codex-protocol }
+      - { text: "WebSocket text frame",    source: realtime-ndjson, cluster: ws-frame-discipline }
+      - { text: "Claude NDJSON",           source: realtime-ndjson, cluster: claude-protocol }
+      # external-enrichment cluster (6) — Phase 3α N3.01 dump #3 fields → §Z
+      - { text: "event-loop discipline",   source: external-enrichment, cluster: event-loop-philosophy }
+      - { text: "runtime simplicity",      source: external-enrichment, cluster: runtime-simplicity }
+      - { text: "lightweight protocol design", source: external-enrichment, cluster: protocol-philosophy }
+      - { text: "runtime-native performance",  source: external-enrichment, cluster: runtime-native-performance }
+      - { text: "Anti-bloat",              source: external-enrichment, cluster: anti-bloat-discipline }
+      - { text: "Low-latency pragmatism",  source: external-enrichment, cluster: latency-pragmatism }
+
+  ritchie:
+    search_paths:
+      - council-plan-aura/references/quality-ritchie.md
+      - council-review-aura/references/quality-ritchie.md
+      - council-implement-aura/references/quality-ritchie.md
+    structural_anchors:
+      - { text: "## §A Process lifecycle",       source: subprocess,      min_count: 1 }
+      - { text: "## §B Filesystem persistence",  source: persistence-fs,  min_count: 1 }
+    tokens:
+      # subprocess named failure-mode tokens (10) — process-control axis
+      - { text: "PID identity",            source: subprocess, cluster: pid-identity }
+      - { text: "SIGTERM",                 source: subprocess, cluster: sigterm-then-sigkill }
+      - { text: "SIGKILL",                 source: subprocess, cluster: sigterm-then-sigkill }
+      - { text: "--resume",                source: subprocess, cluster: resume-semantics }
+      - { text: "reconnect",               source: subprocess, cluster: reconnect-grace }
+      - { text: "zombie",                  source: subprocess, cluster: zombie-reaping }
+      - { text: "stdio drain",             source: subprocess, cluster: stdio-drain }
+      - { text: "idle-kill",               source: subprocess, cluster: idle-kill }
+      - { text: "auto-relaunch",           source: subprocess, cluster: auto-relaunch-bounded }
+      - { text: "recording",               source: subprocess, cluster: recording-lifecycle }
+      # persistence-fs principle-keys (10) — filesystem-ABI axis
+      - { text: "atomic",                  source: persistence-fs, cluster: atomic-write }
+      - { text: "fsync",                   source: persistence-fs, cluster: fsync }
+      - { text: "tmp+rename",              source: persistence-fs, cluster: tmp-rename-idiom }
+      - { text: "debounce",                source: persistence-fs, cluster: debounce-window }
+      - { text: "sentinel",                source: persistence-fs, cluster: sentinel-orphan-reap }
+      - { text: "JSONL",                   source: persistence-fs, cluster: jsonl-line-discipline }
+      - { text: "rotation",                source: persistence-fs, cluster: rotation-invariants }
+      - { text: "path.resolve",            source: persistence-fs, cluster: path-bounds-realpath }
+      - { text: "schemaVersion",           source: persistence-fs, cluster: schema-versioning }
+      - { text: "replay determinism",      source: persistence-fs, cluster: replay-determinism }
+      # external-enrichment cluster (5) — Phase 3α N3.02 dump #3 fields → §Z
+      - { text: "text-stream interoperability", source: external-enrichment, cluster: text-stream-interop }
+      - { text: "composability-first",     source: external-enrichment, cluster: composability-discipline }
+      - { text: "Systems austerity",       source: external-enrichment, cluster: systems-austerity }
+      - { text: "Deterministic engineering", source: external-enrichment, cluster: deterministic-engineering }
+      - { text: "append-only logging",     source: external-enrichment, cluster: append-only-logging }
+
+  hashimoto:
+    # B2: canonical-only target (N2 cp runner materialises 4 dispatcher mirrors;
+    # post-N2 canary still targets canonical since `git diff --exit-code` on
+    # mirrors is the byte-identity gate, not this canary).
+    search_paths:
+      - _council-experts/hashimoto/references/quality-hashimoto.md
+    structural_anchors:
+      # Compensate-authored footnote — 6 facet headers × 1 footnote each
+      # (plus ≥2 meta-prose references are OK; spec allows "expect ≥6").
+      - { text: "(compensate-authored from deploy-docker-gha perspective; deploy-vps native review pending)",
+          source: deploy-docker-gha, min_count: 6 }
+    tokens:
+      # deploy-docker-gha P1 severity floor (≥7 entries) — supply-chain + secret leak
+      - { text: "lockfile",                source: deploy-docker-gha, cluster: no-lockfile }
+      - { text: ".env",                    source: deploy-docker-gha, cluster: env-exposure }
+      - { text: "ENV API_TOKEN",           source: deploy-docker-gha, cluster: env-api-token-leak }
+      - { text: "BuildKit",                source: deploy-docker-gha, cluster: buildkit-mount-secret }
+      - { text: "--secret",                source: deploy-docker-gha, cluster: buildkit-flag }
+      - { text: "pull_request_target",     source: deploy-docker-gha, cluster: pull-request-target-risk }
+      - { text: "a11y",                    source: deploy-docker-gha, cluster: a11y-non-blocking }
+      # external-enrichment cluster (5) — Phase 3α N3.03 dump #3 fields → §Z
+      - { text: "image build determinism", source: external-enrichment, cluster: image-build-determinism }
+      - { text: "secrets-at-rest",         source: external-enrichment, cluster: secrets-at-rest }
+      - { text: "supervisor lifecycle",    source: external-enrichment, cluster: supervisor-lifecycle }
+      - { text: "operational portability", source: external-enrichment, cluster: operational-portability }
+      - { text: "Automation-heavy",        source: external-enrichment, cluster: automation-heavy }
+
+  fowler:
+    # B2 seed-new canonical (Phase 3α₂-A N3.04). Mirrors materialised via manual
+    # `cp` (Option A per HANDOFF-phase-3-α-sub-1-CLOSURE.md) because the cp-mirrors.py
+    # TARGET_ALLOWLIST hard-codes {dahl, ritchie, hashimoto} and rejects seed-new B2
+    # targets at schema validation. Byte-identity attestation is via _ref-mirrors.lock
+    # C12 sha256 (not C11 cp-mirrors --check). Coverage canary targets canonical only.
+    search_paths:
+      - _council-experts/fowler/references/quality-fowler.md
+    structural_anchors:
+      - { text: "## §A Refactoring economics",  source: external-enrichment, min_count: 1 }
+      - { text: "## §B Architecture evolution", source: external-enrichment, min_count: 1 }
+      - { text: "## §C Code smell taxonomy",    source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.04 dump #1 fields → §A/§B/§C
+      - { text: "economic refactoring",      source: external-enrichment, cluster: refactor-economics }
+      - { text: "strangler fig",             source: external-enrichment, cluster: strangler-fig-migration }
+      - { text: "feature toggle",            source: external-enrichment, cluster: feature-toggle-discipline }
+      - { text: "bounded context",           source: external-enrichment, cluster: bounded-context-awareness }
+      - { text: "code smell",                source: external-enrichment, cluster: code-smell-taxonomy }
+      - { text: "deviation amplification",   source: external-enrichment, cluster: deviation-amplification }
+      - { text: "evolutionary architecture", source: external-enrichment, cluster: evolutionary-architecture }
+
+  beck:
+    # B2 seed-new canonical (Phase 3α₂-A N3.05). Review-only seat (2 mirrors:
+    # review + review-aura; beck is NOT in plan-stage panels). Manual cp
+    # materialisation per Option A (same rationale as fowler N3.04). Path 3
+    # (Hybrid) depth policy applied: multi-paragraph principle treatment with
+    # statement / elaboration / example / anti-pattern / detection-signal /
+    # cross-ref per principle, expanding from initial 64L shallow draft to 134L.
+    search_paths:
+      - _council-experts/beck/references/quality-beck.md
+    structural_anchors:
+      - { text: "## §A Test-driven discipline", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Small safe steps",       source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (6) — Phase 3α N3.05 dump #1 fields → §A/§B
+      - { text: "TDD microcycle",          source: external-enrichment, cluster: tdd-microcycle }
+      - { text: "empirical test design",   source: external-enrichment, cluster: empirical-test-design }
+      - { text: "make the change easy",    source: external-enrichment, cluster: make-the-change-easy }
+      - { text: "locality of behavior",    source: external-enrichment, cluster: locality-of-behavior }
+      - { text: "small safe steps",        source: external-enrichment, cluster: small-safe-steps }
+      - { text: "optimistic programming",  source: external-enrichment, cluster: optimistic-programming }
+
+  hunt:
+    # B2 seed-new canonical (Phase 3α₂-A.2 N3.06). Full-panel seat (4 mirrors:
+    # plan + plan-aura + review + review-aura). Manual cp materialisation
+    # per Option A (same rationale as fowler N3.04 / beck N3.05). Path 3 (Hybrid)
+    # depth policy applied: 9 principles across 3 sections, each principle with 6
+    # sub-paragraphs (statement / elaboration / example / anti-pattern / detection-
+    # signal / cross-ref), per-section depth at NR2 floor (67L per § exactly).
+    search_paths:
+      - _council-experts/hunt/references/quality-hunt.md
+    structural_anchors:
+      - { text: "## §A Attack surface discipline",     source: external-enrichment, min_count: 1 }
+      - { text: "## §B Credential & secret hygiene",   source: external-enrichment, min_count: 1 }
+      - { text: "## §C Breach forensics",              source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.06 dump #1 fields → §A/§B/§C
+      - { text: "attack surface reduction", source: external-enrichment, cluster: attack-surface-reduction }
+      - { text: "secure defaults",          source: external-enrichment, cluster: secure-defaults }
+      - { text: "zero trust",               source: external-enrichment, cluster: zero-trust }
+      - { text: "modern password storage",  source: external-enrichment, cluster: modern-password-storage }
+      - { text: "credential stuffing",      source: external-enrichment, cluster: credential-stuffing }
+      - { text: "secret leakage",           source: external-enrichment, cluster: secret-leakage }
+      - { text: "breach forensics",         source: external-enrichment, cluster: breach-forensics }
+
+  willison:
+    # B2 seed-new canonical (Phase 3α₂-A.2 N3.07). Full-panel seat (4 mirrors:
+    # plan + plan-aura + review + review-aura). Manual cp materialisation
+    # per Option A. Path 3 (Hybrid) depth policy applied: 7 principles across 2
+    # sections, each principle with 6 sub-paragraphs (statement / elaboration /
+    # example / anti-pattern / detection-signal / cross-ref), per-section depth at
+    # NR2 floor (§A 67L AT floor; §B 77L within 67-83L range).
+    search_paths:
+      - _council-experts/willison/references/quality-willison.md
+    structural_anchors:
+      - { text: "## §A Prompt engineering discipline", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Context engineering",           source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.07 dump #1 fields → §A/§B
+      - { text: "tool-use patterns",          source: external-enrichment, cluster: tool-use-patterns }
+      - { text: "structured outputs",         source: external-enrichment, cluster: structured-outputs }
+      - { text: "prompt injection",           source: external-enrichment, cluster: prompt-injection }
+      - { text: "context packing",            source: external-enrichment, cluster: context-packing }
+      - { text: "transcript-first debugging", source: external-enrichment, cluster: transcript-first-debugging }
+      - { text: "agent ergonomics",           source: external-enrichment, cluster: agent-ergonomics }
+      - { text: "local-first AI",             source: external-enrichment, cluster: local-first-ai }
+
+  saarinen:
+    # B2 seed-new canonical (Phase 3α₂-B N3.08). Full-panel seat (4 mirrors:
+    # plan + plan-aura + review + review-aura). Manual cp materialisation
+    # per Option A. Path 3 (Hybrid) depth policy applied: 7 principles across 2
+    # sections, each principle with 6 sub-paragraphs (statement / elaboration /
+    # example / anti-pattern / detection-signal / cross-ref); per-section depth at
+    # NR2 floor (§A 67L AT floor; §B 77L within 67-83L range).
+    search_paths:
+      - _council-experts/saarinen/references/quality-saarinen.md
+    structural_anchors:
+      - { text: "## §A Calm interface discipline", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Workflow ergonomics",       source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.08 dump #3 fields → §A/§B
+      - { text: "interface calmness",            source: external-enrichment, cluster: interface-calmness }
+      - { text: "visual hierarchy discipline",   source: external-enrichment, cluster: visual-hierarchy-discipline }
+      - { text: "component cohesion",            source: external-enrichment, cluster: component-cohesion }
+      - { text: "low-friction workflows",        source: external-enrichment, cluster: low-friction-workflows }
+      - { text: "latency perception management", source: external-enrichment, cluster: latency-perception-management }
+      - { text: "keyboard-first UX",             source: external-enrichment, cluster: keyboard-first-ux }
+      - { text: "opinionated product polish",    source: external-enrichment, cluster: opinionated-product-polish }
+
+  friedman:
+    # B2 seed-new canonical (Phase 3α₂-B N3.09). Full-panel seat (4 mirrors:
+    # plan + plan-aura + review + review-aura). Manual cp materialisation
+    # per Option A. Path 3 (Hybrid) depth policy applied: 7 principles across 2
+    # sections (4 in §A + 3 in §B), each principle with 6 sub-paragraphs
+    # (statement / elaboration / example / anti-pattern / detection-signal /
+    # cross-ref); per-section depth: §A 80L within 67-83L range, §B 67L AT NR2 floor.
+    search_paths:
+      - _council-experts/friedman/references/quality-friedman.md
+    structural_anchors:
+      - { text: "## §A Scanability & decision design", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Form & friction UX",            source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.09 dump #3 fields → §A/§B
+      - { text: "scanability",                   source: external-enrichment, cluster: scanability }
+      - { text: "dashboards that drive action",  source: external-enrichment, cluster: dashboards-that-drive-action }
+      - { text: "progressive disclosure",        source: external-enrichment, cluster: progressive-disclosure }
+      - { text: "decision fatigue reduction",    source: external-enrichment, cluster: decision-fatigue-reduction }
+      - { text: "friction-aware UX",             source: external-enrichment, cluster: friction-aware-ux }
+      - { text: "form usability",                source: external-enrichment, cluster: form-usability }
+      - { text: "resilient interface patterns",  source: external-enrichment, cluster: resilient-interface-patterns }
+
+  watson:
+    # B2 seed-new canonical (Phase 3α₂-B N3.10). Aura-only seat (2 mirrors:
+    # plan-aura + review-aura) — watson cited only in aura dispatcher panels
+    # per Phase 2 catalog; pickup-prompt's "4 mirrors" was authorship error
+    # (operator-confirmed 2026-05-16). Manual cp materialisation per Option A.
+    # Path 3 (Hybrid) depth applied: 7 principles across 2 sections (3 in §A +
+    # 4 in §B), each principle with 6 sub-paragraphs; per-section depth: §A 67L
+    # AT NR2 floor, §B 77L within range.
+    search_paths:
+      - _council-experts/watson/references/quality-watson.md
+    structural_anchors:
+      - { text: "## §A Assistive technology compatibility", source: external-enrichment, min_count: 1 }
+      - { text: "## §B WCAG operationalization",            source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (7) — Phase 3α N3.10 dump #3 fields → §A/§B
+      - { text: "screen-reader compatibility",   source: external-enrichment, cluster: screen-reader-compatibility }
+      - { text: "semantic HTML",                 source: external-enrichment, cluster: semantic-html }
+      - { text: "ARIA correctness",              source: external-enrichment, cluster: aria-correctness }
+      - { text: "keyboard navigation",           source: external-enrichment, cluster: keyboard-navigation }
+      - { text: "contrast compliance",           source: external-enrichment, cluster: contrast-compliance }
+      - { text: "accessible interaction flows",  source: external-enrichment, cluster: accessible-interaction-flows }
+      - { text: "WCAG operationalization",       source: external-enrichment, cluster: wcag-operationalization }
+
+  abramov:
+    # B2 seed-new canonical (Phase 3α₂-B N3.11). Aura-only seat (2 mirrors:
+    # plan-aura + review-aura) — abramov cited only in aura dispatcher
+    # panels per Phase 2 catalog; operator-confirmed PLAN/HANDOFF parameters
+    # 2026-05-16 (pickup-prompt's 4-mirror was authorship error, same family
+    # as watson N3.10). Manual cp materialisation per Option A. Path 3 (Hybrid)
+    # depth applied: 8 principles across 2 sections (4 in §A + 4 in §B —
+    # symmetric distribution), each principle with 6 sub-paragraphs;
+    # per-section depth: §A 80L within range, §B 77L within range.
+    # 8 tokens registered (above pickup ≥7 floor) — added
+    # "synchronization over lifecycle thinking" for full dump #3 coverage.
+    # Closes Phase 3α₂-B (final commit of UI cluster sub-phase).
+    search_paths:
+      - _council-experts/abramov/references/quality-abramov.md
+    structural_anchors:
+      - { text: "## §A React state & effects discipline", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Rendering mental models",          source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3α N3.11 dump #3 fields → §A/§B
+      - { text: "state minimization",                  source: external-enrichment, cluster: state-minimization }
+      - { text: "effects discipline",                  source: external-enrichment, cluster: effects-discipline }
+      - { text: "server-client boundary clarity",      source: external-enrichment, cluster: server-client-boundary-clarity }
+      - { text: "hydration correctness",               source: external-enrichment, cluster: hydration-correctness }
+      - { text: "composable components",               source: external-enrichment, cluster: composable-components }
+      - { text: "optimistic UI",                       source: external-enrichment, cluster: optimistic-ui }
+      - { text: "rendering mental models",             source: external-enrichment, cluster: rendering-mental-models }
+      - { text: "synchronization over lifecycle thinking", source: external-enrichment, cluster: synchronization-over-lifecycle-thinking }
+
+  brandur:
+    # B2 seed-new canonical (Phase 3α₂-C N3.12). Non-aura seat (2 mirrors:
+    # council-plan + council-review) — brandur cited only in non-aura
+    # dispatcher panels per Phase 2 catalog (runtime D8 panel-file probe
+    # confirmed 1/0/1/0 placement before authoring). Manual cp materialisation
+    # per Option A. Path 3 (Hybrid) depth applied: 8 principles across 2
+    # sections (4 in §A + 4 in §B — symmetric distribution), each principle
+    # with 6 sub-paragraphs (statement / elaboration / example / anti-pattern
+    # / detection-signal / cross-ref); per-section depth: §A 70L within range,
+    # §B 73L within range. Opens Phase 3α₂-C (language cluster sub-phase).
+    # 8 tokens registered (above pickup ≥7 floor) covering full dump #3 set.
+    search_paths:
+      - _council-experts/brandur/references/quality-brandur.md
+    structural_anchors:
+      - { text: "## §A Migration safety & integrity", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Operational discipline",       source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3α N3.12 dump #3 fields → §A/§B
+      - { text: "migration safety",            source: external-enrichment, cluster: migration-safety }
+      - { text: "transactional integrity",     source: external-enrichment, cluster: transactional-integrity }
+      - { text: "lock contention awareness",   source: external-enrichment, cluster: lock-contention-awareness }
+      - { text: "incremental infra evolution", source: external-enrichment, cluster: incremental-infra-evolution }
+      - { text: "explain-analyze literacy",    source: external-enrichment, cluster: explain-analyze-literacy }
+      - { text: "idempotent jobs",             source: external-enrichment, cluster: idempotent-jobs }
+      - { text: "retry-safe systems",          source: external-enrichment, cluster: retry-safe-systems }
+      - { text: "operational postgres",        source: external-enrichment, cluster: operational-postgres }
+
+  durov:
+    # B2 seed-new canonical (Phase 3α₂-C N3.13). Non-aura seat (2 mirrors:
+    # council-plan + council-review) — durov cited only in non-aura
+    # dispatcher panels per Phase 2 catalog (runtime D8 panel-file probe
+    # confirmed 1/0/1/0 placement before authoring; same shape as brandur
+    # N3.12). Manual cp materialisation per Option A. Path 3 (Hybrid) depth
+    # applied: 8 principles across 2 sections (4 in §A + 4 in §B — symmetric
+    # distribution), each principle with 6 sub-paragraphs; per-section depth:
+    # §A 70L within range, §B 73L within range. Second 2-mirror non-aura
+    # asymmetric seed-new (third shape now twice-instanced).
+    # 8 tokens registered (above pickup ≥7 floor) covering full dump #3 set.
+    search_paths:
+      - _council-experts/durov/references/quality-durov.md
+    structural_anchors:
+      - { text: "## §A Callback-flow + inline keyboard ergonomics", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Bot reliability + state-machine navigation", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3α N3.13 dump #3 fields → §A/§B
+      - { text: "callback-flow ergonomics",       source: external-enrichment, cluster: callback-flow-ergonomics }
+      - { text: "inline keyboard discipline",     source: external-enrichment, cluster: inline-keyboard-discipline }
+      - { text: "telegram-native UX",             source: external-enrichment, cluster: telegram-native-ux }
+      - { text: "conversational latency awareness", source: external-enrichment, cluster: conversational-latency-awareness }
+      - { text: "async bot architecture",         source: external-enrichment, cluster: async-bot-architecture }
+      - { text: "state-machine navigation",       source: external-enrichment, cluster: state-machine-navigation }
+      - { text: "bot reliability patterns",       source: external-enrichment, cluster: bot-reliability-patterns }
+      - { text: "low-friction interactions",      source: external-enrichment, cluster: low-friction-interactions }
+
+  vanrossum:
+    # B2 seed-new canonical (Phase 3α₂-C N3.14). Non-aura seat (2 mirrors:
+    # council-plan + council-review) — vanrossum cited only in non-aura
+    # dispatcher panels per Phase 2 catalog (runtime D8 panel-file probe
+    # confirmed 1/0/1/0 placement before authoring; third instance of the
+    # 2-mirror non-aura asymmetric shape, completing Phase 3α₂-C trio).
+    # Manual cp materialisation per Option A. Path 3 (Hybrid) depth applied:
+    # 8 principles across 2 sections (4 in §A + 4 in §B — symmetric
+    # distribution), each principle with 6 sub-paragraphs; per-section depth:
+    # §A 70L within range, §B 71L within range. CLOSES Phase 3α implementation
+    # arc (14 of 14 implementation commits complete).
+    # 8 tokens registered (above pickup ≥7 floor); tokens follow PLAN/dump #3
+    # vanrossum entry, not pickup's dump #1 python_sage-derived list (pickup
+    # vs PLAN disagreement on tokens surfaced in validator brief per D8/NR6,
+    # resolved in favour of PLAN per NR4 token-drift discipline).
+    # Co-tenant note: quality-vanrossum.md (Python lens) coexists with
+    # quality-backend.md (Bun/Hono TS lens, dahl's territory); enforced by
+    # the existing vanrossum-co-tenancy forbidden-pattern canary on
+    # quality-backend.md (Bun.serve|Hono|web/server — 0 hits required).
+    search_paths:
+      - _council-experts/vanrossum/references/quality-vanrossum.md
+    structural_anchors:
+      - { text: "## §A Pythonic clarity",                source: external-enrichment, min_count: 1 }
+      - { text: "## §B Async & dependency discipline",   source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3α N3.14 dump #3 fields → §A/§B
+      - { text: "explicit over implicit",          source: external-enrichment, cluster: explicit-over-implicit }
+      - { text: "readability-first",               source: external-enrichment, cluster: readability-first }
+      - { text: "type-aware Python",               source: external-enrichment, cluster: type-aware-python }
+      - { text: "simple powerful abstractions",    source: external-enrichment, cluster: simple-powerful-abstractions }
+      - { text: "async IO boundaries",             source: external-enrichment, cluster: async-io-boundaries }
+      - { text: "dependency clarity",              source: external-enrichment, cluster: dependency-clarity }
+      - { text: "pragmatic standard-library",      source: external-enrichment, cluster: pragmatic-standard-library }
+      - { text: "maintainable automation",         source: external-enrichment, cluster: maintainable-automation }
+
+  lerdorf:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth applied per D2/NR2 carry-forward into Phase 3β:
+    # 8 principles across 2 sections (4 in §A Request lifecycle pragmatism +
+    # 4 in §B Backward compatibility & extension boundaries), each principle
+    # with 6 sub-paragraphs (statement / elaboration / Example / Anti-pattern
+    # to detect / Detection signal in code review / Cross-ref). Detection-
+    # signal coverage: 8/8 = 100%. Per-section depth: §A 72L within 67-83L
+    # range, §B 69L within range. Total 151L within 134-167L NR2 floor for
+    # 2-section. Per willison REC-6 (subplan-willison.md): exactly one
+    # principle (`request lifecycle minimalism`) bridges PHP web-runtime
+    # pragmatism to LLM-stream-lifecycle realism; remaining 7 principles
+    # stay in PHP/web-runtime lane. lerdorf is UNPAIRED this sub-phase per
+    # fowler REC-5 (subplan-fowler.md) — no orthogonal-philosophy peer in
+    # current panel; meta.yaml ships `creator + stack: [php]` only;
+    # `tension_axis`/`paired_with` machine-readable fields deferred to sub-4
+    # EC-34 amendment commit per D14 (PLAN boundary (d) preserves C7 schema).
+    search_paths:
+      - _council-experts/lerdorf/references/quality-lerdorf.md
+    structural_anchors:
+      - { text: "## §A Request lifecycle pragmatism",                 source: external-enrichment, min_count: 1 }
+      - { text: "## §B Backward compatibility & extension boundaries", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.15 dump #2 lerdorf fields → §A/§B
+      - { text: "request lifecycle minimalism",    source: external-enrichment, cluster: request-lifecycle-minimalism }
+      - { text: "shared-nothing architecture",     source: external-enrichment, cluster: shared-nothing-architecture }
+      - { text: "pragmatic web-first engineering", source: external-enrichment, cluster: pragmatic-web-first-engineering }
+      - { text: "backward compatibility realities", source: external-enrichment, cluster: backward-compatibility-realities }
+      - { text: "operational PHP simplicity",      source: external-enrichment, cluster: operational-php-simplicity }
+      - { text: "extension boundary awareness",    source: external-enrichment, cluster: extension-boundary-awareness }
+      - { text: "opcode/runtime behavior",         source: external-enrichment, cluster: opcode-runtime-behavior }
+      - { text: "anti-overengineering",            source: external-enrichment, cluster: anti-overengineering }
+
+  colvin:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth per D2/NR2: 8 principles across 2 sections (4 in
+    # §A Schema-as-contract + 4 in §B Production-safety over iteration), each
+    # principle with 6 sub-paragraphs (statement / elaboration / Example /
+    # Anti-pattern to detect / Detection signal in code review / Cross-ref).
+    # Detection-signal coverage: 8/8 = 100%. Per-section depth: §A 72L within
+    # 67-83L range, §B 69L within range. Total 151L within 134-167L NR2 floor.
+    # Per willison REC-1 (subplan-willison.md): colvin's reference doc claims
+    # what willison would REFUSE to claim — types-as-contract, schema-strict
+    # eliminates the failure loop, production-safety over iteration. NOT a
+    # stylistic variant of exploration. Crisp boundary: Colvin wins when
+    # consumer is a program; Willison wins when consumer is a developer
+    # iterating on the prompt. colvin is UNPAIRED this sub-phase per fowler
+    # REC-5 — weak tension with willison exists but no axis doc authored
+    # (axis docs are sub-2/3/4 territory for the 6 fully-paired seats).
+    # meta.yaml ships `creator + stack: [python]` only; tension fields
+    # deferred to sub-4 EC-34 amendment per D14.
+    search_paths:
+      - _council-experts/colvin/references/quality-colvin.md
+    structural_anchors:
+      - { text: "## §A Schema-as-contract",                source: external-enrichment, min_count: 1 }
+      - { text: "## §B Production-safety over iteration",  source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.16 dump #2 colvin fields → §A/§B
+      - { text: "typed LLM agents",                source: external-enrichment, cluster: typed-llm-agents }
+      - { text: "structured output guarantees",    source: external-enrichment, cluster: structured-output-guarantees }
+      - { text: "retry-safe validation",           source: external-enrichment, cluster: retry-safe-validation }
+      - { text: "MCP typed tooling",               source: external-enrichment, cluster: mcp-typed-tooling }
+      - { text: "deterministic parsing",           source: external-enrichment, cluster: deterministic-parsing }
+      - { text: "validation-driven orchestration", source: external-enrichment, cluster: validation-driven-orchestration }
+      - { text: "explicit contracts",              source: external-enrichment, cluster: explicit-contracts }
+      - { text: "schema-strict eliminates the failure loop", source: external-enrichment, cluster: schema-strict-eliminates-failure-loop }
+
+  torvalds:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth applied per D2/NR2 carry-forward into Phase 3β:
+    # 8 principles across 2 sections (4 in §A "Don't break userspace" +
+    # measured-pragmatism scope + 4 in §B Subsystem ownership + show-me-
+    # the-code discipline), each principle with 6 sub-paragraphs (statement
+    # / mechanics / Example / Anti-pattern to detect / Detection signal in
+    # code review / Cross-ref). Detection-signal coverage: 8/8 = 100%.
+    # Per-section depth: §A 71L within 67-83L range, §B 69L within range.
+    # Total 151L within 134-167L NR2 floor for 2-section.
+    # torvalds is PAIRED with ritchie via "Linux pragmatism ↔ Unix purity"
+    # axis (Phase 3β sub-2 first paired-tension cluster). EC-34 wire-format
+    # codified in meta.yaml per PICKUP override of sub-1 D14: paired_with:
+    # ritchie + tension_axis: "Linux pragmatism ↔ Unix purity". Cross-refs
+    # to ritchie in 4 principles (§A P1+P3+P4, §B P5+P6) encode the axis at
+    # the doc layer; meta.yaml fields are the machine-readable substrate
+    # for Phase 3γ chair-side dispatch. C7 schema extension (N3.17) opened
+    # allow-list to {creator, stack, paired_with, tension_axis}; existing
+    # 16 entries stay at 2-key shape, retro-population deferred to sub-4
+    # per fowler REC-2 two-hat discipline.
+    search_paths:
+      - _council-experts/torvalds/references/quality-torvalds.md
+    structural_anchors:
+      - { text: "## §A \"Don't break userspace\" + measured-pragmatism scope", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Subsystem ownership + show-me-the-code discipline",     source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.18 dump #2 torvalds fields → §A/§B
+      - { text: "userspace-as-spec",                       source: external-enrichment, cluster: userspace-as-spec }
+      - { text: "regression-zero-tolerance for userspace", source: external-enrichment, cluster: regression-zero-tolerance }
+      - { text: "measured-safe ceremony-skipping",         source: external-enrichment, cluster: measured-safe-ceremony-skipping }
+      - { text: "backward-compat-by-tolerance",            source: external-enrichment, cluster: backward-compat-by-tolerance }
+      - { text: "show-me-the-code",                        source: external-enrichment, cluster: show-me-the-code }
+      - { text: "subsystem maintainer ownership",          source: external-enrichment, cluster: subsystem-maintainer-ownership }
+      - { text: "bisectable minimal patches",              source: external-enrichment, cluster: bisectable-minimal-patches }
+      - { text: "bad-taste recognition",                   source: external-enrichment, cluster: bad-taste-recognition }
+
+  unclebob:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth applied per D2/NR2: 8 principles across 2 sections
+    # (4 in §A SOLID principle-purity + 4 in §B Clean Architecture + didactic
+    # discipline), each principle with 6 sub-paragraphs (statement / mechanics
+    # / Example / Anti-pattern to detect / Detection signal in code review /
+    # Cross-ref). Detection-signal coverage: 8/8 = 100%. Per-section depth:
+    # §A 71L within 67-83L range, §B 69L within range. Total 151L within
+    # 134-167L NR2 floor for 2-section.
+    # unclebob is PAIRED with fowler via "principle-purity ↔ economic-
+    # pragmatic" axis (Phase 3β sub-2 first paired-tension cluster, second
+    # seat). EC-34 wire-format codified in meta.yaml: paired_with: fowler +
+    # tension_axis: "principle-purity ↔ economic-pragmatic". Per fowler
+    # subplan REC-5 (subplan-fowler.md): unclebob's SOLID/Clean-Architecture
+    # rigour is NOT soft-pedalled into "Fowler with more discipline" — the
+    # genuine split is whether architecture-fitness is judged economically
+    # (Fowler) or didactically (unclebob). Cross-refs to fowler in 4
+    # principles (§A P1+P2+P4, §B P1) encode the axis at the doc layer; the
+    # meta.yaml fields are the machine-readable substrate for Phase 3γ
+    # chair-side dispatch.
+    search_paths:
+      - _council-experts/unclebob/references/quality-unclebob.md
+    structural_anchors:
+      - { text: "## §A SOLID principle-purity",                 source: external-enrichment, min_count: 1 }
+      - { text: "## §B Clean Architecture + didactic discipline", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.19 dump #2 unclebob fields → §A/§B
+      - { text: "single-responsibility-as-boundary",       source: external-enrichment, cluster: single-responsibility-as-boundary }
+      - { text: "dependency-inversion as architectural law", source: external-enrichment, cluster: dependency-inversion-as-architectural-law }
+      - { text: "open-closed-by-extension",                source: external-enrichment, cluster: open-closed-by-extension }
+      - { text: "interface-segregation-by-client",         source: external-enrichment, cluster: interface-segregation-by-client }
+      - { text: "screaming architecture",                  source: external-enrichment, cluster: screaming-architecture }
+      - { text: "policy-vs-detail separation",             source: external-enrichment, cluster: policy-vs-detail-separation }
+      - { text: "boundary-crossings via owned interfaces", source: external-enrichment, cluster: boundary-crossings-via-owned-interfaces }
+      - { text: "didactic-discipline-as-pedagogy",         source: external-enrichment, cluster: didactic-discipline-as-pedagogy }
+
+  evans:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth applied per D2/NR2 carry-forward into Phase 3β:
+    # 8 principles across 2 sections (4 in §A Strategic DDD + bounded contexts +
+    # ubiquitous language + 4 in §B Tactical patterns + anti-corruption +
+    # knowledge-crunching), each principle with 6 sub-paragraphs (statement /
+    # mechanics / Example / Anti-pattern to detect / Detection signal in code
+    # review / Cross-ref). Detection-signal coverage: 8/8 = 100%.
+    # evans is PAIRED with fowler via "strategic-DDD ↔ emergent-microservices"
+    # axis (Phase 3β sub-3 second paired-tension cluster, first seat). EC-34
+    # wire-format codified in meta.yaml per sub-2 precedent: paired_with: fowler
+    # + tension_axis: "strategic-DDD ↔ emergent-microservices". Cross-refs to
+    # fowler in 6 of 8 principles (§A E1+E2+E3+E4, §B E5+E8) encode the axis
+    # at the doc layer; meta.yaml fields are the machine-readable substrate
+    # for Phase 3γ chair-side dispatch. C7 verdict post-commit:
+    #   19 meta.yaml conform; EC-34 wire-format: 3 paired / 0 explicit-unpaired
+    #   / 16 legacy-2-key
+    search_paths:
+      - _council-experts/evans/references/quality-evans.md
+    structural_anchors:
+      - { text: "## §A Strategic DDD + bounded contexts + ubiquitous language", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Tactical patterns + anti-corruption + knowledge-crunching", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.20 dump #3 evans fields → §A/§B
+      - { text: "bounded-context-as-model-boundary",   source: external-enrichment, cluster: bounded-context-as-model-boundary }
+      - { text: "ubiquitous-language-as-design-substrate", source: external-enrichment, cluster: ubiquitous-language-as-design-substrate }
+      - { text: "context-map-before-extraction",       source: external-enrichment, cluster: context-map-before-extraction }
+      - { text: "model-first-thinking",                source: external-enrichment, cluster: model-first-thinking }
+      - { text: "anti-corruption-layer",               source: external-enrichment, cluster: anti-corruption-layer }
+      - { text: "aggregate-root-consistency",          source: external-enrichment, cluster: aggregate-root-consistency }
+      - { text: "domain-event-as-communication",       source: external-enrichment, cluster: domain-event-as-communication }
+      - { text: "knowledge-crunching-as-collaboration", source: external-enrichment, cluster: knowledge-crunching-as-collaboration }
+
+  majors:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # tracked in _ref-mirrors.lock for C12). NR2 floor: 2 structural anchors
+    # (one per section) + 8 source-attributed tokens (one per principle name).
+    # Per-section depth: §A 75L within 67-83L range, §B 70L within range.
+    # Total 151L within 134-167L NR2 floor for 2-section.
+    # majors is PAIRED with hashimoto via "debugging-in-prod ↔ immutable-prevention"
+    # axis (Phase 3β sub-4 third paired-tension cluster, first seat — observability
+    # cluster opens here). EC-34 wire-format codified in meta.yaml per sub-2/3
+    # precedent: paired_with: hashimoto + tension_axis: "debugging-in-prod ↔
+    # immutable-prevention". Cross-refs to hashimoto in 6 of 8 principles
+    # (§A M1+M2+M3+M4, §B M5+M7+M8) encode the axis at the doc layer; meta.yaml
+    # fields are the machine-readable substrate for Phase 3γ chair-side dispatch.
+    # C7 verdict post-commit:
+    #   21 meta.yaml conform; EC-34 wire-format: 5 paired / 0 explicit-unpaired
+    #   / 16 legacy-2-key
+    search_paths:
+      - _council-experts/majors/references/quality-majors.md
+    structural_anchors:
+      - { text: "## §A Production observability + high-cardinality telemetry", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Debugging-via-instrumentation + operability culture",   source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.22 dump #5 majors fields → §A/§B
+      - { text: "high-cardinality-as-first-class",     source: external-enrichment, cluster: high-cardinality-as-first-class }
+      - { text: "events-not-aggregates",               source: external-enrichment, cluster: events-not-aggregates }
+      - { text: "production-as-the-only-honest-test",  source: external-enrichment, cluster: production-as-the-only-honest-test }
+      - { text: "observability-driven-development",    source: external-enrichment, cluster: observability-driven-development }
+      - { text: "investigation-not-monitoring",        source: external-enrichment, cluster: investigation-not-monitoring }
+      - { text: "tracing-as-first-class",              source: external-enrichment, cluster: tracing-as-first-class }
+      - { text: "ownership-and-feedback-loop",         source: external-enrichment, cluster: ownership-and-feedback-loop }
+      - { text: "cost-discipline-on-cardinality",      source: external-enrichment, cluster: cost-discipline-on-cardinality }
+
+  sridharan:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # tracked in _ref-mirrors.lock for C12). NR2 floor: 2 structural anchors
+    # (one per section) + 8 source-attributed tokens (one per principle name).
+    # Per-section depth: §A 75L within 67-83L range, §B 75L within range.
+    # Total 151L within 134-167L NR2 floor for 2-section.
+    # sridharan is PAIRED with majors via "resilience-skepticism ↔ operational-
+    # realism" axis (Phase 3β sub-4 third paired-tension cluster, second seat —
+    # observability cluster closes here). EC-34 wire-format codified in
+    # meta.yaml per sub-2/3 precedent: paired_with: majors + tension_axis:
+    # "resilience-skepticism ↔ operational-realism". Cross-refs to majors in
+    # 8 of 8 principles (every principle cross-refs back to a majors principle)
+    # encode the axis at the doc layer; meta.yaml fields are the machine-readable
+    # substrate for Phase 3γ chair-side dispatch.
+    # C7 verdict post-commit:
+    #   22 meta.yaml conform; EC-34 wire-format: 6 paired / 0 explicit-unpaired
+    #   / 16 legacy-2-key  (Phase 3β arc reaches 22/22 v2 seats — full catalog)
+    search_paths:
+      - _council-experts/sridharan/references/quality-sridharan.md
+    structural_anchors:
+      - { text: "## §A Resilience engineering + fault-vs-failure discipline",  source: external-enrichment, min_count: 1 }
+      - { text: "## §B Operational realism + skepticism toward silver bullets", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.23 dump #6 sridharan fields → §A/§B
+      - { text: "fault-vs-failure-distinction",            source: external-enrichment, cluster: fault-vs-failure-distinction }
+      - { text: "happy-path-is-the-easy-path",             source: external-enrichment, cluster: happy-path-is-the-easy-path }
+      - { text: "distributed-systems-fail-partially",      source: external-enrichment, cluster: distributed-systems-fail-partially }
+      - { text: "testing-in-production-with-constraints",  source: external-enrichment, cluster: testing-in-production-with-constraints }
+      - { text: "skepticism-toward-silver-bullets",        source: external-enrichment, cluster: skepticism-toward-silver-bullets }
+      - { text: "signals-vs-noise-discipline",             source: external-enrichment, cluster: signals-vs-noise-discipline }
+      - { text: "tracing-cardinality-realism",             source: external-enrichment, cluster: tracing-cardinality-realism }
+      - { text: "post-incident-learning-as-craft",         source: external-enrichment, cluster: post-incident-learning-as-craft }
+
+  hickey:
+    # B2: canonical-only target (manual cp Option A per D1; cp-mirrors.py
+    # TARGET_ALLOWLIST blocks new B2 entries per NR1; canonical sha256
+    # attestation via _ref-mirrors.lock C12 is the byte-identity gate).
+    # Path 3 (Hybrid) depth applied per D2/NR2 carry-forward into Phase 3β:
+    # 8 principles across 2 sections (4 in §A Simple vs Easy + decomplection
+    # scope + 4 in §B Programming-as-modelling + critique of braided design),
+    # each principle with 6 sub-paragraphs (statement / mechanics / Example /
+    # Anti-pattern to detect / Detection signal in code review / Cross-ref).
+    # Detection-signal coverage: 8/8 = 100%.
+    # hickey is PAIRED with beck via "fundamental-simplification ↔ incremental-
+    # TDD" axis (Phase 3β sub-3 second paired-tension cluster, second seat).
+    # EC-34 wire-format codified in meta.yaml per sub-2 precedent: paired_with:
+    # beck + tension_axis: "fundamental-simplification ↔ incremental-TDD".
+    # NOTE on beck: beck is review-only mirror per dec-008 (has quality-beck.md
+    # but no plan-aura.md / plan.md beyond review.md). The paired_with: beck
+    # declaration is a meta-only catalog field per PICKUP — does not require
+    # beck to be on planning-side dispatch, only that the axis tension be
+    # encoded at the doc layer. Cross-refs to beck in 6 of 8 principles
+    # (§A H1+H2+H3+H4, §B H7+H8) encode the axis at the doc layer; meta.yaml
+    # fields are the machine-readable substrate for Phase 3γ chair-side dispatch.
+    # C7 verdict post-commit:
+    #   20 meta.yaml conform; EC-34 wire-format: 4 paired / 0 explicit-unpaired
+    #   / 16 legacy-2-key
+    search_paths:
+      - _council-experts/hickey/references/quality-hickey.md
+    structural_anchors:
+      - { text: "## §A Simple vs Easy + decomplection scope", source: external-enrichment, min_count: 1 }
+      - { text: "## §B Programming-as-modelling + critique of braided design", source: external-enrichment, min_count: 1 }
+    tokens:
+      # external-enrichment cluster (8) — Phase 3β N3.21 dump #4 hickey fields → §A/§B
+      - { text: "simple-as-decomplected",          source: external-enrichment, cluster: simple-as-decomplected }
+      - { text: "values-not-places",               source: external-enrichment, cluster: values-not-places }
+      - { text: "incidental-complexity-as-defect", source: external-enrichment, cluster: incidental-complexity-as-defect }
+      - { text: "hammock-driven-development",      source: external-enrichment, cluster: hammock-driven-development }
+      - { text: "data-as-first-class",             source: external-enrichment, cluster: data-as-first-class }
+      - { text: "orthogonal-decomposition",        source: external-enrichment, cluster: orthogonal-decomposition }
+      - { text: "minimum-information-needed",      source: external-enrichment, cluster: minimum-information-needed }
+      - { text: "critique-of-easy-by-default",     source: external-enrichment, cluster: critique-of-easy-by-default }
+
+forbidden:
+  # vanrossum co-tenancy on quality-backend.md — Bun.serve|Hono|web/server MUST
+  # be 0 hits per dispatcher mirror. quality-backend.md is now framework-neutral
+  # (Phase 2b-N1 rewrite migrated Bun specifics to quality-dahl.md); re-accretion
+  # would silently pollute vanrossum's Python authority. Pattern is ReDoS-safe:
+  # alternation of three literal substrings, no quantifiers.
+  - id: vanrossum-co-tenancy
+    paths:
+      - council-plan-aura/references/quality-backend.md
+      - council-review-aura/references/quality-backend.md
+      - council-implement-aura/references/quality-backend.md
+      - council-plan/references/quality-backend.md
+      - council-review/references/quality-backend.md
+      - council-implement/references/quality-backend.md
+    pattern: 'Bun\.serve|Hono|web/server'
+    kind: regex

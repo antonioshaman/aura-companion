@@ -1,0 +1,4 @@
+creator: "Rasmus Lerdorf"
+stack: [php]
+paired_with: vanrossum
+tension_axis: "pragmatic-web-runtime ↔ language-design-purity"

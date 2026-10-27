@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // RC-2 capability-profile catalog loader + validator (PLAN Task 4).
 //
-// The catalog (`~/.claude/skills/_council-experts/`) is a SECOND trust root,
+// The catalog (`packs/skills/_council-experts/` in this repo — COUNCIL_CATALOG_DIR;
+// historically `~/.claude/skills/_council-experts/`) is a SECOND trust root,
 // distinct from the workspace the fingerprinter scans (ritchie B-7). It gets its
 // own realpath/bounds/symlink discipline anchored on the catalog root — the
 // workspace-anchored marker-fs.resolveMarker does NOT protect these reads.
@@ -21,10 +22,20 @@
 // malformed rather than silently never-matching (ritchie B-8).
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { assertResolvedWithinRoot, readText } from "./marker-fs";
+
+/**
+ * The in-repo council skills tree (PLAN-aura-uiux-agent-enrichment Task 4): the six
+ * `council-*` dispatchers plus the shared `_council-experts` catalog, laid out like
+ * `~/.claude/skills` so the catalog's own canaries (`.verify/verify-catalog.sh`) run
+ * unchanged. EC-20: every engine/test consumer imports these constants — this repo
+ * copy is the single source of truth; the old frozen snapshot is retired.
+ */
+export const COUNCIL_SKILLS_DIR = resolve(import.meta.dirname, "..", "..", "packs", "skills");
+export const COUNCIL_CATALOG_DIR = join(COUNCIL_SKILLS_DIR, "_council-experts");
 
 // Security canary (spec / catalog convention): advisor IDs are creator surnames.
 export const ADVISOR_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "_doc": "RC-2 closed capability vocabulary — the SINGLE SOURCE OF TRUTH for the two token axes used by universal adaptive advisor selection. `signals` are stack-fingerprint tokens: the fingerprinter (web/scripts/fingerprint.ts) EMITS a subset of these from a workspace, and each advisor's meta.yaml `capabilities.signals` DECLARES the subset it covers; a seat scores on the intersection. `domains` are feature-brief expertise tags: an advisor's `capabilities.domains` declares its lane, scored against the feature brief. Any token in a fingerprint OR a meta.yaml capability profile that is NOT listed here MUST fail the verifier (a typo that silently never-matches is the failure mode this file exists to make impossible). Tokens are lowercase-normalised at both emit and load. `any` is the reserved cross-stack signal — an advisor declaring it (e.g. hunt, fowler) is eligible on every fingerprint and scored purely by domain relevance. Adding a token here is the deliberate, reviewable act of teaching the council a new stack signal or expertise lane; see specs/council-universal-adaptive-advisor-selection.md (RC-2).",
+  "signals": {
+    "reserved": ["any"],
+    "languages": ["typescript", "javascript", "python", "go", "rust", "php", "ruby", "java"],
+    "runtimes": ["bun", "node", "deno", "cpython"],
+    "frameworks": ["hono", "express", "fastify", "react", "vue", "svelte", "nextjs", "aiogram", "python-telegram-bot", "fastapi", "flask", "django", "starlette"],
+    "datastores": ["postgres", "sqlite", "redis", "firestore", "mysql", "mongodb"],
+    "orm-migrations": ["sqlalchemy", "alembic", "prisma", "drizzle"],
+    "infra": ["docker", "github-actions", "systemd", "vps", "cloud-run", "cloudflare", "kubernetes", "nginx"],
+    "surfaces": ["websocket", "ndjson", "json-rpc", "rest", "graphql", "cli", "stdio-subprocess", "telegram-bot", "telegram-mini-app", "browser-spa", "sse", "webhook"]
+  },
+  "domains": [
+    "security",
+    "refactoring",
+    "backend-architecture",
+    "frontend-architecture",
+    "database-persistence",
+    "schema-migrations",
+    "llm-pipeline",
+    "ui-visual-quality",
+    "ux-flow",
+    "accessibility",
+    "devops-deploy",
+    "ci-supply-chain",
+    "test-quality",
+    "process-lifecycle",
+    "filesystem-persistence",
+    "protocol-correctness",
+    "realtime-streaming",
+    "chat-platform-ux"
+  ]
+}

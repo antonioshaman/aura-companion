@@ -1,0 +1,8 @@
+creator: "Ryan Dahl"
+stack: [aura]
+paired_with: null
+unpaired_reason: "Bun-runtime + NDJSON protocol specialism; no current catalog member sits across an ideological tension on these axes; defer to future enrichment when a Node/Deno/Python runtime counterpart is seated"
+schema_version: 2
+capabilities:
+  signals: [bun, node, typescript, hono, express, fastify, websocket, ndjson, json-rpc, rest, sse]
+  domains: [backend-architecture, protocol-correctness, realtime-streaming]

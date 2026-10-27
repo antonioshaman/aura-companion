@@ -1,0 +1,37 @@
+# Phase 2 merge plan — single source of truth for catalog consolidation.
+#
+# Per specs/council-experts-catalog-v2-expansion.md §59-64 (Merged 3 new
+# consolidated IDs absorbing 6 old IDs). Read by Phase 2 implementation
+# to drive: (1) absorb prompt content from sources into target, (2) `git rm`
+# source directories, (3) verify-catalog.sh schema check (count = 16 only
+# after all listed sources are gone).
+#
+# Phase 1 wrote transitional meta.yaml on each source dir using the
+# target's creator name; Phase 2 deletes those sources.
+
+merges:
+  - target: dahl
+    sources: [backend-ts, realtime-ndjson]
+    reason: "Ryan Dahl — Node.js / Deno / Bun creator; Node + Bun + TS + generic JS broadly, WebSocket and NDJSON framing concerns absorbed under one runtime/protocol lens."
+
+  - target: ritchie
+    sources: [subprocess, persistence-fs]
+    reason: "Dennis Ritchie — Unix / C creator; process lifecycle (spawn, signals, exit, PID identity, idle-kill, auto-relaunch) and filesystem persistence (atomic write, fsync, sentinel, rotation) consolidated into one Unix-discipline lens."
+
+  - target: hashimoto
+    sources: [deploy-docker-gha, deploy-vps]
+    reason: "Mitchell Hashimoto — Vagrant / Terraform / HashiCorp creator; DevOps broadly: Docker image hygiene + GitHub Actions workflow secrets + supply-chain pinning AND VPS systemd unit + ports + HEALTHCHECK consolidated."
+    # B2 canonical-and-mirrors layout (Phase 2a-N2 ratified for hashimoto only).
+    # `canonical` is the source of truth; `mirrors` are byte-identical copies
+    # materialised by `.verify/cp-mirrors.py` (no shell, argv-form, realpath
+    # bounds). Mirror count = 4 (plan, plan-aura, review, review-aura) NOT 6 —
+    # council-implement-* panels are not seated with hashimoto per the
+    # inherited Phase 2a correction. Adding a 5th/6th mirror here without
+    # also updating panel-list seating triggers a separate C2/C10 mismatch.
+    b2:
+      canonical: _council-experts/hashimoto/references/quality-hashimoto.md
+      mirrors:
+        - council-plan/references/quality-hashimoto.md
+        - council-plan-aura/references/quality-hashimoto.md
+        - council-review/references/quality-hashimoto.md
+        - council-review-aura/references/quality-hashimoto.md

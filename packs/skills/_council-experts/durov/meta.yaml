@@ -1,0 +1,8 @@
+creator: "Nikolay Durov"
+stack: [telegram]
+paired_with: null
+unpaired_reason: "Telegram-specific UX specialism for non-Aura stacks; no current catalog member sits across a tension on chat-platform UX; defer to future enrichment"
+schema_version: 2
+capabilities:
+  signals: [telegram-bot, telegram-mini-app]
+  domains: [chat-platform-ux, ux-flow]

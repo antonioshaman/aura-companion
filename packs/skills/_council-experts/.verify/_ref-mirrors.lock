@@ -1,0 +1,464 @@
+# _ref-mirrors.lock — sha256 attestation manifest for Phase 2 ref mirrors.
+#
+# Read by verify-catalog.sh C12 (Phase 2c-N3). Recomputes each canonical's
+# sha256 against the pinned value here AND verifies every mirror equals the
+# canonical's pinned value. Mismatch → exit 1 with deterministic diagnostic.
+#
+# Threat model (per hunt REC-7 — prompt-injection-as-supply-chain): an
+# attacker editing a single mirror to inject "ignore previous instructions"
+# into an expert prompt must ALSO update this lock manifest in the same PR
+# to evade C12. Two-file coordinated edit is a strictly higher bar than a
+# silent single-file write and is reviewable as code. C11 (B2 byte-identity
+# check via cp-mirrors.py --check) is INDEPENDENT of this gate — tampering
+# both files fools C12 but not C11 unless the canonical is ALSO edited.
+#
+# Lock semantics:
+#   - canonical.path: relative to SKILLS root; matches REF_PATH_REGEX.
+#   - canonical.sha256: hex digest at lock time; MUST equal current on-disk
+#     hash. Updating canonical content REQUIRES bumping this value in same PR.
+#   - mirrors[]: relative paths; each MUST sha256-match canonical at all times.
+#
+# Per-file <!-- canonical-source: ... --> HTML-comment markers at top of each
+# quality-X.md (canonical AND mirrors) document the lineage in-band. Marker
+# text is IDENTICAL across canonical and mirrors so byte-identity holds.
+
+mirrors:
+  - target: dahl
+    canonical:
+      path: council-review-aura/references/quality-dahl.md
+      sha256: c42145303dee7914b1cd90bbbab24c4e79c8988893bab5b754882fd023ad9a71
+    mirrors:
+      - council-plan-aura/references/quality-dahl.md
+      - council-implement-aura/references/quality-dahl.md
+
+  - target: ritchie
+    canonical:
+      path: council-review-aura/references/quality-ritchie.md
+      sha256: e3a720e410dabbc9ba14f0fcd98bc82d46ad599e65cd5e5a920b0262b4363cc2
+    mirrors:
+      - council-plan-aura/references/quality-ritchie.md
+      - council-implement-aura/references/quality-ritchie.md
+
+  - target: hashimoto
+    canonical:
+      path: _council-experts/hashimoto/references/quality-hashimoto.md
+      sha256: 2deab564f03d35c9e595ee2ee0f6c026163fbac9ac7258ddf7734eb415b5bab0
+    mirrors:
+      - council-plan/references/quality-hashimoto.md
+      - council-plan-aura/references/quality-hashimoto.md
+      - council-review/references/quality-hashimoto.md
+      - council-review-aura/references/quality-hashimoto.md
+      - council-implement/references/quality-hashimoto.md
+
+  - target: fowler
+    canonical:
+      path: _council-experts/fowler/references/quality-fowler.md
+      sha256: f1fcc6ccf5d05d984f057633380ddff03019b665f60c51bf3ea372c8478a1fe1
+    mirrors:
+      - council-plan/references/quality-fowler.md
+      - council-plan-aura/references/quality-fowler.md
+      - council-review/references/quality-fowler.md
+      - council-review-aura/references/quality-fowler.md
+
+  - target: beck
+    canonical:
+      path: _council-experts/beck/references/quality-beck.md
+      sha256: 8940308dbccec88db3e4a12676b54461ac67de11e9b479b7d51f3b1b964bd413
+    mirrors:
+      - council-review/references/quality-beck.md
+      - council-review-aura/references/quality-beck.md
+
+  - target: hunt
+    canonical:
+      path: _council-experts/hunt/references/quality-hunt.md
+      sha256: 1c03dc380ee5fe4ed55cf5b3f23fb65f49751cac07290c3e58cfe2453c2c9171
+    mirrors:
+      - council-plan/references/quality-hunt.md
+      - council-plan-aura/references/quality-hunt.md
+      - council-review/references/quality-hunt.md
+      - council-review-aura/references/quality-hunt.md
+
+  - target: willison
+    canonical:
+      path: _council-experts/willison/references/quality-willison.md
+      sha256: 3b4fc005122e43932d505fcadbd8c71247b96aac5dcd6605677f60b60a172eee
+    mirrors:
+      - council-plan/references/quality-willison.md
+      - council-plan-aura/references/quality-willison.md
+      - council-review/references/quality-willison.md
+      - council-review-aura/references/quality-willison.md
+
+  - target: saarinen
+    canonical:
+      path: _council-experts/saarinen/references/quality-saarinen.md
+      sha256: de583ee88c048ac0f09934b6b1870b091445885fa1cebd807fcd466038c49aac
+    mirrors:
+      - council-plan/references/quality-saarinen.md
+      - council-plan-aura/references/quality-saarinen.md
+      - council-review/references/quality-saarinen.md
+      - council-review-aura/references/quality-saarinen.md
+      - council-implement/references/quality-saarinen.md
+
+  - target: friedman
+    canonical:
+      path: _council-experts/friedman/references/quality-friedman.md
+      sha256: d9dcdaf9d6dec00ff4aad301702fbea9d3e8667fe8b6c6e01f6015b1fcb41e49
+    mirrors:
+      - council-plan/references/quality-friedman.md
+      - council-plan-aura/references/quality-friedman.md
+      - council-review/references/quality-friedman.md
+      - council-review-aura/references/quality-friedman.md
+      - council-implement/references/quality-friedman.md
+
+  - target: watson
+    canonical:
+      path: _council-experts/watson/references/quality-watson.md
+      sha256: 3bb7028e755a14a075731df1e33918ceeaabbf5ae5caab84c10e8f939163afad
+    mirrors:
+      - council-plan-aura/references/quality-watson.md
+      - council-review-aura/references/quality-watson.md
+
+  - target: abramov
+    canonical:
+      path: _council-experts/abramov/references/quality-abramov.md
+      sha256: 02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914
+    mirrors:
+      - council-plan-aura/references/quality-abramov.md
+      - council-review-aura/references/quality-abramov.md
+
+  - target: brandur
+    canonical:
+      path: _council-experts/brandur/references/quality-brandur.md
+      sha256: 0ce46856de5ee0dc431219a992562eee2b15d11bb3d48b30eb86131247081ff4
+    mirrors:
+      - council-plan/references/quality-brandur.md
+      - council-review/references/quality-brandur.md
+      - council-implement/references/quality-brandur.md
+
+  - target: durov
+    canonical:
+      path: _council-experts/durov/references/quality-durov.md
+      sha256: 20921d686932115834ff8d57cc93ba308e1aa2b18b79bfbfb0acac7e351ac29f
+    mirrors:
+      - council-plan/references/quality-durov.md
+      - council-review/references/quality-durov.md
+      - council-implement/references/quality-durov.md
+
+  - target: vanrossum
+    canonical:
+      path: _council-experts/vanrossum/references/quality-vanrossum.md
+      sha256: 1fc271f1da69606cc8edea4bf06eefa9f4eba8dc1183228c3f651193c4ebf574
+    mirrors:
+      - council-plan/references/quality-vanrossum.md
+      - council-review/references/quality-vanrossum.md
+      - council-implement/references/quality-vanrossum.md
+
+  - target: lerdorf
+    canonical:
+      path: _council-experts/lerdorf/references/quality-lerdorf.md
+      sha256: a040afee2f8b9f5f199444d1c43a99ff93603fa7eae459c681f6b232344e661a
+    mirrors:
+      - council-plan/references/quality-lerdorf.md
+      - council-review/references/quality-lerdorf.md
+
+  - target: colvin
+    canonical:
+      path: _council-experts/colvin/references/quality-colvin.md
+      sha256: cc093575b56b688f4f38f9c6794bc0456dadf94b4f891729b4fd61fcf152ba1a
+    mirrors:
+      - council-plan/references/quality-colvin.md
+      - council-review/references/quality-colvin.md
+
+  - target: torvalds
+    canonical:
+      path: _council-experts/torvalds/references/quality-torvalds.md
+      sha256: d05c1cabe20dc3b90104c2983ff8b73936f9a62916c53f957d03ee3b7eea9e24
+    mirrors:
+      - council-plan/references/quality-torvalds.md
+      - council-review/references/quality-torvalds.md
+
+  - target: unclebob
+    canonical:
+      path: _council-experts/unclebob/references/quality-unclebob.md
+      sha256: 700e9aa485c04c6506f08743bda14e0dfa1e3e78b090b15bf8f5e501d56f24d5
+    mirrors:
+      - council-plan/references/quality-unclebob.md
+      - council-review/references/quality-unclebob.md
+
+  - target: evans
+    canonical:
+      path: _council-experts/evans/references/quality-evans.md
+      sha256: 71e2a58b2f010ad18414b1185a02f9d49208563af313ca912ee90e4c91f26ae3
+    mirrors:
+      - council-plan/references/quality-evans.md
+      - council-review/references/quality-evans.md
+
+  - target: hickey
+    canonical:
+      path: _council-experts/hickey/references/quality-hickey.md
+      sha256: f231a9cbbccd998ee69d1933466d10eb75f69e37469247f17f68e65601d0ce77
+    mirrors:
+      - council-plan/references/quality-hickey.md
+      - council-review/references/quality-hickey.md
+
+  - target: majors
+    canonical:
+      path: _council-experts/majors/references/quality-majors.md
+      sha256: 2661020538cbba38a7ef82f094defaf6902290f0ee4d9cc51feefddea70070a8
+    mirrors:
+      - council-plan/references/quality-majors.md
+      - council-review/references/quality-majors.md
+
+  - target: sridharan
+    canonical:
+      path: _council-experts/sridharan/references/quality-sridharan.md
+      sha256: 5de6e6e6858568b39cc5a5a463d52b4e1124f7756bca36c8ebeec28e65f50fed
+    mirrors:
+      - council-plan/references/quality-sridharan.md
+      - council-review/references/quality-sridharan.md
+
+# Standalone attested files — no mirror relationship, one pinned hash each.
+# Regenerate with: .verify/verify-lock.py --update-attested
+# Do not hand-edit a hash: the point of this block is that a content change
+# and its hash bump land in the same reviewable diff.
+attested:
+  - path: _council-experts/README.md
+    sha256: 6d7b4df6c967f576bcae951614c289f733a3a66c8c0bde30193fcc3ea15dd64e
+  - path: _council-experts/abramov/plan-aura.md
+    sha256: e9bc792929d1f5470f7b2a9e70cce042fd7f489d182a0d3360086dfb8d7ae300
+  - path: _council-experts/abramov/review-aura.md
+    sha256: 3ed6d11fcd29745dc341d813d624b16a89aebab9c2107c960c5b46fcae5664fb
+  - path: _council-experts/backend-python-ptb/plan.md
+    sha256: b97d65c6946b275252696154ded9e43e4cfb9608a9996914a3b45b90eb591f11
+  - path: _council-experts/beck/review-aura.md
+    sha256: 62bfe02c6611c5e92151ae794b8b4b33153ddcd8cecfdb52132ce932e30beea8
+  - path: _council-experts/beck/review.md
+    sha256: a891741a864a12284fe2e619e66cea8fe30eda03906c104d26ec15fa1f99c27e
+  - path: _council-experts/brandur/plan.md
+    sha256: 5947e9bd29a740969a9f5607222c0c91f35632ac3f381fbb3b4a508528e4f63c
+  - path: _council-experts/brandur/review.md
+    sha256: fd99e44163f93480e4cf0c3865b900c71c09c4f1cf0ca030c9131a38145379d2
+  - path: _council-experts/colvin/plan.md
+    sha256: 5b17dbbcb70ad44d849b4f12ddb92fff96de5e0d9383c20c9a45523d466d16f0
+  - path: _council-experts/colvin/review.md
+    sha256: a810c4d7cf471b7145a166f786c2495940bc6da246aabb23b9240153a22b78ef
+  - path: _council-experts/dahl/plan-aura.md
+    sha256: 79d60f805761ce26564cf73c94abf045fcce44205451425af06f6c62eb1bdaa7
+  - path: _council-experts/dahl/review-aura.md
+    sha256: 8b1f984f43315896ef67650988546b97083d6f9745a482c499e360051e5ac64e
+  - path: _council-experts/deploy-copilot/plan.md
+    sha256: ac2689c30091b370b9f0bf2fe130efeefd382ee98baff16a5ff30fea8ede8ace
+  - path: _council-experts/durov/plan.md
+    sha256: 8b0e2555e2bb03c4bc056c8fd331459072661445ea2db8406b73ab32a4dcb498
+  - path: _council-experts/durov/review.md
+    sha256: 8c591afff35e43f0a52f5f576d4e8fac38b336477069a3785484f35ba92c097e
+  - path: _council-experts/evans/plan.md
+    sha256: c57fc8a7705e2faec820ae7b440e3c4ffb8f3094f178aade88b29f3370d60112
+  - path: _council-experts/evans/review.md
+    sha256: e1c679ec03c49364e3edf7d3425ad5e70cb21781154254adebaa68556b2a54aa
+  - path: _council-experts/firestore-doc/plan.md
+    sha256: 1e3f11bead24ed84215fcd06cbfef11c6bbc4cbba58938cfc0b415fd6747c3e9
+  - path: _council-experts/fowler/plan-aura.md
+    sha256: 3fe6d754b6f7dcaeb0fb72e17578e9f088fa0f5214ab7afad45fccf7a1126ba0
+  - path: _council-experts/fowler/plan.md
+    sha256: da44d23dac091fc070cde0bb6bd8293b057a4531f0ec0249ed9d950928e1129e
+  - path: _council-experts/fowler/review-aura.md
+    sha256: 30c5da4a831b4970c3e56241d88507fb9333ea081ac3946b2957f598e1287af3
+  - path: _council-experts/fowler/review.md
+    sha256: 2f4c80104d8cddd46f53ea61951d4baef4d55e78015bbfbb46fc6ce02ace658a
+  - path: _council-experts/friedman/plan-aura.md
+    sha256: 1707c13db543bc8f5fd20fac17eccf7ad7e7b95eafa83206c5aee5c07e576077
+  - path: _council-experts/friedman/plan.md
+    sha256: 6c4b4b73f4864b5f39c56cb5bfad7929f25095cc2b52d2109b6822c7beb73502
+  - path: _council-experts/friedman/review-aura.md
+    sha256: 5b429e595f69ef18c3e32b60f50559198f7b2f27a420ae2bbf4fe28d91a58492
+  - path: _council-experts/friedman/review.md
+    sha256: 039b4c40c5ac97e2a406a397ad8c1fac2ee5a793a7e46f3f2b335a37af7313c4
+  - path: _council-experts/hashimoto/plan-aura.md
+    sha256: fe73404c982f2e9268b62beaafad89636f0688aed451f9d955359ecfd2fd6438
+  - path: _council-experts/hashimoto/plan.md
+    sha256: 18e01edf241bb2e77d98bb94f80080d2669c57ee60248b0be661bd1414be0097
+  - path: _council-experts/hashimoto/review-aura.md
+    sha256: 5ae44431aa104d3f57d1773b7fd9618e9549ed0361206bafb19a074016445b0b
+  - path: _council-experts/hashimoto/review.md
+    sha256: dd0864ce9a4ed36e848f6ce122686a9760389280b50408e2b02ea72d405e2102
+  - path: _council-experts/hickey/plan.md
+    sha256: 6a86d9147ddb6d52ba3aff9d68ae91e68bd0bf4704c9ff2002f97386e21765b9
+  - path: _council-experts/hickey/review.md
+    sha256: e620006893654e832fb0b134fb31a05a2d4b88aac5b0ab60552f0484c33288de
+  - path: _council-experts/hunt/plan-aura.md
+    sha256: 3e4ead3a9b7a6b7f8c9a24a9ac4a6490ba0b1d0427c328820b9ffed73b5b7109
+  - path: _council-experts/hunt/plan.md
+    sha256: b7093b9af42169ada394f867058aedef25f00d79f756ab9c7adbba8f1537199e
+  - path: _council-experts/hunt/review-aura.md
+    sha256: 266ea0d725d42c178e284faee20bd7ce14946c6b41091c41e886ec5a21fe3a02
+  - path: _council-experts/hunt/review.md
+    sha256: a411e39d0bf87373a447985b0bcbcf0f910ef7e601d7b79aac18f6ee0fa13479
+  - path: _council-experts/lerdorf/plan.md
+    sha256: de96bf5ce9a937d796bacda940d9d3c6487c1881fe9b9f26e62e91b1a78d3eb9
+  - path: _council-experts/lerdorf/review.md
+    sha256: 5a9165462aa46a4b1964440ac9ba0a00e17d7c40ced54ae6a07d531ce23e4429
+  - path: _council-experts/majors/plan.md
+    sha256: e73bf4643d8835bdd32edd2f6c25d09cf338dd1360e021855225f99006922e4a
+  - path: _council-experts/majors/review.md
+    sha256: 3a34a13d5cdf3df56ad4d92f69be33eb4a09ed6c58bacee219150e1c442c147f
+  - path: _council-experts/ritchie/plan-aura.md
+    sha256: 89f1cda6aac01b458d8d44bcd4c8120933979f483292ee6c86bc592e91a6767a
+  - path: _council-experts/ritchie/review-aura.md
+    sha256: 9de1f8b331330111f09c2cfdd40e305d81309eea01d0cb2e34ae1861841e44bb
+  - path: _council-experts/saarinen/plan-aura.md
+    sha256: 2f57b3192c9c98d1c9f4eea38aa67296158bc5cf7ab0f4fa11f7bc53aae71d23
+  - path: _council-experts/saarinen/plan.md
+    sha256: f41a3f7028a4972aaa5f575692ff31a4b8eebacdd1d26842e7737770c3ea98aa
+  - path: _council-experts/saarinen/review-aura.md
+    sha256: 1ac696d6c6dfad2d556a946e0bc7f8bce4aa494c6c7d85ccd66a437262d929aa
+  - path: _council-experts/saarinen/review.md
+    sha256: 25408b386ac9cd42fca378dc70de0f99cb10ededab37959117eeb76c4e88110f
+  - path: _council-experts/selection-engine.md
+    sha256: 1d2b7e2a5da154fb7bb9c1af0029884249b8d5035e7d800139dc9b0bcbf75014
+  - path: _council-experts/sridharan/plan.md
+    sha256: e5893ef990a998608b64bc9e1181624074febb4cea083841e2b304518a121e5e
+  - path: _council-experts/sridharan/review.md
+    sha256: 139ab8446a142d722bf61cf6e4adf8d814155a954c7eda2012f731cbdd50806a
+  - path: _council-experts/torvalds/plan.md
+    sha256: 051bbfc55030d7c3578d4496959f68afb5213cb4871682e554dc1b5eacf6bb51
+  - path: _council-experts/torvalds/review.md
+    sha256: 3c31c4ea3434ea588c271fde7dbb48db324f9e067fa96b9602ab263f5a36a3e3
+  - path: _council-experts/unclebob/plan.md
+    sha256: b393f33b64724111c33f60b26efc30acbdc33a47549089754a14c84f7347b612
+  - path: _council-experts/unclebob/review.md
+    sha256: 57f16c72ae80fb395426926213421da5854bb3631eb6872738af82f235c84687
+  - path: _council-experts/vanrossum/plan.md
+    sha256: 4c9cdc495afbcbdc72318e4d83ffbfacb0cef84df6a0949c75dbd7739190f863
+  - path: _council-experts/vanrossum/review.md
+    sha256: b632902ef6675c13c7be3ce58c9bbc09f9fb0bf0f8582a0703c754b43655b9b1
+  - path: _council-experts/watson/plan-aura.md
+    sha256: 1e8ff2aa62e0552672bdf1a17e8e78422c594567e69a9bd3976352b443f2ecf0
+  - path: _council-experts/watson/review-aura.md
+    sha256: 74eda6bba94271075b3e1e5edcc9a888ba8564dff97826760f9b4b197a1d74cc
+  - path: _council-experts/willison/plan-aura.md
+    sha256: 872c309d11574b05fe6c1c41b0a33f767857053f2a432b08193c2229d40a65ca
+  - path: _council-experts/willison/plan.md
+    sha256: d96ac733203648aa5ea65aa68abdc9b41ad936b1215ce1f3efd51d49b29fdc7d
+  - path: _council-experts/willison/review-aura.md
+    sha256: d3babc400b3ee2da7a7295b134a7b8da8f81506525a5e966b8862b070b7fca47
+  - path: _council-experts/willison/review.md
+    sha256: 25787f30c6cd4ffcbfb5c6ea5648e02cea5ad984b2292d68ec694834819087ee
+  - path: council-implement-aura/SKILL.md
+    sha256: 135b743cd5dd79bf0678802d0421dcb868f52a1e9963f52a243953b98a20374c
+  - path: council-implement-aura/references/quality-a11y.md
+    sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
+  - path: council-implement-aura/references/quality-abramov.md
+    sha256: 02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914
+  - path: council-implement-aura/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-implement-aura/references/quality-frontend.md
+    sha256: 4ae411055707a37a9768fab9970c0a09638957ef9477525fee9792b4d4a3e4c6
+  - path: council-implement-aura/references/quality-hashimoto.md
+    sha256: 2deab564f03d35c9e595ee2ee0f6c026163fbac9ac7258ddf7734eb415b5bab0
+  - path: council-implement-aura/references/quality-llm.md
+    sha256: afb3a4c036f2cced3ae0b7a4c24b271770187b5b54f0c040e8506922f06cedd6
+  - path: council-implement-aura/references/quality-testing.md
+    sha256: 16531e8321eae113f3cf9f76d1a45c7f9f6801807f371be4f45e97c33ff324d8
+  - path: council-implement-aura/references/quality-ui.md
+    sha256: b20edf5be0dc439442892864ac96aca8deb25bb2b4977a81e56a71629279d940
+  - path: council-implement-aura/references/quality-ux.md
+    sha256: a2f73a7154d5cde4bce90f145d4fe7d7bea3fbc405d50504d27e59da79db827f
+  - path: council-implement-aura/references/quality-watson.md
+    sha256: 3bb7028e755a14a075731df1e33918ceeaabbf5ae5caab84c10e8f939163afad
+  - path: council-implement-aura/references/refactoring.md
+    sha256: acb9da0e8ea7f7218a9a34eb20bd9f7ce332e87665c7082c2918d14f5efde2b4
+  - path: council-implement-aura/references/security.md
+    sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
+  - path: council-implement/SKILL.md
+    sha256: 951a19406f4cf0e69dce17c49e477072679ba0a4ee3ea4ddcb49382a6f1f61a3
+  - path: council-implement/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-implement/references/quality-frontend.md
+    sha256: fcbbbf8ff0cc16b381b4f32f6264c0ac90c94315aac8bd938b623168c2cec8aa
+  - path: council-implement/references/quality-llm.md
+    sha256: 19bfce35c38e9185919c4513a51d060c8f146cd18f01838f36ae5728143945f5
+  - path: council-implement/references/quality-postgres.md
+    sha256: de637eca252c0baa45fe032cc6241579db26415acc087d2470db55b55b3877a3
+  - path: council-implement/references/refactoring.md
+    sha256: 3f523deaafd886c92cf29041b6f27b3d33737d84a7baed1f2d0b0202c76dfafa
+  - path: council-implement/references/security.md
+    sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
+  - path: council-plan-aura/SKILL.md
+    sha256: dd2f0bdc7477adcca7121b9a1b529b667cf7e3c3b28b504bd4601d82e22378d4
+  - path: council-plan-aura/references/quality-a11y.md
+    sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
+  - path: council-plan-aura/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-plan-aura/references/quality-frontend.md
+    sha256: 4ae411055707a37a9768fab9970c0a09638957ef9477525fee9792b4d4a3e4c6
+  - path: council-plan-aura/references/quality-llm.md
+    sha256: afb3a4c036f2cced3ae0b7a4c24b271770187b5b54f0c040e8506922f06cedd6
+  - path: council-plan-aura/references/quality-testing.md
+    sha256: 16531e8321eae113f3cf9f76d1a45c7f9f6801807f371be4f45e97c33ff324d8
+  - path: council-plan-aura/references/quality-ui.md
+    sha256: b20edf5be0dc439442892864ac96aca8deb25bb2b4977a81e56a71629279d940
+  - path: council-plan-aura/references/quality-ux.md
+    sha256: a2f73a7154d5cde4bce90f145d4fe7d7bea3fbc405d50504d27e59da79db827f
+  - path: council-plan-aura/references/refactoring.md
+    sha256: acb9da0e8ea7f7218a9a34eb20bd9f7ce332e87665c7082c2918d14f5efde2b4
+  - path: council-plan-aura/references/security.md
+    sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
+  - path: council-plan/SKILL.md
+    sha256: 1bee0b16e120d887ed127baf639388f55eb85e4cbbc6fa575885ba17aad799e5
+  - path: council-plan/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-plan/references/quality-frontend.md
+    sha256: fcbbbf8ff0cc16b381b4f32f6264c0ac90c94315aac8bd938b623168c2cec8aa
+  - path: council-plan/references/quality-llm.md
+    sha256: 19bfce35c38e9185919c4513a51d060c8f146cd18f01838f36ae5728143945f5
+  - path: council-plan/references/quality-postgres.md
+    sha256: de637eca252c0baa45fe032cc6241579db26415acc087d2470db55b55b3877a3
+  - path: council-plan/references/quality-ui.md
+    sha256: 235843419112e7d169f34d05a26e861c3c3e0212d44d832b965721ee07d1d856
+  - path: council-plan/references/quality-ux.md
+    sha256: 511a458234050dcded9acc4162656813d539cfe6b96b866c63de5417f9a852a4
+  - path: council-plan/references/refactoring.md
+    sha256: 3f523deaafd886c92cf29041b6f27b3d33737d84a7baed1f2d0b0202c76dfafa
+  - path: council-plan/references/security.md
+    sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
+  - path: council-review-aura/SKILL.md
+    sha256: f8a10c5fff364ffa6f4d1794f1f6f499b6d79ee7681b2126a6f561b611e5fed3
+  - path: council-review-aura/references/quality-a11y.md
+    sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
+  - path: council-review-aura/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-review-aura/references/quality-frontend.md
+    sha256: 4ae411055707a37a9768fab9970c0a09638957ef9477525fee9792b4d4a3e4c6
+  - path: council-review-aura/references/quality-llm.md
+    sha256: afb3a4c036f2cced3ae0b7a4c24b271770187b5b54f0c040e8506922f06cedd6
+  - path: council-review-aura/references/quality-testing.md
+    sha256: 16531e8321eae113f3cf9f76d1a45c7f9f6801807f371be4f45e97c33ff324d8
+  - path: council-review-aura/references/quality-ui.md
+    sha256: b20edf5be0dc439442892864ac96aca8deb25bb2b4977a81e56a71629279d940
+  - path: council-review-aura/references/quality-ux.md
+    sha256: a2f73a7154d5cde4bce90f145d4fe7d7bea3fbc405d50504d27e59da79db827f
+  - path: council-review-aura/references/refactoring.md
+    sha256: acb9da0e8ea7f7218a9a34eb20bd9f7ce332e87665c7082c2918d14f5efde2b4
+  - path: council-review-aura/references/security.md
+    sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
+  - path: council-review/SKILL.md
+    sha256: 5d430954bc3625ecace80a49dfa9b43b59b81c7718a6561731756aa4e125182a
+  - path: council-review/references/quality-backend.md
+    sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
+  - path: council-review/references/quality-frontend.md
+    sha256: fcbbbf8ff0cc16b381b4f32f6264c0ac90c94315aac8bd938b623168c2cec8aa
+  - path: council-review/references/quality-llm.md
+    sha256: 19bfce35c38e9185919c4513a51d060c8f146cd18f01838f36ae5728143945f5
+  - path: council-review/references/quality-postgres.md
+    sha256: de637eca252c0baa45fe032cc6241579db26415acc087d2470db55b55b3877a3
+  - path: council-review/references/quality-testing.md
+    sha256: 9494483c1bc4c6e63f3bb903b25a0df691e5ecd238d11ba69ed236812ca85e92
+  - path: council-review/references/quality-ui.md
+    sha256: 235843419112e7d169f34d05a26e861c3c3e0212d44d832b965721ee07d1d856
+  - path: council-review/references/quality-ux.md
+    sha256: 511a458234050dcded9acc4162656813d539cfe6b96b866c63de5417f9a852a4
+  - path: council-review/references/refactoring.md
+    sha256: 3f523deaafd886c92cf29041b6f27b3d33737d84a7baed1f2d0b0202c76dfafa
+  - path: council-review/references/security.md
+    sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f

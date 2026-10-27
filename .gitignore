@@ -75,3 +75,7 @@ __pycache__/
 /SCOPE-*.md
 # `node_modules/` (dir pattern) does not match a symlinked node_modules in a worktree
 web/node_modules
+
+# UI/UX source-text corpus: third-party texts for the copy check, never committed or shipped
+# (manifest with sha256 is committed; rebuild with `bun scripts/uiux-sources.ts corpus`).
+docs/research/uiux-sources/corpus/

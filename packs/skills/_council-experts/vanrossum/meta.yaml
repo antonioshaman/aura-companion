@@ -1,0 +1,8 @@
+creator: "Guido van Rossum"
+stack: [python]
+paired_with: lerdorf
+tension_axis: "language-design-purity ↔ pragmatic-web-runtime"
+schema_version: 2
+capabilities:
+  signals: [python, cpython, aiogram, fastapi, flask, django, starlette]
+  domains: [backend-architecture]

@@ -1,0 +1,8 @@
+creator: "Mitchell Hashimoto"
+stack: [common]
+paired_with: majors
+tension_axis: "immutable-prevention ↔ debugging-in-prod"
+schema_version: 2
+capabilities:
+  signals: [docker, github-actions, systemd, vps, cloud-run, nginx, kubernetes]
+  domains: [devops-deploy, ci-supply-chain]

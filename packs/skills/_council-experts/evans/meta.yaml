@@ -1,0 +1,4 @@
+creator: "Eric Evans"
+stack: [common]
+paired_with: fowler
+tension_axis: "strategic-DDD ↔ emergent-microservices"

@@ -1,0 +1,8 @@
+creator: "Martin Fowler"
+stack: [common]
+paired_with: null
+unpaired_reason: "load-bearing hub: unclebob (principle-purity ↔ economic-pragmatic) and evans (strategic-DDD ↔ emergent-microservices) both pair to fowler; single back-reference would pin one tension at the cost of the other"
+schema_version: 2
+capabilities:
+  signals: [any]
+  domains: [refactoring, backend-architecture]

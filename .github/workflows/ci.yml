@@ -145,6 +145,44 @@ jobs:
         working-directory: platform
         run: bun run build
 
+  # In-repo council catalog + vendored skills (PLAN-aura-uiux-agent-enrichment
+  # Tasks 1-4). verify-catalog.sh is the catalog's own canary gate (P0, C1-C6,
+  # C10-C15: inline-panel ban, capability universe, mirrors byte-identical,
+  # sha256 lock, symlink/mode defences); it exits non-zero on any violation.
+  # The two bun checks are hermetic (no network): vendored-skills re-hashes every
+  # pinned file, uiux-sources re-derives every catalog verdict from its facts.
+  council-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned by commit SHA (v5): this job attests bytes, so its toolchain must not float.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install the one dependency the catalog canaries need
+        run: pip install --quiet --require-hashes -r .github/council-canary-requirements.txt
+
+      - name: Council catalog canaries (verify-catalog.sh)
+        run: bash packs/skills/_council-experts/.verify/verify-catalog.sh
+
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Vendored skills match their pinned lock
+        working-directory: web
+        run: bun scripts/vendored-skills.ts check
+
+      - name: UI/UX source catalog verdicts follow from their facts
+        working-directory: web
+        run: bun scripts/uiux-sources.ts check
+
   experience-packs:
     runs-on: ubuntu-latest
     steps:

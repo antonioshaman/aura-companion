@@ -1,0 +1,8 @@
+creator: "Brandur Leach"
+stack: [postgres]
+paired_with: null
+unpaired_reason: "PostgreSQL/Alembic specialism for non-Aura stacks; no current catalog member sits across a tension on database persistence design; defer to future enrichment"
+schema_version: 2
+capabilities:
+  signals: [postgres, sqlite, mysql, sqlalchemy, alembic, prisma, drizzle]
+  domains: [database-persistence, schema-migrations]

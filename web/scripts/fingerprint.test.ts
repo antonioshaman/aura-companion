@@ -9,8 +9,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
+import { COUNCIL_CATALOG_DIR } from "./capability-catalog.js";
 import { detectFingerprint, JS_DEP_SIGNALS, PY_PKG_SIGNALS } from "./fingerprint.js";
 
 const workspaces: string[] = [];
@@ -136,13 +137,11 @@ describe("detectFingerprint — needs-confirmation (AC1.3)", () => {
 // fingerprint emit table (`postgress`) silently never-matches and scores zero. This
 // asserts every token the fingerprinter can emit is in the closed vocabulary.
 //
-// It runs HERMETICALLY against a checked-in FROZEN snapshot of the vocab, so it gates
-// in the aura repo's CI (which has no ~/.claude — the earlier skipIf-only version
-// silently skipped there, observer WARN 1). A separate skip-if-present freshness test
-// asserts the snapshot still matches the live vocab where the catalog exists.
-const VOCAB_SNAPSHOT = join(
-  dirname(new URL(import.meta.url).pathname), "__fixtures__", "council-catalog", "vocabulary.json",
-);
+// It runs HERMETICALLY against the IN-REPO catalog vocab (packs/skills/_council-experts,
+// PLAN-aura-uiux-agent-enrichment Task 4), so it gates in the aura repo's CI (which has
+// no ~/.claude — the earlier skipIf-only version silently skipped there, observer WARN
+// 1). The frozen __fixtures__ snapshot it used to read is retired (EC-20).
+const IN_REPO_VOCAB = join(COUNCIL_CATALOG_DIR, ".verify", "capability-vocabulary.json");
 
 function signalSet(raw: { signals: Record<string, string[]> }): Set<string> {
   const s = new Set<string>();
@@ -160,19 +159,19 @@ function emittedTokens(frameworksOnly = false): Set<string> {
 }
 
 describe("emit-side vocabulary closure (hashimoto #3 / observer WARN 1) — hermetic", () => {
-  const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]> };
+  const repoVocab = JSON.parse(readFileSync(IN_REPO_VOCAB, "utf8")) as { signals: Record<string, string[]> };
 
-  it("every fingerprint emit token is in the closed vocabulary (frozen snapshot)", () => {
-    const vocab = signalSet(snap);
+  it("every fingerprint emit token is in the closed vocabulary (in-repo catalog)", () => {
+    const vocab = signalSet(repoVocab);
     const orphans = [...emittedTokens()].filter((t) => !vocab.has(t)).sort();
     expect(orphans, `emit tokens absent from the vocab snapshot: ${orphans.join(", ")}`).toEqual([]);
   });
 
   // willison #2: the MISMATCH ("0-aiogram") guard in advisor-brief filters against the
   // vocab's `frameworks` GROUP; a framework-dimension emit token missing from it makes
-  // the guard silently no-op. Hermetic against the snapshot.
-  it("every framework-dimension emit token is in the vocab frameworks group (frozen snapshot)", () => {
-    const frameworks = new Set((snap.signals.frameworks ?? []).map((t) => t.toLowerCase()));
+  // the guard silently no-op. Hermetic against the in-repo catalog.
+  it("every framework-dimension emit token is in the vocab frameworks group (in-repo catalog)", () => {
+    const frameworks = new Set((repoVocab.signals.frameworks ?? []).map((t) => t.toLowerCase()));
     const orphans = [...emittedTokens(true)].filter((t) => !frameworks.has(t)).sort();
     expect(
       orphans,
@@ -181,18 +180,18 @@ describe("emit-side vocabulary closure (hashimoto #3 / observer WARN 1) — herm
   });
 });
 
-// Freshness: the frozen snapshot must still match the live vocab. Skip-if-absent in
-// bare CI (the hermetic tests above are the CI gate); this catches snapshot staleness
-// on an operator machine + the pre-commit hook — regenerate via
-// `bun run scripts/build-council-catalog-snapshot.ts`.
-describe("vocab snapshot freshness (observer WARN 1)", () => {
+// Transition drift: the operator box still runs its own catalog copy in ~/.claude/skills
+// until Phase B moves sessions onto the repo copy. Skip-if-absent in bare CI (the
+// hermetic tests above are the CI gate); on the box this catches a vocab edited there
+// but not ported into packs/skills.
+describe("box vocab stays in sync with the in-repo vocab (observer WARN 1)", () => {
   const livePath =
     process.env.COUNCIL_VOCAB ??
     join(homedir(), ".claude", "skills", "_council-experts", ".verify", "capability-vocabulary.json");
-  it.skipIf(!existsSync(livePath))("frozen vocab snapshot equals the live vocab (signals + domains)", () => {
+  it.skipIf(!existsSync(livePath))("in-repo vocab equals the box vocab (signals + domains)", () => {
     const live = JSON.parse(readFileSync(livePath, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
-    const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
-    expect(snap.signals, "vocab snapshot signals drifted from live — regenerate build-council-catalog-snapshot.ts").toEqual(live.signals);
-    expect([...snap.domains].sort(), "vocab snapshot domains drifted from live").toEqual([...live.domains].sort());
+    const repoVocab = JSON.parse(readFileSync(IN_REPO_VOCAB, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
+    expect(repoVocab.signals, "box vocab signals drifted from packs/skills — port the edit into the repo").toEqual(live.signals);
+    expect([...repoVocab.domains].sort(), "box vocab domains drifted from packs/skills").toEqual([...live.domains].sort());
   });
 });

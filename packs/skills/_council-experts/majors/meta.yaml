@@ -1,0 +1,4 @@
+creator: "Charity Majors"
+stack: [common]
+paired_with: hashimoto
+tension_axis: "debugging-in-prod ↔ immutable-prevention"

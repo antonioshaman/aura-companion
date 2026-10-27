@@ -30,8 +30,9 @@ import { parse } from "yaml";
 // ci-workflows.test.ts → web/scripts → web → repo root.
 const repoRoot = join(fileURLToPath(import.meta.url), "..", "..", "..");
 
-type Step = { name?: string; run?: string; "continue-on-error"?: boolean; "working-directory"?: string };
-type Workflow = { permissions?: unknown; jobs: Record<string, { permissions?: unknown; steps: Step[] }> };
+type Step = { name?: string; run?: string; if?: string; "continue-on-error"?: boolean | string; "working-directory"?: string };
+type Job = { permissions?: unknown; if?: string; "continue-on-error"?: boolean | string; steps: Step[] };
+type Workflow = { permissions?: unknown; jobs: Record<string, Job> };
 
 function loadWorkflow(name: string): Workflow {
   return parse(readFileSync(join(repoRoot, ".github", "workflows", name), "utf-8")) as Workflow;
@@ -99,5 +100,83 @@ describe("CI workflow hardening (P7/CI-HARDEN)", () => {
     expect(audit).toBeDefined();
     expect(audit?.["working-directory"]).toBe("web");
     expect(audit?.["continue-on-error"]).toBe(true);
+  });
+});
+
+// PLAN-aura-uiux-agent-enrichment Task 4: the council catalog moved into the repo
+// (packs/skills). Its canary gate only protects anything if CI actually runs it on
+// every PR, and only the exit code of the script itself can fail the job — so pin
+// that the step exists and is not masked.
+const GATE_COMMANDS = [
+  "bash packs/skills/_council-experts/.verify/verify-catalog.sh",
+  "bun scripts/vendored-skills.ts check",
+  "bun scripts/uiux-sources.ts check",
+];
+
+/**
+ * Every way a gate step can stop failing the build, read from the PARSED workflow
+ * (review 2026-10-27-2139 finding #4): `continue-on-error` and `if:` are YAML keys
+ * on the step or its job, never part of the `run` text, so a regex over `run`
+ * cannot see them. Text masks (`|| true`) are still checked on `run`.
+ */
+function gateMaskingErrors(wf: Workflow, commands: string[]): string[] {
+  const errs: string[] = [];
+  for (const cmd of commands) {
+    const owners = Object.entries(wf.jobs).flatMap(([jobId, job]) =>
+      job.steps.filter((st) => st.run?.includes(cmd)).map((step) => ({ jobId, job, step })),
+    );
+    if (owners.length === 0) errs.push(`missing: ${cmd}`);
+    for (const { jobId, job, step } of owners) {
+      if (/\|\|\s*true|;\s*true\b|\|\|\s*:/.test(step.run ?? "")) errs.push(`${cmd}: run text masks the exit code`);
+      if (step["continue-on-error"] !== undefined && step["continue-on-error"] !== false) errs.push(`${cmd}: step continue-on-error`);
+      if (step.if !== undefined) errs.push(`${cmd}: step has an if: condition`);
+      if (job["continue-on-error"] !== undefined && job["continue-on-error"] !== false) errs.push(`${cmd}: job ${jobId} continue-on-error`);
+      if (job.if !== undefined) errs.push(`${cmd}: job ${jobId} has an if: condition`);
+    }
+  }
+  return errs;
+}
+
+// PLAN-aura-uiux-agent-enrichment Task 4: the council catalog moved into the repo
+// (packs/skills). Its canary gate only protects anything if CI runs it on every PR
+// and nothing can turn its failure into a pass.
+describe("council catalog canaries run in CI (uiux Task 4)", () => {
+  it("ci.yml runs verify-catalog.sh, the vendor lock check and the source-catalog check, unmasked", () => {
+    expect(gateMaskingErrors(loadWorkflow("ci.yml"), GATE_COMMANDS)).toEqual([]);
+  });
+
+  // Planted defect (hashimoto's reproduction): the exact edits that kept the old
+  // run-text regex green must each be reported here.
+  it("detects step- and job-level continue-on-error and if: masks", () => {
+    const masked: Workflow = {
+      jobs: {
+        "council-skills": {
+          "continue-on-error": true,
+          if: "github.event_name == 'push'",
+          steps: [
+            { run: GATE_COMMANDS[0], "continue-on-error": true, if: "github.event_name == 'push'" },
+            { run: `${GATE_COMMANDS[1]} || true` },
+          ],
+        },
+      },
+    };
+    const errs = gateMaskingErrors(masked, GATE_COMMANDS.slice(0, 2)).join("\n");
+    expect(errs).toMatch(/verify-catalog.sh: step continue-on-error/);
+    expect(errs).toMatch(/verify-catalog.sh: step has an if: condition/);
+    expect(errs).toMatch(/job council-skills continue-on-error/);
+    expect(errs).toMatch(/job council-skills has an if: condition/);
+    expect(errs).toMatch(/vendored-skills.ts check: run text masks the exit code/);
+  });
+});
+
+// Review 2026-10-27-2139 finding #18: the job that attests bytes must not run on a
+// floating toolchain — setup-python pinned to a commit SHA, pyyaml installed by hash.
+describe("council-skills job toolchain is pinned", () => {
+  it("setup-python is pinned by a 40-hex commit SHA and pip installs with --require-hashes", () => {
+    const steps = loadWorkflow("ci.yml").jobs["council-skills"].steps as (Step & { uses?: string })[];
+    const py = steps.find((s) => s.uses?.startsWith("actions/setup-python@"));
+    expect(py?.uses).toMatch(/^actions\/setup-python@[0-9a-f]{40}$/);
+    const pip = steps.find((s) => s.run?.includes("pip install"));
+    expect(pip?.run).toMatch(/--require-hashes -r \.github\/council-canary-requirements\.txt/);
   });
 });
