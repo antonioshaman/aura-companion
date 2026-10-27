@@ -16,7 +16,10 @@ import { join, relative, resolve } from "node:path";
 import {
   buildEntry,
   CATEGORIES,
+  assertSameRepo,
+  checkableCorpus,
   checkCatalog,
+  checkReceivers,
   classifySource,
   CORPUS_DIR,
   corpusItem,
@@ -26,6 +29,10 @@ import {
   loadCorpusManifest,
   THIN_TEXT_BYTES,
   UIUX_SOURCES_DIR,
+  fetchHeaders,
+  readmeAtRef,
+  uncoveredSkills,
+  validateConflicts,
   verifyCorpus,
   factsFromGithub,
   loadCatalogEntries,
@@ -148,7 +155,21 @@ describe("committed catalog.json (hermetic re-validation)", () => {
     expect(seeds.flatMap(validateSeed)).toEqual([]);
   });
 
-  it("satisfies AC1.1–AC1.4: ≥30 included sources, all 8 categories, verdicts follow from facts", () => {
+  // Fix pass #11/#12/#14: every receiver resolves, the conflict ledger is well-formed,
+  // and every shipped UI/UX skill is fed by a source or declared taste-only.
+  it("seed-level gates pass on the committed seed (receivers, conflicts, AC3.1 skill scope)", async () => {
+    const { checkSeedDoc, loadSeedDoc } = await import("./uiux-sources.js");
+    expect(checkSeedDoc(loadSeedDoc())).toEqual([]);
+  });
+
+  it("the ledger records the target-size and back-navigation conflicts (finding #12)", async () => {
+    const { loadSeedDoc } = await import("./uiux-sources.js");
+    const claims = loadSeedDoc().conflicts.map((c) => c.claim).join("\n");
+    expect(claims).toMatch(/target size/i);
+    expect(claims).toMatch(/back navigation/i);
+  });
+
+  it("satisfies AC1.1–AC1.4: ≥30 included sources, every category covered, verdicts follow from facts", () => {
     expect(checkCatalog(entries, seeds)).toEqual([]);
   });
 
@@ -164,8 +185,8 @@ describe("committed catalog.json (hermetic re-validation)", () => {
 
   it("CATALOG.md is the rendering of catalog.json (regenerate with `fetch`, never hand-edit)", async () => {
     const { readFileSync } = await import("node:fs");
-    const { CATALOG_MD_FILE } = await import("./uiux-sources.js");
-    expect(readFileSync(CATALOG_MD_FILE, "utf8")).toBe(renderMarkdown(entries));
+    const { CATALOG_MD_FILE, loadSeedDoc } = await import("./uiux-sources.js");
+    expect(readFileSync(CATALOG_MD_FILE, "utf8")).toBe(renderMarkdown(entries, loadSeedDoc()));
   });
 });
 
@@ -230,5 +251,104 @@ describe("corpus — never committed, never shipped", () => {
     expect(relative(join(repoRoot, "web"), CORPUS_DIR).startsWith("..")).toBe(true);
     const r = spawnSync("git", ["check-ignore", "-q", join(relative(repoRoot, CORPUS_DIR), "x.txt")], { cwd: repoRoot });
     expect(r.status, "corpus/ must be gitignored — its texts are third-party").toBe(0);
+  });
+});
+
+// ─── Fix pass (review 2026-10-27-2139) ──────────────────────────────────────
+// Each block cites its FINAL-REVIEW finding and was written to FAIL first.
+
+const seedA: SeedSource = { id: "a-src", category: "ux-writing", title: "A", repo: "o/a", takeaway: "t", receivers: ["skill:clarify"] };
+const entryA = buildEntry(seedA, fresh, "2026-10-27T00:00:00Z", NOW);
+
+describe("Finding #9 — every checkCatalog / classifySource integrity branch is exercised", () => {
+  it("a non-canonical repo with no activity date is excluded, not passed to the licence rules", () => {
+    expect(classifySource({}, { ...fresh, lastActivity: null }, NOW)).toEqual({ verdict: "excluded", reason: "no activity date" });
+  });
+
+  it("duplicate ids, an entry without a seed, and a seed never fetched are all reported", () => {
+    const orphan = { ...entryA, id: "ghost" };
+    const errs = checkCatalog([entryA, entryA, orphan], [seedA, { ...seedA, id: "b-src" }]).join("\n");
+    expect(errs).toMatch(/duplicate id a-src/);
+    expect(errs).toMatch(/ghost: in catalog but not in seed/);
+    expect(errs).toMatch(/b-src: in seed but not fetched into catalog/);
+  });
+
+  it("a non-canonical entry with no star count is reported", () => {
+    expect(checkCatalog([{ ...entryA, stars: null }], [seedA]).join()).toMatch(/a-src: missing star count/);
+  });
+});
+
+describe("Finding #14 — catalog judgement fields are bound to the seed; receivers resolve", () => {
+  it("a takeaway or receiver edited in catalog.json but not in seed.json is caught", () => {
+    expect(checkCatalog([{ ...entryA, takeaway: "rewritten" }], [seedA]).join()).toMatch(/a-src: takeaway differs from seed/);
+    expect(checkCatalog([{ ...entryA, receivers: ["skill:other"] }], [seedA]).join()).toMatch(/a-src: receivers differs from seed/);
+    expect(checkCatalog([{ ...entryA, link: "https://evil.example" }], [seedA]).join()).toMatch(/a-src: link differs from seed/);
+  });
+
+  it("an unknown receiver is reported; known ones pass", () => {
+    const known = new Set(["skill:clarify", "aura-check"]);
+    expect(checkReceivers([seedA], known)).toEqual([]);
+    expect(checkReceivers([{ ...seedA, receivers: ["skill:clarfy"] }], known)).toEqual(["a-src: unknown receiver skill:clarfy"]);
+  });
+});
+
+describe("Finding #11 — every shipped UI/UX skill is a receiver or declared taste-only", () => {
+  it("a shipped skill with no source and no taste-only declaration is reported", () => {
+    expect(uncoveredSkills(["clarify", "adapt", "bolder"], [seedA], ["bolder"])).toEqual(["adapt"]);
+  });
+});
+
+describe("Finding #12 — the source-conflict ledger has a fixed shape", () => {
+  const seeds = [seedA, { ...seedA, id: "b-src" }];
+  const ok = { claim: "c", sources: ["a-src", "b-src"], default: "d", reason: "r", scope: "web" };
+  it("accepts a well-formed conflict and rejects unknown sources, a single source or missing fields", () => {
+    expect(validateConflicts([ok], seeds)).toEqual([]);
+    expect(validateConflicts([{ ...ok, sources: ["a-src", "nope"] }], seeds).join()).toMatch(/unknown source nope/);
+    expect(validateConflicts([{ ...ok, sources: ["a-src"] }], seeds).join()).toMatch(/at least two sources/);
+    expect(validateConflicts([{ ...ok, default: "" }], seeds).join()).toMatch(/missing default/);
+  });
+});
+
+describe("Finding #13 — a renamed/moved repo is an error, not silently different facts", () => {
+  it("assertSameRepo throws when the API answers for a different repository", () => {
+    expect(() => assertSameRepo("Telegram-Mini-Apps/TelegramUI", "telegram-mini-apps-dev/TelegramUI")).toThrow(/moved/);
+    expect(() => assertSameRepo("o/A", "O/a")).not.toThrow();
+  });
+});
+
+describe("Finding #8 — thin texts are uncheckable; seeds can point at the real docs page", () => {
+  it("a textUrl override replaces the README and must be https", () => {
+    expect(corpusTextUrl({ link: "https://github.com/o/a", verdict: "redistributable", textUrl: "https://docs.example.org/x" })).toBe("https://docs.example.org/x");
+    expect(validateSeed({ ...seedA, textUrl: "http://docs.example.org" }).join()).toMatch(/textUrl must be https/);
+  });
+
+  it("checkableCorpus drops thin items, so a copy check can never certify against them", () => {
+    const thin = corpusItem("t-src", "u", "short", "x");
+    const full = corpusItem("f-src", "u", "y".repeat(THIN_TEXT_BYTES), "x");
+    expect(checkableCorpus([thin, full]).map((i) => i.id)).toEqual(["f-src"]);
+  });
+});
+
+describe("Finding #7/#16 — the corpus is pinned and orphans are flagged", () => {
+  it("a repo README is fetched at a recorded commit", () => {
+    expect(readmeAtRef("https://api.github.com/repos/o/a/readme", "abc123")).toBe("https://api.github.com/repos/o/a/readme?ref=abc123");
+  });
+
+  it("a text on disk that the manifest does not list is reported", () => {
+    const m = [corpusItem("a-src", "u", "alpha", "x")];
+    expect(verifyCorpus(m, [], (id) => (id === "a-src" ? "alpha" : null), ["a-src", "stale-src"])).toEqual([
+      "stale-src: corpus text not in manifest (orphan)",
+    ]);
+  });
+});
+
+describe("GITHUB_TOKEN is only ever sent to api.github.com (beck P3)", () => {
+  it("adds Authorization for the API host only", () => {
+    expect(fetchHeaders("https://api.github.com/repos/o/a", "tok").Authorization).toBe("Bearer tok");
+    expect(fetchHeaders("https://docs.example.org/page", "tok").Authorization).toBeUndefined();
+    expect(fetchHeaders("https://api.github.com.evil.example/x", "tok").Authorization).toBeUndefined();
+    // A lookalike or the web host must not get it either (exact hostname, not suffix).
+    expect(fetchHeaders("https://evil-github.com/x", "tok").Authorization).toBeUndefined();
+    expect(fetchHeaders("https://github.com/o/a", "tok").Authorization).toBeUndefined();
   });
 });
