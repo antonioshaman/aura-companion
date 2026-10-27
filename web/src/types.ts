@@ -20,6 +20,8 @@ import type {
   BrowserCouncilBudget,
   CouncilRoleUsage,
 } from "../server/session-types.js";
+import type { GuardDenial } from "../server/guard-denial.js";
+export type { GuardDenial } from "../server/guard-denial.js";
 
 export type {
   SessionState,
@@ -104,6 +106,12 @@ export interface ChatMessage {
    * bubble shows an "Автопродолжение после лимита" caption.
    */
   origin?: "auto_resume";
+  /**
+   * Set on a system message built from a `guard_denied` frame (guards-pack
+   * hook blocked a risky Bash command; Claude-only). MessageBubble renders a
+   * GuardDenialBanner with "Allow once" / "Dismiss" instead of a divider.
+   */
+  guardDenial?: GuardDenial;
 }
 
 export interface TaskItem {

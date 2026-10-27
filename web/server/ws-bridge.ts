@@ -1,4 +1,5 @@
 import { getVerifiedModelStore } from "./verified-models.js";
+import type { GuardDenial } from "./guard-denial.js";
 import type { ServerWebSocket } from "bun";
 import type {
   BrowserOutgoingMessage,
@@ -1336,6 +1337,13 @@ export class WsBridge {
         this.persistSession(session);
       }
 
+      // -- guard_denied: guards-pack hook denial (Claude-only) — history-backed
+      // so the card survives reload; resolveGuardDenial() updates it in place.
+      if (msg.type === "guard_denied") {
+        this.appendHistory(session, msg);
+        this.persistSession(session);
+      }
+
       // -- system_event: append to history (except hook_progress) ----------
       if (msg.type === "system_event") {
         const event = msg.event;
@@ -1885,6 +1893,34 @@ export class WsBridge {
       return;
     }
     this.routeBrowserMessage(session, { type: "user_message", content }, undefined, origin);
+  }
+
+  /** Latest recorded guards-pack denial for `toolUseId` in this session's history. */
+  getGuardDenial(sessionId: string, toolUseId: string): GuardDenial | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    for (let i = session.messageHistory.length - 1; i >= 0; i--) {
+      const m = session.messageHistory[i];
+      if (m.type === "guard_denied" && m.denial.toolUseId === toolUseId) return m.denial;
+    }
+    return undefined;
+  }
+
+  /**
+   * Mark a pending guard denial allowed/dismissed: updates the history record
+   * in place (so reload shows the final state), persists, and broadcasts
+   * `guard_denial_resolved`. Returns false if missing or already resolved —
+   * the caller relies on this to make "Allow once" single-use.
+   */
+  resolveGuardDenial(sessionId: string, toolUseId: string, status: "allowed" | "dismissed", now = Date.now()): boolean {
+    const session = this.sessions.get(sessionId);
+    const denial = this.getGuardDenial(sessionId, toolUseId);
+    if (!session || !denial || denial.status !== "pending") return false;
+    denial.status = status;
+    denial.resolvedAt = now;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "guard_denial_resolved", toolUseId, status, resolvedAt: now });
+    return true;
   }
 
   /**

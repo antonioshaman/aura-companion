@@ -29,6 +29,8 @@ import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { ContextAdvisoryBanner } from "./ContextAdvisoryBanner.js";
+import { GuardDenialBanner } from "./GuardDenialBanner.js";
+import type { GuardDenial } from "../types.js";
 import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
@@ -466,6 +468,30 @@ const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
   content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
   timestamp: Date.now() - 28000,
   systemVariant: "resume-interrupted",
+};
+
+// Guards-pack denial (Claude-only): the hook said "ask" under bypassPermissions,
+// the CLI auto-denied, Aura shows this card with "Allow once" / "Dismiss".
+const GUARD_DENIAL_MOCK: GuardDenial = {
+  sessionId: "playground",
+  toolUseId: "toolu_playground_1",
+  toolName: "Bash",
+  rule: "service-restart",
+  rules: ["service-restart"],
+  level: "ask",
+  reason:
+    "[guards:service-restart] `systemctl restart auraengine-bot.service` on remote host 'prod' (via ssh from local host 'aura-box'). Confirm this is the intended host and that the service runs the right branch/commit with migrations applied.\n(guards decision: ask. Do not retry or work around this on your own - ask the user.)",
+  command: "ssh prod 'systemctl restart auraengine-bot.service'",
+  deniedAt: Date.now() - 20_000,
+  status: "pending",
+};
+
+const MSG_GUARD_DENIAL: ChatMessage = {
+  id: "guard-denial-toolu_playground_1",
+  role: "system",
+  content: GUARD_DENIAL_MOCK.reason,
+  timestamp: Date.now() - 20000,
+  guardDenial: GUARD_DENIAL_MOCK,
 };
 
 // W16: a run of these two adjacent in the feed is what MessageFeed collapses
@@ -1236,6 +1262,37 @@ export function Playground() {
             </Card>
             <Card label="System message (previous turn interrupted by restart)">
               <MessageBubble message={MSG_SYSTEM_RESUME_INTERRUPTED} />
+            </Card>
+            <Card label="Guard denial — ask-level, Allow once / Dismiss (Claude-only)">
+              <MessageBubble message={MSG_GUARD_DENIAL} />
+            </Card>
+            <Card label="Guard denial — request in flight">
+              <GuardDenialBanner denial={GUARD_DENIAL_MOCK} pending onAllowOnce={() => {}} onDismiss={() => {}} />
+            </Card>
+            <Card label="Guard denial — request failed">
+              <GuardDenialBanner denial={GUARD_DENIAL_MOCK} error="Cannot allow once: expired" onAllowOnce={() => {}} onDismiss={() => {}} />
+            </Card>
+            <Card label="Guard denial — allowed once">
+              <GuardDenialBanner denial={{ ...GUARD_DENIAL_MOCK, status: "allowed", resolvedAt: Date.now() }} />
+            </Card>
+            <Card label="Guard denial — dismissed">
+              <GuardDenialBanner denial={{ ...GUARD_DENIAL_MOCK, status: "dismissed", resolvedAt: Date.now() }} />
+            </Card>
+            <Card label="Guard denial — approval window expired">
+              <GuardDenialBanner denial={{ ...GUARD_DENIAL_MOCK, deniedAt: Date.now() - 11 * 60_000 }} onDismiss={() => {}} />
+            </Card>
+            <Card label="Guard denial — deny-level rule (pkill), no Allow once">
+              <GuardDenialBanner
+                denial={{
+                  ...GUARD_DENIAL_MOCK,
+                  rule: "pkill",
+                  rules: ["pkill"],
+                  level: "deny",
+                  command: "pkill -f 'bun server/index.ts'",
+                  reason: "[guards:pkill] `pkill` matches processes by name/cmdline, not by identity. Find the exact PID, confirm it is yours, then `kill <PID>`.",
+                }}
+                onDismiss={() => {}}
+              />
             </Card>
             <Card label="Collapsed system markers — run of 4 restart/drift-recovery notes (W16)">
               <CollapsedSystemMarkers items={COLLAPSED_SYSTEM_MARKERS_ITEMS} />

@@ -1629,6 +1629,12 @@ export const api = {
   sendSessionMessage: (sessionId: string, content: string) =>
     post<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/message`, { content }),
 
+  // Guards-pack denials (Claude-only): approve the server-recorded command once, or dismiss.
+  guardAllowOnce: (sessionId: string, toolUseId: string) =>
+    post<{ ok: boolean; status: "allowed" }>(`/sessions/${encodeURIComponent(sessionId)}/guard-allow-once`, { toolUseId }),
+  guardDismiss: (sessionId: string, toolUseId: string) =>
+    post<{ ok: boolean; status: "dismissed" }>(`/sessions/${encodeURIComponent(sessionId)}/guard-dismiss`, { toolUseId }),
+
   // Saved prompts
   listPrompts: (cwd?: string, scope?: "global" | "project" | "all") => {
     const params = new URLSearchParams();

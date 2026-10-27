@@ -92,3 +92,28 @@ The CLI uses NDJSON (newline-delimited JSON). Key message types from CLI: `syste
 
 Full protocol documentation is in `WEBSOCKET_PROTOCOL_REVERSED.md`.
 
+### Guards-pack denials ("Allow once", Claude-only)
+
+Permission prompts normally arrive as `control_request` / `can_use_tool`. In Aura "agent" mode
+(`permissionMode: bypassPermissions`) the CLI never sends one for a PreToolUse hook that answers
+`"ask"` — it auto-denies and emits `{"type":"system","subtype":"permission_denied",
+"decision_reason_type":"hook","tool_use_id":…,"message":"[guards:<rule>] …"}` followed by a
+`tool_result` with the same text. For the guards pack (`packs/guards`) Aura maps that frame:
+
+- `claude-adapter.ts` keeps a bounded `toolUseId → Bash command` map from assistant `tool_use`
+  blocks and turns the frame into a `guard_denied` browser message (`guard-denial.ts` parses the
+  rule tags and the `(guards decision: ask|deny` marker). Non-guards `permission_denied` frames
+  are ignored, not reported as drift (EC-5). Replay test: `guard-denied.replay.test.ts`.
+- `ws-bridge.ts` stores it in `messageHistory` (history-backed, survives reload);
+  `resolveGuardDenial` updates that record in place and broadcasts `guard_denial_resolved`.
+- `POST /api/sessions/:id/guard-allow-once {toolUseId}` (`routes/guard-routes.ts`): only for a
+  pending, ask-level denial younger than 10 min with a server-recorded command. Writes an
+  HMAC-signed, single-use, 5-minute entry to `~/.companion/guards-allow/` (dir 0700, files 0600,
+  key `.hmac-key`), marks the denial resolved, and injects "re-run exactly this command" into the
+  session. The browser sends only the `toolUseId`; the command comes from the server's record.
+  `POST /api/sessions/:id/guard-dismiss` just resolves it.
+- `guards.py pre` consumes a matching entry (same rules, exact command sha256, cwd) before
+  allowing; deny-level rules ignore entries. `GuardDenialBanner` renders the card.
+
+Codex sessions do not run Claude hooks, so they never produce this frame and never show the card.
+

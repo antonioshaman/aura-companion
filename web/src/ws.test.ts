@@ -2162,6 +2162,52 @@ describe("handleMessage: system_event", () => {
 });
 
 // ===========================================================================
+// handleMessage: guard_denied / guard_denial_resolved (guards pack, Claude-only)
+// ===========================================================================
+describe("handleMessage: guard_denied", () => {
+  const denial = {
+    sessionId: "s1",
+    toolUseId: "toolu_g1",
+    toolName: "Bash",
+    rule: "service-restart",
+    rules: ["service-restart"],
+    level: "ask",
+    reason: "[guards:service-restart] restart on host 'x'",
+    command: "systemctl restart api",
+    deniedAt: 1000,
+    status: "pending",
+  };
+
+  it("appends one guard card (deduped by toolUseId) and applies the live resolution", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "guard_denied", denial, timestamp: 1500 });
+    fireMessage({ type: "guard_denied", denial, timestamp: 1500 }); // replayed duplicate
+
+    let msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ role: "system", id: "guard-denial-toolu_g1", timestamp: 1500 });
+    expect(msgs[0].guardDenial?.command).toBe("systemctl restart api");
+
+    fireMessage({ type: "guard_denial_resolved", toolUseId: "toolu_g1", status: "allowed", resolvedAt: 2000 });
+    msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs[0].guardDenial).toMatchObject({ status: "allowed", resolvedAt: 2000 });
+  });
+
+  it("restores the card with its resolved status from message_history (reload)", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "message_history",
+      messages: [{ type: "guard_denied", denial: { ...denial, status: "dismissed", resolvedAt: 3000 }, timestamp: 1500 }],
+    });
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].guardDenial?.status).toBe("dismissed");
+  });
+});
+
+// ===========================================================================
 // handleMessage: cli_disconnected / cli_connected
 // ===========================================================================
 describe("handleMessage: cli_disconnected/connected", () => {
