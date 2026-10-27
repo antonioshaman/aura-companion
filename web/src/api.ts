@@ -1,5 +1,5 @@
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
-import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap, BrowserCouncilBudget } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -1086,7 +1086,17 @@ export const api = {
       autoProceedRestoreGaps?: AutoProceedRestoreGap[];
       /** Observer rigor: checkpoints without a (verified) review. */
       checkpointCoverage?: BrowserCheckpointCoverageGap[];
+      /** Budget guard: token spend + whether automatic activity is paused. */
+      budget?: BrowserCouncilBudget;
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
+
+  // Council budget guard — resume a pair paused by its token budget
+  // (optionally with a pair-specific limit; 0 = no guard for this pair).
+  continueGroupBudget: (groupId: string, opts: { limitTokens?: number } = {}) =>
+    post<{ budget: BrowserCouncilBudget; wasExceeded: boolean }>(
+      `/groups/${encodeURIComponent(groupId)}/budget/continue`,
+      opts,
+    ),
 
   // Council Mode (meta-diet B2b) — persist a human dismissal of an observer
   // STOP so a re-raised copy of the claim no longer raises the blocker banner.

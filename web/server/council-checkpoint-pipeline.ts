@@ -124,6 +124,9 @@ export interface CouncilWatcherEntry {
  *     - `observer_busy` — observer turn-state is in-flight (queue in Task 4)
  *     - `build_error` — `buildObserverWakePayload` threw on input validation
  *     - `api_limit_reached` — observer previously reported a 429/credit limit
+ *     - `budget_exceeded` — the pair crossed its token budget
+ *       (`council-budget.ts`); the checkpoint is queued (newest-wins) and
+ *       drained when a human continues the pair
  * `failed` — `adapter.cliSocket.send` threw synchronously; per Subprocess
  *   Council Rec 6, do NOT mark the half degraded — the natural socket-close
  *   handler will fire `session:exited` and the reconnect path takes over.
@@ -143,7 +146,8 @@ export type WakeDispatchOutcome =
       | "already_woken"
       | "already_reviewed"
       | "wake_in_flight"
-      | "probe_in_flight" }
+      | "probe_in_flight"
+      | "budget_exceeded" }
   | { kind: "failed"; error: string };
 
 /**
@@ -314,6 +318,12 @@ export interface CouncilCheckpointPipelineDeps {
    * probe's prose never lands in this wake's reply capture.
    */
   isObserverProbeInFlight?: (observerSessionId: string) => boolean;
+  /**
+   * Council budget guard (`council-budget.ts`): the pair crossed its token
+   * budget, so automatic wakes are paused. The checkpoint waits in the
+   * pending slot until a human continues the pair. Omitted → never paused.
+   */
+  isBudgetExceeded?: (sessionGroupId: string) => boolean;
   /**
    * W15 multi-model review: a live checkpoint was accepted (after the
    * observer's wake dispatch). The orchestrator hands it to the second-opinion
@@ -664,6 +674,27 @@ export class CouncilCheckpointPipeline {
         });
         return outcome;
       }
+    }
+
+    // Budget guard: automatic activity is paused for this pair. Queue the
+    // checkpoint (newest-wins) so Continue can drain it — never dropped.
+    // After the lifecycle gates on purpose: a degraded/reconnecting pair
+    // already queues, and an archived one must still drop.
+    if (this.deps.isBudgetExceeded?.(sessionGroupId)) {
+      this.enqueuePendingCheckpoint(entry, sessionGroupId, observerSessionId, payload);
+      const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "budget_exceeded" };
+      log.info("session-orchestrator", "observer wake paused: council budget exceeded", {
+        event: "group.observer_wake_skipped",
+        sessionGroupId,
+        sessionId: observerSessionId,
+        observerSessionId,
+        role: "observer",
+        checkpointId: payload.checkpoint_id,
+        sequence: payload.sequence,
+        reason: outcome.reason,
+        queued: true,
+      });
+      return outcome;
     }
 
     if (this.deps.isObserverProbeInFlight?.(observerSessionId)) {

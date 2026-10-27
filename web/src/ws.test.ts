@@ -3598,3 +3598,38 @@ describe("group_created findings bootstrap → auto-proceed restore gaps", () =>
     expect(mockFetchGroupFindings).toHaveBeenCalledWith("grp_gap");
   });
 });
+
+// ===========================================================================
+// Council budget guard — live `group_budget` frames + findings bootstrap
+// ===========================================================================
+// The server pauses a pair's automatic activity when it crosses its token
+// budget and pushes a snapshot to both halves' browsers; a reloaded tab learns
+// the same from the findings bootstrap. Both must land in `councilBudgets`.
+describe("group_budget frames and bootstrap", () => {
+  const budget = (exceeded: boolean) => ({
+    sessionGroupId: "grp_bud", limitTokens: 100, limitSource: "env" as const, spentTokens: exceeded ? 120 : 0, exceeded,
+    byRole: {
+      orchestrator: { inputTokens: 0, outputTokens: 120, cacheCreationTokens: 0, cacheReadTokens: 0, turns: 1 },
+      observer: { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, turns: 0 },
+    },
+  });
+
+  it("stores exceeded and continued snapshots from live frames", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "group_budget", sessionGroupId: "grp_bud", transition: "exceeded", budget: budget(true) });
+    expect(useStore.getState().councilBudgets.get("grp_bud")?.exceeded).toBe(true);
+    fireMessage({ type: "group_budget", sessionGroupId: "grp_bud", transition: "continued", budget: budget(false) });
+    expect(useStore.getState().councilBudgets.get("grp_bud")?.exceeded).toBe(false);
+  });
+
+  it("stores the budget from the findings bootstrap", async () => {
+    mockFetchGroupFindings.mockResolvedValue({
+      sessionGroupId: "grp_bud", findings: [], downgrades: [], reviewCount: 0, budget: budget(true),
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "group_created", sessionGroupId: "grp_bud", primarySessionId: "s1", observerSessionId: "s2", pairing: "claude+codex" });
+    await vi.waitFor(() => {
+      expect(useStore.getState().councilBudgets.get("grp_bud")?.exceeded).toBe(true);
+    });
+  });
+});

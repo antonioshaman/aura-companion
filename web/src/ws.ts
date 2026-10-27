@@ -1812,6 +1812,8 @@ function handleParsedMessage(
           // FIX-AP-4: an incomplete hold restore may have no parseable review
           // at all, so the pause is reported before the reviewCount check.
           store.setAutoProceedRestoreGaps(res.sessionGroupId, res.autoProceedRestoreGaps ?? []);
+          // Budget guard: a reloaded tab learns whether the pair is paused.
+          if (res.budget) store.setCouncilBudget(res.budget);
           // Observer rigor: "без ревью" / "не проверено" rows from disk.
           if (Array.isArray(res.checkpointCoverage)) {
             store.setCheckpointCoverage(res.sessionGroupId, res.checkpointCoverage);
@@ -1915,6 +1917,14 @@ function handleParsedMessage(
           ? { notCountedReason: data.notCountedReason }
           : {}),
       });
+      break;
+    }
+
+    case "group_budget": {
+      // Council budget guard — server-authoritative snapshot. `exceeded`
+      // pauses automatic activity (the ObserverPanel says why and offers
+      // Continue); `continued` clears it.
+      store.setCouncilBudget(data.budget);
       break;
     }
 

@@ -174,6 +174,7 @@ import { hasContainerClaudeAuth } from "./claude-container-auth.js";
 import { hasContainerCodexAuth } from "./codex-container-auth.js";
 import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
 import { WsBridge } from "./ws-bridge.js";
 import { CodexAdapter, type ICodexTransport } from "./codex-adapter.js";
 import { metricsCollector } from "./metrics-collector.js";
@@ -7266,6 +7267,8 @@ describe("SessionOrchestrator", () => {
           reviewCount: 0,
           // Observer rigor: no checkpoints on disk → no coverage gaps.
           checkpointCoverage: [],
+          // Budget guard: a known pair always carries its (here untouched) budget.
+          budget: expect.objectContaining({ sessionGroupId: "grp_no_reviews", spentTokens: 0, exceeded: false }),
         });
       } finally {
         rmSync(workspace, { recursive: true, force: true });
@@ -7655,6 +7658,121 @@ describe("SessionOrchestrator", () => {
       await callSilent("s-reset"); // strike 1 again, NOT 2 → no rotation
       expect(strikeCount("s-reset")).toBe(1);
       expect(deps.launcher.setModel).not.toHaveBeenCalled();
+    });
+  });
+
+  // Council budget guard end-to-end through the orchestrator's own listeners:
+  // both halves' `result` frames (Claude shape with cache tokens; Codex shape
+  // normalised by codex-turn-usage.ts — no cache-creation) are accounted per
+  // pair; crossing the budget logs EC-9, tells both halves' browsers, pauses
+  // observer wakes (queued, not dropped) and the second opinion. Continue
+  // resumes: the queued wake is delivered. Nothing is killed.
+  describe("council budget guard", () => {
+    const GID = "grp_0123456789abcdef0123456789abcdef";
+    const prevEnv = process.env.COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP;
+    afterEach(() => {
+      if (prevEnv === undefined) delete process.env.COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP;
+      else process.env.COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP = prevEnv;
+    });
+
+    function setup(limit: string) {
+      const { mkdtempSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      process.env.COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP = limit;
+      const orch = new SessionOrchestrator(deps);
+      const cwd = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-budget-orch-")));
+      orch.initialize();
+      const internals = orch as unknown as {
+        councilWatchers: Map<string, unknown>;
+        councilGroupMeta: Map<string, unknown>;
+        councilGroupBySessionId: Map<string, string>;
+        coordinator: unknown;
+        dispatchObserverWake: (g: string, p: unknown) => { kind: string; reason?: string };
+        requestSecondReview: (g: string, p: unknown, ctx: unknown) => void;
+        secondReviewer: { onCheckpoint: (...a: unknown[]) => void };
+      };
+      internals.councilWatchers.set(GID, {
+        cwd, abort: new AbortController(), lastCheckpoint: null, previousCheckpoint: null,
+        pendingCheckpoint: null, supersededCheckpointIds: [], pendingReviewDeadline: null,
+      });
+      internals.councilGroupMeta.set(GID, {
+        primarySessionId: "sess_orch", observerSessionId: "sess_obs", pairing: "claude+codex",
+        createdAt: Date.now(), lastCheckpointReceivedAt: null,
+      });
+      internals.councilGroupBySessionId.set("sess_orch", GID);
+      internals.councilGroupBySessionId.set("sess_obs", GID);
+      internals.coordinator = {
+        get: vi.fn(() => ({ sessionGroupId: GID, status: "active", primary: { sessionId: "sess_orch" }, observer: { sessionId: "sess_obs" } })),
+        applyEvent: vi.fn(),
+        listAll: vi.fn(() => []),
+      };
+      return { orch, internals, cwd };
+    }
+    const result = (sessionId: string, usage: Record<string, number>, extra: Record<string, unknown> = {}) =>
+      companionBus.emit("message:result", {
+        sessionId,
+        message: { type: "result", data: { type: "result", subtype: "success", is_error: false, usage, total_cost_usd: 0, num_turns: 1, ...extra } } as any,
+      });
+    const payload = (seq: number) => ({
+      schema_version: 1, checkpoint_id: `chk_${seq}`, phase: "council-implement", sequence: seq,
+      session_group_id: GID, emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+    });
+
+    it("accounts both halves, pauses automatic activity on crossing, resumes on Continue", () => {
+      const { orch, internals, cwd } = setup("1000");
+      const warn = vi.spyOn(log, "warn");
+      try {
+        // Claude orchestrator turn: cache reads are huge but not budgeted.
+        result("sess_orch", { input_tokens: 5, output_tokens: 300, cache_creation_input_tokens: 200, cache_read_input_tokens: 5_000_000 });
+        // A Codex collab-subagent completion is not a main turn → ignored.
+        result("sess_obs", { input_tokens: 900, output_tokens: 0 }, { subagent_turn: true });
+        expect(orch.getGroupBudget(GID)).toMatchObject({ ok: true, budget: { spentTokens: 505, exceeded: false } });
+        expect(deps.wsBridge.broadcastToGroup).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "group_budget" }));
+
+        // Codex observer turn (uncached input + output) crosses the budget.
+        result("sess_obs", { input_tokens: 400, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 80_000 });
+        const exceededLog = warn.mock.calls.find((c) => (c[2] as { event?: string } | undefined)?.event === "council.budget.exceeded");
+        expect(exceededLog?.[2]).toMatchObject({ sessionGroupId: GID, sessionId: "sess_obs", role: "observer", spentTokens: 1105, limitTokens: 1000 });
+        expect(deps.wsBridge.broadcastToGroup).toHaveBeenCalledWith(
+          ["sess_orch", "sess_obs"],
+          expect.objectContaining({ type: "group_budget", sessionGroupId: GID, transition: "exceeded", budget: expect.objectContaining({ exceeded: true }) }),
+        );
+        // Nothing is killed.
+        expect(deps.launcher.kill).not.toHaveBeenCalled();
+
+        // Observer wake paused and queued; second opinion skipped.
+        expect(internals.dispatchObserverWake(GID, payload(1))).toEqual({ kind: "skipped", reason: "budget_exceeded" });
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+        const second = vi.spyOn(internals.secondReviewer, "onCheckpoint").mockImplementation(() => {});
+        internals.requestSecondReview(GID, payload(1), { cwd, previous: null });
+        expect(second).not.toHaveBeenCalled();
+
+        // The REST bootstrap view carries the paused state for reloaded tabs.
+        expect(orch.getGroupBudget("grp_ffffffffffffffffffffffffffffffff")).toEqual({ ok: false, reason: "unknown_group" });
+
+        // Continue: window restarts, browsers told, queued wake delivered.
+        const cont = orch.continueGroupBudget(GID);
+        expect(cont).toMatchObject({ ok: true, wasExceeded: true, budget: { spentTokens: 0, exceeded: false } });
+        expect(deps.wsBridge.broadcastToGroup).toHaveBeenCalledWith(
+          ["sess_orch", "sess_obs"],
+          expect.objectContaining({ type: "group_budget", transition: "continued" }),
+        );
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+        expect(orch.continueGroupBudget(GID, { limitTokens: -5 })).toEqual({ ok: false, reason: "invalid_input" });
+      } finally {
+        require("node:fs").rmSync(cwd, { recursive: true, force: true });
+      }
+    });
+
+    it("limit 0 disables the guard (accounting continues)", () => {
+      const { orch, cwd } = setup("0");
+      try {
+        result("sess_obs", { input_tokens: 1e9, output_tokens: 1e9 });
+        expect(orch.getGroupBudget(GID)).toMatchObject({ ok: true, budget: { exceeded: false, limitTokens: 0 } });
+      } finally {
+        require("node:fs").rmSync(cwd, { recursive: true, force: true });
+      }
     });
   });
 });

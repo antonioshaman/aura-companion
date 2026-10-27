@@ -103,6 +103,11 @@ export interface CouncilAutoProceedControllerDeps {
    * Omitted → nothing to restore (tests / non-council wiring).
    */
   loadGroupStopHoldView?: (sessionGroupId: string) => Promise<GroupStopHoldView | null>;
+  /**
+   * Council budget guard (`council-budget.ts`): the pair crossed its token
+   * budget — no auto-proceed until a human continues it. Omitted → never.
+   */
+  isBudgetExceeded?: (sessionGroupId: string) => boolean;
 }
 
 /** What the hold restore reads from disk (FIX-AP-2). */
@@ -159,6 +164,9 @@ export class CouncilAutoProceedController {
   private readonly applyGroupEvent?: (sessionGroupId: string, event: GroupEvent) => void;
   private readonly iterationCeiling: number;
   private readonly loadGroupStopHoldView?: (sessionGroupId: string) => Promise<GroupStopHoldView | null>;
+  private readonly isBudgetExceeded?: (sessionGroupId: string) => boolean;
+  /** Orchestrators whose budget refusal was already logged this episode. */
+  private readonly budgetLogged = new Set<string>();
   /**
    * Unresolved blocking STOPs per group (FIX-AP-1). The adapter's own
    * `blockedByStop` axis is reset on every turn edge, so it cannot hold this.
@@ -181,6 +189,17 @@ export class CouncilAutoProceedController {
           sessionGroupId,
           sessionId,
           role: "orchestrator",
+        });
+        return;
+      }
+      // Budget guard, defence in depth: noteOrchestratorIdle already refuses.
+      if (sessionGroupId && this.isBudgetExceeded?.(sessionGroupId)) {
+        log.info("auto-proceed", "arm refused: council budget exceeded", {
+          event: "auto-proceed.arm-refused",
+          sessionGroupId,
+          sessionId,
+          role: "orchestrator",
+          reason: "budget_exceeded",
         });
         return;
       }
@@ -226,6 +245,7 @@ export class CouncilAutoProceedController {
       AUTO_PROCEED_MAX_ITERATIONS_CEILING,
     );
     this.loadGroupStopHoldView = deps.loadGroupStopHoldView;
+    this.isBudgetExceeded = deps.isBudgetExceeded;
   }
 
   getManager(): IdleTimerManager {
@@ -297,6 +317,21 @@ export class CouncilAutoProceedController {
     if (blockedByStop) return;
     const sessionGroupId = this.getGroupIdForSession?.(sessionId);
     if (!sessionGroupId) return;
+    // Budget guard: the pair spent its token budget; nothing arms until a
+    // human continues it (logged once per episode, EC-9).
+    if (this.isBudgetExceeded?.(sessionGroupId)) {
+      if (!this.budgetLogged.has(sessionId)) {
+        this.budgetLogged.add(sessionId);
+        log.info("auto-proceed", "not arming: council budget exceeded", {
+          event: "auto-proceed.budget-exceeded",
+          sessionGroupId,
+          sessionId,
+          role: "orchestrator",
+        });
+      }
+      return;
+    }
+    this.budgetLogged.delete(sessionId);
     const hold = this.holdFor(sessionGroupId);
     if (!this.ensureRestored(sessionGroupId, sessionId)) {
       // Fail closed until the persisted STOPs are known.
@@ -404,6 +439,36 @@ export class CouncilAutoProceedController {
       .filter((f) => f.id === input.findingId || matchDispute([record], f.claim, f.evidence_path) !== null)
       .map((f) => f.id);
     this.release(sessionGroupId, primary, ids, "disputed");
+  }
+
+  /**
+   * Council budget guard: the pair just crossed its token budget. Cancel a
+   * pending idle timer so no synthetic turn fires; an in-flight turn (user-
+   * driven or synthetic) is never interrupted. Re-arming is refused by
+   * {@link noteOrchestratorIdle} while the budget stays exceeded.
+   */
+  noteBudgetExceeded(sessionGroupId: string): void {
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    if (!primary || !this.getAutoProceedConfig?.(primary)) return;
+    this.manager.cancel(primary);
+    log.info("auto-proceed", "timer cancelled: council budget exceeded", {
+      event: "auto-proceed.budget-cancelled",
+      sessionGroupId,
+      sessionId: primary,
+      role: "orchestrator",
+    });
+  }
+
+  /**
+   * Council budget guard: a human continued the pair. Treat it as an idle
+   * edge so auto-proceed resumes without waiting for another turn. Safe while
+   * the orchestrator is mid-turn: the manager refuses to arm an in-flight
+   * session, and the STOP hold / iteration cap still apply.
+   */
+  noteBudgetContinued(sessionGroupId: string): void {
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    if (!primary || !this.getAutoProceedConfig?.(primary)) return;
+    this.noteOrchestratorIdle(primary, false);
   }
 
   /**

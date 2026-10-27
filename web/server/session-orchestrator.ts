@@ -87,10 +87,24 @@ import type { BrowserGroupRecord } from "./session-types.js";
 import { hasNonEmptyEnvVar, hasAnyClaudeAuthEnv } from "./provider-auth-env.js";
 import { getServerLayerFlags, type LayerFlags } from "./layer-flags.js";
 import { resolveAutoProceedIterationCeiling } from "./auto-proceed-types.js";
+import {
+  CouncilBudgetTracker,
+  resolveCouncilBudgetLimit,
+  type BudgetExceededEvent,
+  type ContinueBudgetResult,
+} from "./council-budget.js";
+import type { BrowserCouncilBudget } from "./session-types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 /** AP-WIRE: resolve `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING` at
  *  construction; a bad value keeps the hard cap and is warned about. */
+/** Council budget guard: resolve `COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP` once. */
+function resolveCouncilBudgetLimitOnce(): number {
+  const { limit, warning } = resolveCouncilBudgetLimit(process.env);
+  if (warning) log.warn("council-budget", warning, { event: "council.budget.limit_invalid" });
+  return limit;
+}
+
 function resolveIterationCeilingOnce(): number {
   const { ceiling, warning } = resolveAutoProceedIterationCeiling(process.env);
   if (warning) log.warn("auto-proceed", warning, { event: "auto-proceed.ceiling-invalid" });
@@ -363,6 +377,24 @@ export class SessionOrchestrator {
   });
   /** P3/CONV-HONEST: host-observed observer reads per dispatched wake. */
   private observerReadLedger = new ObserverReadLedger();
+  /**
+   * Council budget guard (`council-budget.ts`): per-pair token accounting
+   * from both halves' `result` frames; once over budget, automatic activity
+   * (observer wakes, second opinion, auto-proceed) pauses until a human
+   * continues the pair.
+   */
+  private councilBudget = new CouncilBudgetTracker({
+    defaultLimit: resolveCouncilBudgetLimitOnce(),
+    cwdFor: (gid) => this.councilWatchers.get(gid)?.cwd,
+    onPersistError: (sessionGroupId, op, reason) => {
+      log.warn("council-budget", `council budget ${op} failed`, {
+        event: "council.budget.persist_failed",
+        sessionGroupId,
+        op,
+        reason,
+      });
+    },
+  });
   /** P4/C1a: checkpoint → wake → review pipeline; reads the group maps above. */
   private checkpointPipeline = new CouncilCheckpointPipeline({
     watchers: this.councilWatchers,
@@ -376,6 +408,7 @@ export class SessionOrchestrator {
     onObserverAdapterMissing: (gid, payload) => this.observerScheduler.requestCatchupWake(gid, payload),
     resolveClaimLanguage: (gid, payload, cwd) => this.resolveObserverClaimLanguage(gid, payload, cwd),
     isObserverProbeInFlight: (observerSessionId) => this.observerProbes.inFlight(observerSessionId),
+    isBudgetExceeded: (gid) => this.councilBudget.isExceeded(gid),
     onObserverWakeUnanswered: (gid, observerSessionId, checkpointId) =>
       this.observerWakeRecovery.onWakeUnanswered(gid, observerSessionId, checkpointId),
     onCheckpointAccepted: (gid, payload, ctx) => this.requestSecondReview(gid, payload, ctx),
@@ -508,6 +541,7 @@ export class SessionOrchestrator {
       // from the same view the browser bootstraps its blocker banner from,
       // with the verdicts frozen at review time (no re-grounding).
       loadGroupStopHoldView: async (sessionGroupId) => this.councilLifecycle.getGroupStopHoldView(sessionGroupId),
+      isBudgetExceeded: (sessionGroupId) => this.councilBudget.isExceeded(sessionGroupId),
     });
     this.recovery = new SessionRecovery({
       launcher: this.launcher,
@@ -904,6 +938,24 @@ export class SessionOrchestrator {
     companionBus.on("group:exited", ({ sessionGroupId }) => {
       this.secondReviewer.forgetGroup(sessionGroupId);
       this.convergenceTracker?.forgetGroup(sessionGroupId);
+      // Budget guard: in-memory copy only; the file stays for an unarchive.
+      this.councilBudget.forget(sessionGroupId);
+    });
+
+    // Council budget guard: account every council half's turn usage (Claude
+    // `result.usage`; Codex usage normalised to the same shape by
+    // codex-turn-usage.ts). A Codex collab-subagent completion is not a main
+    // turn and carries no usage of its own.
+    companionBus.on("message:result", ({ sessionId, message }) => {
+      try {
+        this.recordCouncilTurnUsage(sessionId, message);
+      } catch (err) {
+        log.warn("council-budget", "council budget accounting failed", {
+          event: "council.budget.accounting_error",
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     });
 
     // Council Mode group reconciliation. Pairs created in a previous server
@@ -1215,6 +1267,17 @@ export class SessionOrchestrator {
   ): void {
     const meta = this.councilGroupMeta.get(sessionGroupId);
     if (!meta) return;
+    // Budget guard: the second opinion is automatic spend too. Skipped, not
+    // queued — Continue re-wakes the observer for the newest checkpoint.
+    if (this.councilBudget.isExceeded(sessionGroupId)) {
+      log.info("second-reviewer", "second review skipped: council budget exceeded", {
+        event: "council.second_review.skipped",
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        reason: "budget_exceeded",
+      });
+      return;
+    }
     const observerBackend = meta.pairing.split("+")[1] === "codex" ? "codex" : "claude";
     let claimLanguage: ClaimLanguage | null = null;
     try {
@@ -1228,6 +1291,92 @@ export class SessionOrchestrator {
       previous: ctx.previous,
       claimLanguage,
     });
+  }
+
+  /**
+   * Council budget guard: fold one `result` frame into the pair's budget.
+   * Non-council sessions and Codex subagent completions are ignored.
+   */
+  private recordCouncilTurnUsage(sessionId: string, message: unknown): void {
+    const sessionGroupId = this.councilGroupBySessionId.get(sessionId);
+    if (!sessionGroupId) return;
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return;
+    const role = meta.observerSessionId === sessionId ? "observer" : meta.primarySessionId === sessionId ? "orchestrator" : null;
+    if (!role) return;
+    const msg = message as { type?: string; data?: { usage?: Record<string, number>; subagent_turn?: boolean } };
+    if (msg?.type !== "result" || !msg.data || msg.data.subagent_turn) return;
+    const crossed = this.councilBudget.recordTurn(sessionGroupId, sessionId, role, msg.data.usage);
+    if (crossed) this.onCouncilBudgetExceeded(crossed);
+  }
+
+  /**
+   * The pair just crossed its budget: stop automatic activity (the gates read
+   * `isExceeded`; a pending auto-proceed timer is cancelled here), log EC-9
+   * and tell both halves' browsers why the pair paused. Nothing is killed.
+   */
+  private onCouncilBudgetExceeded(ev: BudgetExceededEvent): void {
+    log.warn("council-budget", "council budget exceeded — automatic activity paused", {
+      event: "council.budget.exceeded",
+      sessionGroupId: ev.sessionGroupId,
+      sessionId: ev.sessionId,
+      role: ev.role,
+      spentTokens: ev.budget.spentTokens,
+      limitTokens: ev.budget.limitTokens,
+      limitSource: ev.budget.limitSource,
+      orchestratorTurns: ev.budget.byRole.orchestrator.turns,
+      observerTurns: ev.budget.byRole.observer.turns,
+    });
+    this.autoProceed.noteBudgetExceeded(ev.sessionGroupId);
+    this.broadcastCouncilBudget(ev.sessionGroupId, "exceeded", ev.budget);
+  }
+
+  private broadcastCouncilBudget(sessionGroupId: string, transition: "exceeded" | "continued", budget: BrowserCouncilBudget): void {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return;
+    this.wsBridge.broadcastToGroup([meta.primarySessionId, meta.observerSessionId], {
+      type: "group_budget",
+      sessionGroupId,
+      transition,
+      budget,
+    });
+  }
+
+  /** Council budget guard: the pair's current budget snapshot (REST). */
+  getGroupBudget(sessionGroupId: string): { ok: true; budget: BrowserCouncilBudget } | { ok: false; reason: "unknown_group" } {
+    if (!this.councilGroupMeta.has(sessionGroupId) || !this.councilWatchers.has(sessionGroupId)) {
+      return { ok: false, reason: "unknown_group" };
+    }
+    return { ok: true, budget: this.councilBudget.snapshot(sessionGroupId) };
+  }
+
+  /**
+   * Council budget guard: a human continues the pair. Restarts the spend
+   * window (optionally with a pair-specific limit; 0 = no guard), then
+   * resumes automatic activity: the newest checkpoint queued while paused is
+   * delivered to the observer and auto-proceed re-arms if the orchestrator
+   * is idle (the manager refuses an in-flight session).
+   */
+  continueGroupBudget(sessionGroupId: string, opts: { limitTokens?: number } = {}): ContinueBudgetResult {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta || !this.councilWatchers.has(sessionGroupId)) return { ok: false, reason: "unknown_group" };
+    const result = this.councilBudget.continue(sessionGroupId, opts);
+    if (!result.ok) return result;
+    log.info("council-budget", "council budget continued by user", {
+      event: "council.budget.continued",
+      sessionGroupId,
+      sessionId: meta.primarySessionId,
+      role: "orchestrator",
+      wasExceeded: result.wasExceeded,
+      limitTokens: result.budget.limitTokens,
+      limitSource: result.budget.limitSource,
+    });
+    this.broadcastCouncilBudget(sessionGroupId, "continued", result.budget);
+    if (result.wasExceeded) {
+      this.drainPendingObserverWake(sessionGroupId);
+      this.autoProceed.noteBudgetContinued(sessionGroupId);
+    }
+    return result;
   }
 
   /** W15: the pair's second-opinion setting (own file, else the global default). */
@@ -2264,8 +2413,14 @@ export class SessionOrchestrator {
   }
 
   /** REST bootstrap of a group's grounded observer findings (ObserverPanel). */
-  getGroupReviewsForBootstrap(sessionGroupId: string): ReturnType<CouncilLifecycle["getGroupReviewsForBootstrap"]> {
-    return this.councilLifecycle.getGroupReviewsForBootstrap(sessionGroupId);
+  async getGroupReviewsForBootstrap(
+    sessionGroupId: string,
+  ): Promise<(NonNullable<Awaited<ReturnType<CouncilLifecycle["getGroupReviewsForBootstrap"]>>> & { budget?: BrowserCouncilBudget }) | null> {
+    const result = await this.councilLifecycle.getGroupReviewsForBootstrap(sessionGroupId);
+    if (!result) return null;
+    // Budget guard: a reloaded tab learns whether the pair is paused.
+    const budget = this.getGroupBudget(sessionGroupId);
+    return budget.ok ? { ...result, budget: budget.budget } : result;
   }
 
   /** B2b: persist a human dismissal of an observer STOP as a group dispute. */

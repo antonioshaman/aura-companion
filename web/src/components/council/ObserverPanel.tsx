@@ -37,6 +37,7 @@ import {
 import { FindingsLog, formatClockTime, formatRelativeTime } from "./FindingsLog.js";
 import { DegradedBanner } from "./DegradedBanner.js";
 import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
+import { CouncilBudgetNotice } from "./CouncilBudgetNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
 import { CheckpointCoverageList } from "./CheckpointCoverageList.js";
 import { GroupSecondReviewerControl } from "./GroupSecondReviewerControl.js";
@@ -337,6 +338,10 @@ export function ObserverPanel({
   const dismissFirstRunHint = useStore((s) => s.dismissFirstRunHint);
   const restoreGaps = useStore((s) => (groupId ? s.autoProceedRestoreGaps.get(groupId) : undefined)) ?? [];
   const ignoreRestoreGap = useStore((s) => s.ignoreRestoreGap);
+  const budget = useStore((s) => (groupId ? s.councilBudgets.get(groupId) : undefined));
+  const budgetContinuing = useStore((s) => (groupId ? s.councilBudgetContinuing.has(groupId) : false));
+  const budgetError = useStore((s) => (groupId ? s.councilBudgetErrors.get(groupId) : undefined));
+  const continueCouncilBudget = useStore((s) => s.continueCouncilBudget);
 
   const handleExpand = useCallback(() => setOpen(sessionId, true), [sessionId, setOpen]);
   const handleCollapse = useCallback(() => setOpen(sessionId, false), [sessionId, setOpen]);
@@ -481,6 +486,14 @@ export function ObserverPanel({
       <AutoProceedRestoreNotice
         gaps={restoreGaps}
         onIgnore={(gap) => ignoreRestoreGap(group.sessionGroupId, gap)}
+      />
+
+      {/* Budget guard: automatic activity paused by the pair's token budget. */}
+      <CouncilBudgetNotice
+        budget={budget}
+        continuing={budgetContinuing}
+        error={budgetError}
+        onContinue={() => void continueCouncilBudget(group.sessionGroupId)}
       />
 
       {/* First-run microcopy (dismissable, per-user) */}

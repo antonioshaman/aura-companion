@@ -81,6 +81,8 @@ function makeHarness(opts: {
   loadGroupStopHoldView?: (gid: string) => Promise<GroupStopHoldView | null>;
   /** FIX-AP-2: drop the group's workspace (watcher) even when restoring. */
   noWorkspace?: boolean;
+  /** Council budget guard: the pair's budget state (read at call time). */
+  isBudgetExceeded?: (gid: string) => boolean;
 } = {}): Harness {
   const clock = new FakeClock(0);
   const sent: string[] = [];
@@ -150,6 +152,7 @@ function makeHarness(opts: {
       coordinator.applyEvent(gid, event);
     },
     iterationCeiling: opts.iterationCeiling,
+    isBudgetExceeded: opts.isBudgetExceeded,
   });
   coordinator = new SessionGroupCoordinator({
     spawn: async () => {
@@ -775,5 +778,61 @@ describe("resolveAutoProceedIterationCeiling", () => {
       expect(r.ceiling).toBe(AUTO_PROCEED_MAX_ITERATIONS_CEILING);
       expect(r.warning).toBeDefined();
     }
+  });
+});
+
+describe("auto-proceed × council budget guard", () => {
+  // Budget guard: a pair over its token budget must not get synthetic
+  // auto-proceed turns — the idle edge arms nothing (one EC-9 line).
+  it("does not arm while the pair's budget is exceeded", () => {
+    const info = vi.spyOn(log, "info");
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, isBudgetExceeded: () => true });
+    h.turnDone();
+    h.turnDone();
+    h.clock.advance(IDLE_MS * 2);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    expect(h.sent).toHaveLength(0);
+    const lines = info.mock.calls.filter((c) => (c[2] as { event?: string } | undefined)?.event === "auto-proceed.budget-exceeded");
+    // Logged once per episode, with the EC-9 fields.
+    expect(lines).toHaveLength(1);
+    expect(lines[0][2]).toMatchObject({ sessionGroupId: GROUP, sessionId: ORCH, role: "orchestrator" });
+  });
+
+  // The turn that crosses the budget may already have armed the timer (the
+  // turn-done edge can precede the result accounting). noteBudgetExceeded
+  // cancels it so no synthetic turn fires afterwards.
+  it("cancels an already-armed timer when the budget is crossed", () => {
+    let exceeded = false;
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, isBudgetExceeded: () => exceeded });
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+    exceeded = true;
+    h.controller.noteBudgetExceeded(GROUP);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    h.clock.advance(IDLE_MS * 2);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  // Continue resumes auto-proceed at once for an idle orchestrator (no need
+  // to wait for another turn), and the timer then fires normally.
+  it("re-arms on Continue when the orchestrator is idle", () => {
+    let exceeded = true;
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, isBudgetExceeded: () => exceeded });
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    exceeded = false;
+    h.controller.noteBudgetContinued(GROUP);
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+    h.clock.advance(IDLE_MS);
+    expect(h.sent).toHaveLength(1);
+  });
+
+  // Continue while the orchestrator is mid-turn (user-driven) arms nothing:
+  // the turn is never interrupted; its own turn-done edge re-arms later.
+  it("does not arm on Continue while the orchestrator is in-flight", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, isBudgetExceeded: () => false });
+    h.turnState = { kind: "in-flight" };
+    h.controller.noteBudgetContinued(GROUP);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
   });
 });

@@ -33,6 +33,7 @@ import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
   AutoProceedRestoreNotice,
+  CouncilBudgetNotice,
   BlockerBanner,
   CheckpointCoverageList,
   ObserverProbeMessage,
@@ -830,6 +831,20 @@ const MOCK_LINEAR_COMMENTS: LinearComment[] = [
 ];
 
 // ─── Playground Component ───────────────────────────────────────────────────
+
+/** Council budget guard — an exceeded pair (mock for the Playground). */
+const PLAYGROUND_BUDGET_EXCEEDED = {
+  sessionGroupId: "grp_playground_budget",
+  limitTokens: 20_000_000,
+  limitSource: "env" as const,
+  spentTokens: 20_412_330,
+  exceeded: true,
+  exceededAt: Date.UTC(2026, 9, 27, 3, 14),
+  byRole: {
+    orchestrator: { inputTokens: 2_104, outputTokens: 1_902_331, cacheCreationTokens: 11_204_115, cacheReadTokens: 812_440_102, turns: 214 },
+    observer: { inputTokens: 1_880_420, outputTokens: 913_008, cacheCreationTokens: 4_510_352, cacheReadTokens: 201_330_884, turns: 187 },
+  },
+};
 
 export function Playground() {
   const [darkMode, setDarkMode] = useState(() =>
@@ -3360,6 +3375,23 @@ function CouncilModeSection() {
               { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" },
             ]}
             onIgnore={() => { /* noop in playground */ }}
+          />
+        </Card>
+
+        {/* Council budget guard — the pair crossed its token budget; automatic
+            observer wakes + auto-proceed are paused until Continue. */}
+        <Card label="CouncilBudgetNotice — pair paused by its token budget">
+          <CouncilBudgetNotice
+            budget={PLAYGROUND_BUDGET_EXCEEDED}
+            onContinue={() => { /* noop in playground */ }}
+          />
+        </Card>
+        <Card label="CouncilBudgetNotice — Continue in flight + failed attempt">
+          <CouncilBudgetNotice
+            budget={PLAYGROUND_BUDGET_EXCEEDED}
+            continuing={true}
+            error="Could not resume the pair. Try again."
+            onContinue={() => { /* noop in playground */ }}
           />
         </Card>
 

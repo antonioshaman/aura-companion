@@ -2,6 +2,8 @@
 // components are used together (App, Playground, HomePage wiring).
 export { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 export type { AutoProceedRestoreNoticeProps } from "./AutoProceedRestoreNotice.js";
+export { CouncilBudgetNotice, formatTokenCount } from "./CouncilBudgetNotice.js";
+export type { CouncilBudgetNoticeProps } from "./CouncilBudgetNotice.js";
 export { BlockerBanner } from "./BlockerBanner.js";
 export type { BlockerBannerProps } from "./BlockerBanner.js";
 export { CouncilToggle, isSupportedPairing, coerceCouncilPairing } from "./CouncilToggle.js";

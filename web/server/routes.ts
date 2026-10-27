@@ -1164,6 +1164,46 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — budget guard (council-budget.ts) ───────────────────────
+  //
+  // GET: the pair's token budget snapshot (spend since last continue, limit,
+  // lifetime per-role usage). POST continue { limitTokens? }: a human resumes
+  // a paused pair — restarts the spend window, optionally with a pair-specific
+  // limit (0 = no guard for this pair), and delivers the newest checkpoint
+  // queued while paused.
+  api.get("/groups/:groupId/budget", (c) => {
+    const groupId = c.req.param("groupId");
+    const result = orchestrator.getGroupBudget(groupId);
+    if (!result.ok) return respondError(c, 404, "not_found", { module: "council.budget", detail: { groupId } });
+    return c.json({ budget: result.budget });
+  });
+
+  api.post("/groups/:groupId/budget/continue", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => ({}))) as { limitTokens?: unknown } | null;
+    const limitTokens = body && typeof body === "object" ? body.limitTokens : undefined;
+    if (limitTokens !== undefined && limitTokens !== null && typeof limitTokens !== "number") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.budget",
+        detail: { reason: "limitTokens must be a non-negative integer when present" },
+      });
+    }
+    const result = orchestrator.continueGroupBudget(
+      groupId,
+      typeof limitTokens === "number" ? { limitTokens } : {},
+    );
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.budget", detail: { groupId } });
+      }
+      return respondError(c, 400, "bad_request", {
+        module: "council.budget",
+        detail: { reason: "limitTokens must be a non-negative integer ≤ 1e12" },
+      });
+    }
+    return c.json({ budget: result.budget, wasExceeded: result.wasExceeded });
+  });
+
   // ─── Council Mode — ignore a restore gap (meta-diet P4/FIX-AP-4) ─────────
   //
   // A review file the server cannot read or parse keeps the auto-proceed hold
