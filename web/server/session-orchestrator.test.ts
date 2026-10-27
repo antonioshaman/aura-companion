@@ -2444,11 +2444,14 @@ describe("SessionOrchestrator", () => {
       const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-boot-resume-")));
       vi.useFakeTimers();
       try {
+        // createdAt is recent: boot resume skips sessions inactive longer than
+        // COMPANION_BOOT_RESUME_MAX_AGE_HOURS (an epoch-1 createdAt is ~56 years old).
+        const bootNow = Date.now();
         const recs: Record<string, any> = {
           "orch-b": { sessionId: "orch-b", sessionGroupId: "grp_boot", sessionGroupRole: "orchestrator",
-            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "exited", cliSessionId: "c1" },
+            backendType: "claude", cwd: ws, archived: false, createdAt: bootNow - 2, state: "exited", cliSessionId: "c1" },
           "obs-b": { sessionId: "obs-b", sessionGroupId: "grp_boot", sessionGroupRole: "observer",
-            backendType: "codex", cwd: ws, archived: false, createdAt: 2, state: "exited", cliSessionId: "t1" },
+            backendType: "codex", cwd: ws, archived: false, createdAt: bootNow - 1, state: "exited", cliSessionId: "t1" },
         };
         deps.launcher.listSessions.mockReturnValue(Object.values(recs));
         deps.launcher.getSession.mockImplementation((id: string) => recs[id]);
