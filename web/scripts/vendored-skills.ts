@@ -7,36 +7,63 @@
 //   - the licence verdict (SPDX + copyright line, verified against the upstream
 //     LICENSE at that commit; the copy carries that LICENSE file),
 //   - a sha256 for every file — any added, removed or edited file goes red,
-//   - the outbound hosts its executable code names (network inventory), so an
-//     upstream bump that adds a new remote call goes red until a human re-reviews,
-//   - the human review state. The hash gate proves bytes; only a person can judge
-//     instructions, so a bump always resets the review to "pending".
+//   - two host inventories: `network` = hosts written literally in executable
+//     code, `instructionHosts` = hosts written in markdown the agent reads. Both are
+//     LITERAL-ONLY: a host built at run time (API response, template string) is
+//     invisible to them, which is why `runtimeCapabilities` records what a script
+//     can do (e.g. network-download) for Phase B to act on,
+//   - the human review: status, basis (ai-prereview | human-read), and the upstream
+//     commit + files digest the approval covers. An approval never outlives the
+//     bytes it approved: `check` fails when they differ, `lock` resets it to
+//     pending, and `pending` itself fails `check` (fail closed).
 //
-// `lock` regenerates hashes + network inventory from the tree (keeping the review
-// block); `check` verifies the tree against the lock. Pure core is tested.
+// `lock` regenerates hashes + inventories from the tree; `approve` records an
+// approval for the current bytes; `check` verifies the tree against the lock.
 
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { lstatSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 
-export const PACK_SKILLS_DIR = resolve(import.meta.dirname, "..", "..", "packs", "skills");
+import { COUNCIL_SKILLS_DIR } from "./capability-catalog.js";
+import { SHIPPABLE_CODE_LICENCES, SLUG_RE } from "./licences.js";
+
+/** The in-repo skills root (same dir as the council catalog's — one constant, EC-20). */
+export const PACK_SKILLS_DIR = COUNCIL_SKILLS_DIR;
 export const VENDOR_LOCK_FILE = join(PACK_SKILLS_DIR, "vendor-lock.json");
 
-/** Licences a vendored skill may carry. Anything else is excluded (AC2.4). */
-const SHIPPABLE_LICENCES = new Set(["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "Unlicense", "CC0-1.0"]);
 /** Files whose content counts as executable for the network inventory. */
 const CODE_EXT = /\.(mjs|cjs|js|ts|py|sh)$/;
 const HOST_RE = /\bhttps?:\/\/([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)/g;
 /** Placeholder / loopback hosts that are not outbound calls. */
 const NON_OUTBOUND = new Set(["127.0.0.1", "localhost"]);
+/** Directories readTree does not hash (generated caches); reported, never silent. */
+const SKIPPED_DIRS = new Set(["__pycache__", "node_modules"]);
+
+export interface HumanReview {
+  status: "pending" | "approved" | "rejected";
+  /** What the approval rests on: an AI pre-review the owner accepted, or a person's own read. */
+  basis?: "ai-prereview" | "human-read";
+  reviewer: string | null;
+  date: string | null;
+  notes: string;
+  /** The upstream commit and files digest this approval covers. */
+  reviewedCommit?: string;
+  reviewedDigest?: string;
+}
 
 export interface VendoredSkill {
   name: string;
   upstream: { repo: string; path: string; commit: string };
   licence: { spdx: string; copyright: string; file: "LICENSE" };
-  /** Executable files that reach the network at runtime → outbound hosts named in them. */
+  /** Executable files → outbound hosts written literally in them. */
   network: Record<string, string[]>;
-  humanReview: { status: "pending" | "approved" | "rejected"; reviewer: string | null; date: string | null; notes: string };
+  /** Markdown files → hosts written in them (instructions the agent may act on). */
+  instructionHosts: Record<string, string[]>;
+  /** File → what it can do at run time that Phase B must surface (e.g. "network-download"). */
+  runtimeCapabilities: Record<string, string[]>;
+  /** Known integration issues Phase B must resolve before shipping (free text). */
+  knownIssues: string[];
+  humanReview: HumanReview;
   files: Record<string, string>;
 }
 
@@ -58,24 +85,62 @@ export function outboundHosts(text: string): string[] {
   return [...hosts].sort();
 }
 
-/** Network inventory of a skill tree: code files (outside its own tests) → hosts. */
-export function networkInventory(files: Map<string, Buffer>): Record<string, string[]> {
+function inventory(files: Map<string, Buffer>, include: (path: string) => boolean): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [path, buf] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    if (!CODE_EXT.test(path) || /(^|\/)tests?\//.test(path)) continue;
+    if (!include(path)) continue;
     const hosts = outboundHosts(buf.toString("utf8"));
     if (hosts.length) out[path] = hosts;
   }
   return out;
 }
 
+/** Network inventory of a skill tree: code files (outside its own tests) → literal hosts. */
+export function networkInventory(files: Map<string, Buffer>): Record<string, string[]> {
+  return inventory(files, (p) => CODE_EXT.test(p) && !/(^|\/)tests?\//.test(p));
+}
+
+/** Instruction inventory: markdown the agent reads → literal hosts (finding #3). */
+export function instructionInventory(files: Map<string, Buffer>): Record<string, string[]> {
+  return inventory(files, (p) => p.endsWith(".md"));
+}
+
+/** One digest over the whole locked file map — what an approval is bound to. */
+export function filesDigest(files: Record<string, string>): string {
+  const lines = Object.keys(files).sort().map((p) => `${p}\0${files[p]}\n`);
+  return sha256(lines.join(""));
+}
+
+/**
+ * The review block after re-locking to `newFiles`. An approval survives only if it
+ * still covers exactly these bytes and this upstream commit; otherwise → pending.
+ */
+export function relockReview(entry: VendoredSkill, newFiles: Record<string, string>): HumanReview {
+  const r = entry.humanReview;
+  if (r.status !== "approved") return r;
+  if (r.reviewedCommit === entry.upstream.commit && r.reviewedDigest === filesDigest(newFiles)) return r;
+  return { status: "pending", reviewer: null, date: null, notes: "content or upstream commit changed since the approval; re-review required" };
+}
+
+function reviewErrors(entry: VendoredSkill): string[] {
+  const n = entry.name;
+  const r = entry.humanReview;
+  if (r.status === "rejected") return [`${n}: human review rejected this skill`];
+  if (r.status === "pending") return [`${n}: human review pending`];
+  const errs: string[] = [];
+  if (r.basis !== "ai-prereview" && r.basis !== "human-read") errs.push(`${n}: approval has no basis (ai-prereview | human-read)`);
+  if (r.reviewedCommit !== entry.upstream.commit) errs.push(`${n}: approval was for a different upstream commit — re-review required`);
+  if (r.reviewedDigest !== filesDigest(entry.files)) errs.push(`${n}: approval does not cover the current files — re-review required`);
+  return errs;
+}
+
 /** Compare one vendored skill's on-disk files against its lock entry. */
 export function checkSkill(entry: VendoredSkill, files: Map<string, Buffer>): string[] {
   const errs: string[] = [];
   const n = entry.name;
-  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(n)) errs.push(`${n}: name is not a safe slug`);
+  if (!SLUG_RE.test(n)) errs.push(`${n}: name is not a safe slug`);
   if (!/^[0-9a-f]{40}$/.test(entry.upstream.commit)) errs.push(`${n}: upstream commit is not a full sha`);
-  if (!SHIPPABLE_LICENCES.has(entry.licence.spdx)) errs.push(`${n}: licence ${entry.licence.spdx} is not shippable — exclude it`);
+  if (!SHIPPABLE_CODE_LICENCES.has(entry.licence.spdx)) errs.push(`${n}: licence ${entry.licence.spdx} is not shippable — exclude it`);
   const licence = files.get("LICENSE");
   if (!licence) errs.push(`${n}: LICENSE file missing from the vendored copy`);
   else if (!licence.toString("utf8").includes(entry.licence.copyright)) {
@@ -88,18 +153,34 @@ export function checkSkill(entry: VendoredSkill, files: Map<string, Buffer>): st
     else if (sha256(buf) !== hash) errs.push(`${n}: ${path} sha256 differs from the lock`);
   }
   for (const path of files.keys()) if (!(path in entry.files)) errs.push(`${n}: ${path} is not in the lock`);
-  const inv = networkInventory(files);
-  if (JSON.stringify(inv) !== JSON.stringify(entry.network)) {
+  if (JSON.stringify(networkInventory(files)) !== JSON.stringify(entry.network)) {
     errs.push(`${n}: network inventory changed — a human must re-review before re-locking`);
   }
-  if (entry.humanReview.status === "rejected") errs.push(`${n}: human review rejected this skill`);
+  if (JSON.stringify(instructionInventory(files)) !== JSON.stringify(entry.instructionHosts ?? {})) {
+    errs.push(`${n}: instruction-host inventory changed — a human must re-review before re-locking`);
+  }
+  for (const path of Object.keys(entry.runtimeCapabilities ?? {})) {
+    if (!(path in entry.files)) errs.push(`${n}: runtimeCapabilities names ${path}, which is not in the lock`);
+  }
+  errs.push(...reviewErrors(entry));
   return errs;
 }
 
 // ─── Effect shell ───────────────────────────────────────────────────────────
 
-/** Read a skill tree. Refuses symlinks (a vendored link could point anywhere). */
-export function readTree(root: string): Map<string, Buffer> {
+/** Resolve a lock entry's directory, refusing any name that is not a single safe segment (EC-7). */
+export function skillDir(name: string, root = PACK_SKILLS_DIR): string {
+  if (!SLUG_RE.test(name)) throw new Error(`skill name ${JSON.stringify(name)} is not a safe slug`);
+  return join(root, name);
+}
+
+/**
+ * Read a skill tree. Refuses symlinks, including a symlinked root (a vendored link
+ * could point anywhere). Generated cache dirs are not hashed; their paths are
+ * pushed to `skipped` so a caller can report them rather than hide them.
+ */
+export function readTree(root: string, skipped: string[] = []): Map<string, Buffer> {
+  if (lstatSync(root).isSymbolicLink()) throw new Error(`skill root is a symlink: ${root}`);
   const out = new Map<string, Buffer>();
   const walk = (dir: string) => {
     for (const name of readdirSync(dir).sort()) {
@@ -107,7 +188,10 @@ export function readTree(root: string): Map<string, Buffer> {
       const st = lstatSync(abs);
       if (st.isSymbolicLink()) throw new Error(`symlink in vendored tree: ${relative(root, abs)}`);
       if (st.isDirectory()) {
-        if (name === "__pycache__" || name === "node_modules") continue;
+        if (SKIPPED_DIRS.has(name)) {
+          skipped.push(relative(root, abs).split(sep).join("/"));
+          continue;
+        }
         walk(abs);
       } else if (st.isFile()) out.set(relative(root, abs).split(sep).join("/"), readFileSync(abs));
     }
@@ -120,41 +204,94 @@ export function loadLock(path = VENDOR_LOCK_FILE): VendorLock {
   return JSON.parse(readFileSync(path, "utf8")) as VendorLock;
 }
 
+/** tmp + rename: a crash mid-write never leaves a torn lock. */
+function writeLock(lock: VendorLock): void {
+  const tmp = `${VENDOR_LOCK_FILE}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(lock, null, 2) + "\n");
+  renameSync(tmp, VENDOR_LOCK_FILE);
+}
+
 function runCheck(): number {
   const lock = loadLock();
-  const errs = lock.skills.flatMap((s) => checkSkill(s, readTree(join(PACK_SKILLS_DIR, s.name))));
-  const pending = lock.skills.filter((s) => s.humanReview.status !== "approved").map((s) => s.name);
+  const errs: string[] = [];
+  for (const s of lock.skills) {
+    const skipped: string[] = [];
+    errs.push(...checkSkill(s, readTree(skillDir(s.name), skipped)));
+    for (const d of skipped) console.warn(`${s.name}: not hashed (generated cache dir): ${d}`);
+  }
   if (errs.length) {
     console.error(errs.join("\n"));
     return 1;
   }
-  console.log(`vendored skills: ${lock.skills.length} match the lock${pending.length ? `; human review pending: ${pending.join(", ")}` : ""}`);
+  const basis = lock.skills.map((s) => `${s.name} (${s.humanReview.basis})`).join(", ");
+  console.log(`vendored skills: ${lock.skills.length} match the lock; approved: ${basis}`);
   return 0;
 }
 
-/** Re-hash the trees. A changed network inventory or upstream commit resets the review. */
+/** Re-hash the trees and inventories. Any change the approval does not cover resets it. */
 function runLock(): number {
   const lock = loadLock();
   for (const s of lock.skills) {
-    const files = readTree(join(PACK_SKILLS_DIR, s.name));
-    const inv = networkInventory(files);
-    if (JSON.stringify(inv) !== JSON.stringify(s.network)) {
-      s.humanReview = { status: "pending", reviewer: null, date: null, notes: "network inventory changed; re-review required" };
-    }
-    s.network = inv;
-    s.files = Object.fromEntries([...files].map(([p, b]) => [p, sha256(b)]));
+    const files = readTree(skillDir(s.name));
+    const hashes = Object.fromEntries([...files].map(([p, b]) => [p, sha256(b)]));
+    const net = networkInventory(files);
+    const instr = instructionInventory(files);
+    const invChanged = JSON.stringify(net) !== JSON.stringify(s.network) || JSON.stringify(instr) !== JSON.stringify(s.instructionHosts ?? {});
+    s.humanReview = invChanged
+      ? { status: "pending", reviewer: null, date: null, notes: "host inventory changed; re-review required" }
+      : relockReview(s, hashes);
+    s.network = net;
+    s.instructionHosts = instr;
+    s.files = hashes;
   }
-  writeFileSync(VENDOR_LOCK_FILE, JSON.stringify(lock, null, 2) + "\n");
+  writeLock(lock);
   console.log(`vendor-lock: re-hashed ${lock.skills.length} skills`);
   return 0;
 }
 
+/** Record an approval bound to the skill's CURRENT locked bytes and commit. */
+function runApprove(args: string[]): number {
+  const [name] = args;
+  const flag = (f: string) => (args.indexOf(f) >= 0 ? args[args.indexOf(f) + 1] : undefined);
+  const basis = flag("--basis");
+  const reviewer = flag("--reviewer");
+  if (!name || (basis !== "ai-prereview" && basis !== "human-read") || !reviewer) {
+    console.error('usage: approve <skill> --basis ai-prereview|human-read --reviewer "<name>" [--notes "<text>"]');
+    return 2;
+  }
+  const lock = loadLock();
+  const s = lock.skills.find((x) => x.name === name);
+  if (!s) {
+    console.error(`no vendored skill named ${name}`);
+    return 1;
+  }
+  const pre = checkSkill({ ...s, humanReview: { ...s.humanReview, status: "rejected" } }, readTree(skillDir(s.name)))
+    .filter((e) => !e.endsWith("human review rejected this skill"));
+  if (pre.length) {
+    console.error(`refusing to approve bytes that do not match the lock:\n${pre.join("\n")}`);
+    return 1;
+  }
+  s.humanReview = {
+    status: "approved",
+    basis,
+    reviewer,
+    date: new Date().toISOString().slice(0, 10),
+    notes: flag("--notes") ?? s.humanReview.notes,
+    reviewedCommit: s.upstream.commit,
+    reviewedDigest: filesDigest(s.files),
+  };
+  writeLock(lock);
+  console.log(`vendor-lock: ${name} approved (${basis}) for ${s.upstream.commit.slice(0, 8)}`);
+  return 0;
+}
+
 if (import.meta.main) {
-  const [, , cmd] = process.argv;
+  const [, , cmd, ...rest] = process.argv;
   if (cmd === "check") process.exit(runCheck());
   else if (cmd === "lock") process.exit(runLock());
+  else if (cmd === "approve") process.exit(runApprove(rest));
   else {
-    console.error("usage: bun scripts/vendored-skills.ts check|lock");
+    console.error("usage: bun scripts/vendored-skills.ts check|lock|approve");
     process.exit(2);
   }
 }
