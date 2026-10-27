@@ -11,6 +11,8 @@
 
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
 import {
@@ -21,6 +23,7 @@ import {
   checkCatalog,
   checkReceivers,
   classifySource,
+  commitCorpus,
   CORPUS_DIR,
   corpusItem,
   corpusTextPath,
@@ -350,5 +353,49 @@ describe("GITHUB_TOKEN is only ever sent to api.github.com (beck P3)", () => {
     // A lookalike or the web host must not get it either (exact hostname, not suffix).
     expect(fetchHeaders("https://evil-github.com/x", "tok").Authorization).toBeUndefined();
     expect(fetchHeaders("https://github.com/o/a", "tok").Authorization).toBeUndefined();
+  });
+});
+
+// Observer fix-pass review (checkpoint council-implement-175): the corpus swap
+// deleted the old texts BEFORE the new manifest was written, so a failed manifest
+// write (ENOSPC) left new texts with the old manifest and the old texts gone.
+describe("commitCorpus — the old corpus survives any failure until the new manifest is in place", () => {
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), "corpus-commit-"));
+    const target = join(root, "corpus");
+    const staging = join(root, "corpus.staging");
+    const manifest = join(root, "manifest.json");
+    mkdirSync(target);
+    mkdirSync(staging);
+    writeFileSync(join(target, "a-src.txt"), "old text");
+    writeFileSync(join(staging, "a-src.txt"), "new text");
+    writeFileSync(manifest, "OLD MANIFEST");
+    return { root, target, staging, manifest };
+  }
+
+  it("a failing manifest write leaves the old texts AND the old manifest untouched", () => {
+    const { target, staging, manifest } = setup();
+    const failingWrite = () => {
+      throw new Error("ENOSPC");
+    };
+    expect(() => commitCorpus({ staging, target, manifestPath: manifest, manifestText: "NEW", write: failingWrite })).toThrow(/ENOSPC/);
+    expect(readFileSync(join(target, "a-src.txt"), "utf8")).toBe("old text");
+    expect(readFileSync(manifest, "utf8")).toBe("OLD MANIFEST");
+    expect(existsSync(staging)).toBe(false);
+  });
+
+  it("on success the new texts and the new manifest are both in place and no backup is left", () => {
+    const { root, target, staging, manifest } = setup();
+    commitCorpus({ staging, target, manifestPath: manifest, manifestText: "NEW" });
+    expect(readFileSync(join(target, "a-src.txt"), "utf8")).toBe("new text");
+    expect(readFileSync(manifest, "utf8")).toBe("NEW");
+    expect(readdirSync(root).sort()).toEqual(["corpus", "manifest.json"]);
+  });
+
+  it("a rebuild (no manifest change) swaps the texts and leaves the manifest alone", () => {
+    const { target, staging, manifest } = setup();
+    commitCorpus({ staging, target, manifestPath: manifest, manifestText: null });
+    expect(readFileSync(join(target, "a-src.txt"), "utf8")).toBe("new text");
+    expect(readFileSync(manifest, "utf8")).toBe("OLD MANIFEST");
   });
 });
