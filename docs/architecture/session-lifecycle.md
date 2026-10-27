@@ -29,6 +29,19 @@ crash budget, single-flight with a concurrent browser relaunch). Sessions restor
 `starting` (WS transport) stay with the reconnection watchdog. User-stopped sessions are
 never marked, so they stay down.
 
+**Boot-resume age filter and concurrency cap** (`boot-resume-policy.ts`). A candidate whose
+last activity is older than `COMPANION_BOOT_RESUME_MAX_AGE_HOURS` (default 72; `0` = off;
+invalid → default) is not revived at boot. Last activity is the newest `timestamp` in its
+persisted message history, else `createdAt`. An unknown age (neither available) counts as
+fresh. A skipped session logs `boot_resume.skipped_stale` (`sessionId`, `ageHours`). It
+stays `exited` with its `cliSessionId`, so the next browser message resumes it as usual. It
+is not archived or deleted. The stagger still spaces start attempts, and at most
+`COMPANION_BOOT_RESUME_CONCURRENCY` (default 3) boot relaunches run at once. A slot is held
+until the relaunch settles or `COMPANION_BOOT_RESUME_SLOT_TIMEOUT_MS` (default 120 s)
+passes (`boot_resume.slot_timeout`), so a hung relaunch can't stall the queue. Sessions
+waiting for a slot count as pending at graceful shutdown. Archive, delete or user kill
+(`cancelKeepaliveTimer`) drops them from the queue.
+
 **Crash-loop guard.** The auto-relaunch budget lives in memory and resets per boot, so after
 repeated non-graceful deaths (OOM-kill under `Restart=always`) boot resume would bring the
 whole fleet back on every respawn. `boot-crash-guard.ts` keeps `boot-history.json` in the

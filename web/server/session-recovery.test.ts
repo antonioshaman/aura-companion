@@ -1664,6 +1664,198 @@ describe("SessionRecovery.scheduleBootResume (W2)", () => {
   });
 });
 
+// Boot-resume hardening: (a) a session idle for days is not revived at every
+// restart (COMPANION_BOOT_RESUME_MAX_AGE_HOURS, default 72 h) but stays
+// resumable on demand; (b) at most COMPANION_BOOT_RESUME_CONCURRENCY (default
+// 3) boot relaunches run at once, and a hung one frees its slot after
+// COMPANION_BOOT_RESUME_SLOT_TIMEOUT_MS.
+describe("SessionRecovery.scheduleBootResume — age filter + concurrency cap", () => {
+  const HOUR = 3_600_000;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(log, "info").mockImplementation(() => undefined);
+    vi.spyOn(log, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    companionBus.clear();
+  });
+
+  /** Wire per-session message history into the wsBridge mock. */
+  function withHistory(
+    wsBridge: { getSession: ReturnType<typeof vi.fn> },
+    histories: Record<string, Array<{ type: string; timestamp?: number }>>,
+  ) {
+    wsBridge.getSession.mockImplementation(((id: string) =>
+      histories[id] ? { messageHistory: histories[id] } : undefined) as never);
+  }
+
+  it("skips a stale session (logged, left exited + resumable) and resumes a fresh one", async () => {
+    // "stale": created long ago, last message 10 days ago → skipped.
+    // "fresh-msg": created long ago but chatted with 1 h ago → resumed
+    //   (message history outranks createdAt).
+    // "fresh-new": no history, created 2 h ago → resumed via createdAt fallback.
+    const now = Date.now();
+    const sessions = new Map([
+      ["stale", info("stale", { cliSessionId: "c1", createdAt: now - 30 * 24 * HOUR })],
+      ["fresh-msg", info("fresh-msg", { cliSessionId: "c2", createdAt: now - 30 * 24 * HOUR })],
+      ["fresh-new", info("fresh-new", { cliSessionId: "c3", createdAt: now - 2 * HOUR })],
+    ]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    withHistory(wsBridge, {
+      stale: [{ type: "user_message", timestamp: now - 10 * 24 * HOUR }, { type: "result" }],
+      "fresh-msg": [{ type: "user_message", timestamp: now - HOUR }],
+    });
+
+    recovery.scheduleBootResume(["stale", "fresh-msg", "fresh-new"]);
+    // The stale one is never even scheduled (no stagger slot, no timer).
+    expect([...recovery.keepaliveSessionIds()].sort()).toEqual(["fresh-msg", "fresh-new"]);
+    await vi.advanceTimersByTimeAsync(10 * BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+
+    expect(launcher.relaunch.mock.calls.map((c) => c[0]).sort()).toEqual(["fresh-msg", "fresh-new"]);
+    // Structured skip line with the age.
+    const skipLine = vi.mocked(log.info).mock.calls.find(
+      (c) => (c[2] as { event?: string } | undefined)?.event === "boot_resume.skipped_stale",
+    );
+    expect(skipLine?.[2]).toMatchObject({ event: "boot_resume.skipped_stale", sessionId: "stale", ageHours: 240 });
+    // Not archived, not deleted, cliSessionId kept → a browser message resumes it.
+    const stale = sessions.get("stale")!;
+    expect(stale.archived).toBeFalsy();
+    expect(stale.state).toBe("exited");
+    expect(stale.cliSessionId).toBe("c1");
+    const onDemand = recovery.handleAutoRelaunch("stale");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+    await onDemand;
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toContain("stale");
+  });
+
+  it("COMPANION_BOOT_RESUME_MAX_AGE_HOURS=0 disables the filter; a custom value is honoured", async () => {
+    const now = Date.now();
+    const old = () => info("old", { cliSessionId: "c1", createdAt: now - 365 * 24 * HOUR });
+
+    // 0 → even a year-old session is resumed (pre-hardening behaviour).
+    vi.stubEnv("COMPANION_BOOT_RESUME_MAX_AGE_HOURS", "0");
+    const a = makeRecovery(new Map([["old", old()]]));
+    a.recovery.scheduleBootResume(["old"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS);
+    expect(a.launcher.relaunch).toHaveBeenCalledWith("old");
+
+    // 1 h → a session last active 2 h ago is skipped.
+    vi.stubEnv("COMPANION_BOOT_RESUME_MAX_AGE_HOURS", "1");
+    const b = makeRecovery(new Map([["s", info("s", { cliSessionId: "c", createdAt: now - 2 * HOUR })]]));
+    b.recovery.scheduleBootResume(["s"]);
+    expect([...b.recovery.keepaliveSessionIds()]).toEqual([]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS);
+    expect(b.launcher.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("never has more than COMPANION_BOOT_RESUME_CONCURRENCY relaunches in flight", async () => {
+    // Every relaunch hangs until the test resolves it, so slots stay taken.
+    // With a cap of 2 and 6 candidates, at most 2 relaunch() calls may be
+    // outstanding; each completion lets exactly the next one through.
+    vi.stubEnv("COMPANION_BOOT_RESUME_CONCURRENCY", "2");
+    const ids = ["a", "b", "c", "d", "e", "f"];
+    const sessions = new Map(ids.map((id) => [id, info(id, { cliSessionId: `c-${id}` })]));
+    const { recovery, launcher } = makeRecovery(sessions);
+    const finish: Array<() => void> = [];
+    let inFlight = 0;
+    let peak = 0;
+    launcher.relaunch.mockImplementation((id: string) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return new Promise((resolve) => {
+        finish.push(() => {
+          inFlight--;
+          sessions.get(id)!.state = "starting";
+          resolve({ ok: true });
+        });
+      });
+    });
+
+    recovery.scheduleBootResume(ids);
+    await vi.advanceTimersByTimeAsync(ids.length * BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS + 1);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+    // Queued sessions still count as owed a relaunch (graceful shutdown marks them).
+    expect(recovery.pendingRelaunchSessionIds().sort()).toEqual(ids);
+
+    while (finish.length > 0) {
+      finish.shift()!();
+      await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + 1);
+      expect(inFlight).toBeLessThanOrEqual(2);
+    }
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(ids);
+    expect(peak).toBe(2);
+  });
+
+  it("a failing relaunch frees its slot for the next session", async () => {
+    vi.stubEnv("COMPANION_BOOT_RESUME_CONCURRENCY", "1");
+    const sessions = new Map([
+      ["bad", info("bad", { cliSessionId: "c1" })],
+      ["good", info("good", { cliSessionId: "c2" })],
+    ]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    launcher.relaunch.mockImplementation(async (id: string) => {
+      if (id === "bad") throw new Error("ENOENT: cwd removed");
+      return { ok: true };
+    });
+
+    recovery.scheduleBootResume(["bad", "good"]);
+    await vi.advanceTimersByTimeAsync(2 * BOOT_RESUME_STAGGER_MS + 2 * RELAUNCH_GRACE_MS + 1);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["bad", "good"]);
+  });
+
+  it("a hung relaunch frees its slot after COMPANION_BOOT_RESUME_SLOT_TIMEOUT_MS", async () => {
+    // cap 1: "hung" never resolves. Without the slot timeout "next" would
+    // wait forever; with it, "next" starts once the timeout elapses.
+    vi.stubEnv("COMPANION_BOOT_RESUME_CONCURRENCY", "1");
+    vi.stubEnv("COMPANION_BOOT_RESUME_SLOT_TIMEOUT_MS", "30000");
+    const sessions = new Map([
+      ["hung", info("hung", { cliSessionId: "c1" })],
+      ["next", info("next", { cliSessionId: "c2" })],
+    ]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    launcher.relaunch.mockImplementation((id: string) =>
+      id === "hung" ? new Promise(() => {}) : Promise.resolve({ ok: true }));
+
+    recovery.scheduleBootResume(["hung", "next"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + 29_000);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["hung"]);
+    await vi.advanceTimersByTimeAsync(1_000 + RELAUNCH_GRACE_MS + 1);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["hung", "next"]);
+    const timeoutLine = vi.mocked(log.warn).mock.calls.find(
+      (c) => (c[2] as { event?: string } | undefined)?.event === "boot_resume.slot_timeout",
+    );
+    expect(timeoutLine?.[2]).toMatchObject({ sessionId: "hung" });
+  });
+
+  it("a session cancelled while waiting for a slot is not relaunched", async () => {
+    // Archive / delete / user kill call cancelKeepaliveTimer; that must also
+    // drop a session already queued behind the concurrency cap.
+    vi.stubEnv("COMPANION_BOOT_RESUME_CONCURRENCY", "1");
+    const sessions = new Map([
+      ["first", info("first", { cliSessionId: "c1" })],
+      ["queued", info("queued", { cliSessionId: "c2" })],
+    ]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    let finishFirst: () => void = () => {};
+    launcher.relaunch.mockImplementation((id: string) =>
+      id === "first"
+        ? new Promise((r) => { finishFirst = () => { sessions.get(id)!.state = "starting"; r({ ok: true }); }; })
+        : Promise.resolve({ ok: true }));
+
+    recovery.scheduleBootResume(["first", "queued"]);
+    await vi.advanceTimersByTimeAsync(2 * BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS + 1);
+    expect(recovery.pendingRelaunchSessionIds()).toContain("queued");
+    recovery.cancelKeepaliveTimer("queued");
+    expect(recovery.pendingRelaunchSessionIds()).not.toContain("queued");
+    finishFirst();
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["first"]);
+  });
+});
+
 // Single exit for the auto-relaunch path. Before it, handleAutoRelaunch had
 // eleven hand-written exits, each releasing its own subset of state. Two kinds
 // of exit released nothing:

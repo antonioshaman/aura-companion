@@ -34,6 +34,14 @@ import { homedir } from "node:os";
 import { statSync } from "node:fs";
 import { summarizeWaitChannels } from "./process-wait-channels.js";
 import type { IntentionalKills } from "./intentional-kills.js";
+import {
+  BootResumeLimiter,
+  lastActivityAt,
+  parseBootResumeConcurrency,
+  parseBootResumeMaxAgeHours,
+  parseBootResumeSlotTimeoutMs,
+  staleAgeHours,
+} from "./boot-resume-policy.js";
 
 /**
  * Session recovery controller (aura-meta-diet P4/C1d).
@@ -315,6 +323,12 @@ export class SessionRecovery {
 
   // Timers for proactive keepalive relaunches (for cancellation on delete)
   private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Boot-resume sessions whose stagger timer fired but which wait for a free
+   * {@link BootResumeLimiter} slot. Counted as pending at shutdown;
+   * `cancelKeepaliveTimer` (archive / delete / user kill) drops them.
+   */
+  private bootResumeQueued = new Set<string>();
 
   /**
    * Per-session silence-recurrence bookkeeping. Keyed by Companion
@@ -619,6 +633,7 @@ export class SessionRecovery {
   pendingRelaunchSessionIds(): string[] {
     return Array.from(new Set([
       ...this.keepaliveTimers.keys(),
+      ...this.bootResumeQueued,
       ...this.relaunchingSet,
       ...this.relaunchInFlight.keys(),
     ]));
@@ -1460,42 +1475,105 @@ export class SessionRecovery {
    */
   scheduleBootResume(sessionIds: readonly string[]): void {
     if (sessionIds.length === 0) return;
+    const maxAgeHours = parseBootResumeMaxAgeHours(process.env.COMPANION_BOOT_RESUME_MAX_AGE_HOURS);
+    const concurrency = parseBootResumeConcurrency(process.env.COMPANION_BOOT_RESUME_CONCURRENCY);
+    const slotTimeoutMs = parseBootResumeSlotTimeoutMs(process.env.COMPANION_BOOT_RESUME_SLOT_TIMEOUT_MS);
+
+    // Age filter: a session idle for days is not revived at boot. It is left
+    // exactly as restore put it (`exited`, `cliSessionId` kept, not archived),
+    // so a browser message still resumes it through the normal relaunch path.
+    const now = Date.now();
+    const toResume: string[] = [];
+    for (const sessionId of sessionIds) {
+      const info = this.launcher.getSession(sessionId);
+      const history = this.wsBridge.getSession(sessionId)?.messageHistory;
+      const ageHours = staleAgeHours(lastActivityAt(history, info?.createdAt), maxAgeHours, now);
+      if (ageHours !== null) {
+        log.info("orchestrator", "boot resume skipped: session inactive too long", {
+          event: "boot_resume.skipped_stale",
+          sessionId,
+          role: info?.sessionGroupRole,
+          ageHours,
+          maxAgeHours,
+        });
+        continue;
+      }
+      toResume.push(sessionId);
+    }
+    if (toResume.length === 0) return;
+
     log.info("orchestrator", "Scheduling boot resume of sessions alive before restart", {
       event: "session.boot_resume.scheduled",
-      count: sessionIds.length,
+      count: toResume.length,
+      skippedStale: sessionIds.length - toResume.length,
       staggerMs: BOOT_RESUME_STAGGER_MS,
-      sessionIds,
+      concurrency,
+      maxAgeHours,
+      sessionIds: toResume,
     });
-    sessionIds.forEach((sessionId, i) => {
+    // One limiter per boot: at most `concurrency` relaunches in flight; the
+    // stagger still spaces the start attempts.
+    const limiter = new BootResumeLimiter(concurrency, slotTimeoutMs);
+    toResume.forEach((sessionId, i) => {
       this.cancelKeepaliveTimer(sessionId);
-      const timer = setTimeout(async () => {
+      const timer = setTimeout(() => {
         if (this.keepaliveTimers.get(sessionId) === timer) this.keepaliveTimers.delete(sessionId);
-        const info = this.launcher.getSession(sessionId);
-        const skip = (reason: string) =>
-          log.info("orchestrator", "boot resume skipped", {
-            event: "session.boot_resume.skipped",
-            sessionId,
-            role: info?.sessionGroupRole,
-            reason,
-          });
-        if (!info) return skip("unknown_session");
-        if (info.archived) return skip("archived");
-        if (this.intentionalKills.has(sessionId)) return skip("intentional_kill");
-        if (this.stoppedByUser.has(sessionId)) return skip("stopped_by_user");
-        if (info.state !== "exited") return skip(`state_${info.state}`);
-        log.info("orchestrator", "Boot-resuming session alive before restart", {
-          event: "session.boot_resume.firing",
-          sessionId,
-          role: info.sessionGroupRole,
-          backendType: info.backendType,
+        // Waiting for a free slot: still owed a relaunch (shutdown marks it,
+        // archive / delete / user kill cancel it via cancelKeepaliveTimer).
+        this.bootResumeQueued.add(sessionId);
+        void limiter.run(async () => {
+          if (!this.bootResumeQueued.delete(sessionId)) {
+            log.info("orchestrator", "boot resume skipped", {
+              event: "session.boot_resume.skipped",
+              sessionId,
+              reason: "cancelled",
+            });
+            return;
+          }
+          await this.fireBootResume(sessionId);
+        }).then((outcome) => {
+          // Slot freed by the timeout while the relaunch still runs: log it so a
+          // hung relaunch is visible. The relaunch itself keeps its own guards
+          // (relaunchingSet / relaunchOnce), so it is not spawned twice.
+          if (outcome === "timeout") {
+            log.warn("orchestrator", "boot resume relaunch still pending; freeing its slot", {
+              event: "boot_resume.slot_timeout",
+              sessionId,
+              slotTimeoutMs,
+            });
+          }
         });
-        await this.handleAutoRelaunch(sessionId);
       }, (i + 1) * BOOT_RESUME_STAGGER_MS);
       this.keepaliveTimers.set(sessionId, timer);
     });
   }
 
+  /** One boot-resume relaunch, run inside a {@link BootResumeLimiter} slot. */
+  private async fireBootResume(sessionId: string): Promise<void> {
+    const info = this.launcher.getSession(sessionId);
+    const skip = (reason: string) =>
+      log.info("orchestrator", "boot resume skipped", {
+        event: "session.boot_resume.skipped",
+        sessionId,
+        role: info?.sessionGroupRole,
+        reason,
+      });
+    if (!info) return skip("unknown_session");
+    if (info.archived) return skip("archived");
+    if (this.intentionalKills.has(sessionId)) return skip("intentional_kill");
+    if (this.stoppedByUser.has(sessionId)) return skip("stopped_by_user");
+    if (info.state !== "exited") return skip(`state_${info.state}`);
+    log.info("orchestrator", "Boot-resuming session alive before restart", {
+      event: "session.boot_resume.firing",
+      sessionId,
+      role: info.sessionGroupRole,
+      backendType: info.backendType,
+    });
+    await this.handleAutoRelaunch(sessionId);
+  }
+
   cancelKeepaliveTimer(sessionId: string): void {
+    this.bootResumeQueued.delete(sessionId);
     const timer = this.keepaliveTimers.get(sessionId);
     if (timer) {
       clearTimeout(timer);
