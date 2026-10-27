@@ -1,8 +1,8 @@
 // The single source of truth for the RC-2 dispatcher structural contract (fowler #4).
 //
-// Imported by BOTH the contract test (skill-dispatcher-contract.test.ts) and the
-// fixture builder (build-council-skill-fixture.ts) so the two can never drift — they
-// previously hardcoded identical lists synced only by a "kept in lockstep" comment.
+// Imported by the contract test (skill-dispatcher-contract.test.ts). It used to be
+// shared with a fixture builder too; that builder and its frozen mirror were retired
+// once the dispatchers moved into packs/skills (review 2026-10-27-2139 #10).
 //
 // The contract a council SKILL.md must satisfy after the RC-2 consolidation:
 //   - it embeds NO fixed panel and NO retired two-stack stack-detection router;

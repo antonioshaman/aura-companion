@@ -186,6 +186,14 @@ elif [ -n "$BAD_MODE" ]; then
   echo "  ✗ executable or group/world-writable bit on data files:"
   echo "$BAD_MODE" | sed 's/^/    /'
   ERR=1
+  # A git checkout made under umask 002 (Ubuntu's default for user-private groups)
+  # gives every file g+w: git records only 644/755, so the bit is local, not
+  # tampering. Still a failure — the installed tree must be 644 — but say why.
+  if git -C "$CATALOG" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ "$(umask)" != "0022" ]; then
+    echo "  hint: this is a git checkout and your umask is $(umask); git does not record group-write,"
+    echo "        so the bit comes from the checkout, not from tampering. Fix with:"
+    echo "        chmod -R go-w \"$SKILLS\"   (and clone with umask 022 next time), then re-run."
+  fi
 else
   echo "  ✓ all data files non-executable and not group/world-writable"
 fi

@@ -568,3 +568,13 @@ Reference: Council Review 2026-06-04-1826 P2 #10 — `signalCoalesceDegradeLogge
 
 **Principle:** Canonical live state must not be corrupted by a stale background reader; a periodic re-check is a no-op only when it refuses to write unless strictly newer. Sibling EC-4 (watcher debounce never coalesces distinct payloads) + memory `feedback_progress_mirror_ui_reflects_reporter_not_ground_truth`.
 
+
+---
+
+### EC-55: An approval or attestation records the digest of what it approved; the gate fails when the content no longer matches
+
+**Convention:** Any persisted "approved / reviewed / attested" state (vendored-skill human review, owner sign-off, attestation locks) MUST store what it covers — the upstream commit and a digest over the exact bytes — next to the status. The verifying gate MUST fail when the current content's digest differs from the approved one, and any re-lock or re-hash MUST reset the status to pending instead of carrying "approved" forward. "Pending" itself fails the gate (fail closed). Record the approval's basis (e.g. `ai-prereview` vs `human-read`) so a consumer can tell a person's read from an accepted AI pre-review. Reference: `web/scripts/vendored-skills.ts` (`filesDigest`, `relockReview`, `approve`).
+
+**Origin:** hunt + ritchie + beck — Council Review 2026-10-27-2139, finding #1 (the vendored-skill approval survived content changes that added no new URL; the docs and the owner were told the opposite).
+
+**Principle:** `references/security.md` → Principle 5 (third-party dependencies) + Principle 7 (assertions as tripwires); sibling EC-8 (prove before you act) and memory `feedback_close_persistence_bug_against_live_log`.

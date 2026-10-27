@@ -47,7 +47,6 @@
     "generate-token": "bun bin/generate-token.ts",
     "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts",
     "check-observer-prompt-drift": "bun run build-observer-prompt-bundle && git diff --exit-code -- server/observer-prompt-bundled.ts ../.council/prompts/observer-system.md",
-    "build-council-skill-fixture": "bun scripts/build-council-skill-fixture.ts",
     "guardrail:ci": "bun scripts/guardrail.ts --ci",
     "council:dispatch-report": "bun scripts/dispatch-policy.ts report",
     "council:triage": "bun scripts/council-triage.ts recommend",

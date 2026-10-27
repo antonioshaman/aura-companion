@@ -14,7 +14,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { composeCouncil } from "./advisor-scorer.js";
 import { buildAdvisorBrief } from "./advisor-brief.js";
-import { COUNCIL_CATALOG_DIR, loadCatalog } from "./capability-catalog.js";
+import { loadCatalog } from "./capability-catalog.js";
+import { loadProfiles } from "./dispatch-policy.js";
 import type { AdvisorProfile, Vocabulary } from "./capability-catalog";
 import type { Fingerprint } from "./fingerprint";
 
@@ -22,9 +23,8 @@ import type { Fingerprint } from "./fingerprint";
 // PLAN-aura-uiux-agent-enrichment Task 4) so the AC1.4 superset gates hermetically in the
 // aura repo's CI against the real catalog — the frozen __fixtures__/council-catalog
 // snapshot this used to read is retired (one source of truth, EC-20).
-const LOADED = loadCatalog(COUNCIL_CATALOG_DIR);
-if (LOADED.errors.length > 0) throw new Error(`in-repo catalog load errors: ${JSON.stringify(LOADED.errors)}`);
-const PROFILES: AdvisorProfile[] = LOADED.profiles;
+// loadProfiles() is the engine's own fail-loud loader for the in-repo catalog.
+const PROFILES: AdvisorProfile[] = loadProfiles();
 
 const AURA_10 = ["hunt", "fowler", "dahl", "ritchie", "abramov", "watson", "saarinen", "friedman", "willison", "hashimoto"];
 const PYTHON_9 = ["hunt", "fowler", "durov", "vanrossum", "brandur", "hashimoto", "willison", "saarinen", "friedman"];
@@ -65,9 +65,8 @@ describe("AC1.4 back-compat superset — Python/aiogram", () => {
   });
 });
 
-// Freshness canary (beck #3): the hermetic superset tests above score the FROZEN
-// inline PROFILES, so a live meta.yaml that loses a capability would leave them green
-// against a stale copy. PROFILES now IS the in-repo catalog; during the transition the
+// Transition drift canary (beck #3): the superset tests above score the IN-REPO
+// catalog (PROFILES). During the transition the
 // operator box still runs its own copy in ~/.claude/skills (Phase B moves sessions onto
 // the repo copy). Where that box copy is present, assert it still MATCHES the repo — so
 // a meta.yaml edited on the box but not ported to the repo fails loudly. Skipped in
@@ -82,9 +81,9 @@ describe("box catalog stays in sync with the in-repo catalog (beck #3 / observer
     const live = loadCatalog(catalogRoot);
     expect(live.errors, `catalog load errors: ${JSON.stringify(live.errors)}`).toEqual([]);
     const liveNorm = live.profiles.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
-    const frozenNorm = PROFILES.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const repoNorm = PROFILES.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
     expect(
-      frozenNorm,
+      repoNorm,
       "box catalog meta.yaml drifted from packs/skills/_council-experts — port the edit into the repo",
     ).toEqual(liveNorm);
   });

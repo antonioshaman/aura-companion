@@ -36,8 +36,8 @@ lives in `ws.ts`, which the #193 diff does not touch).
 ## Panels
 
 `web/evals/aurabench/council-panel/panels.ts` computes the rosters
-deterministically from the in-repo engine and the catalog snapshot
-(`web/scripts/__fixtures__/council-catalog/profiles.json`). The repo
+deterministically from the in-repo engine and the in-repo council catalog
+(`packs/skills/_council-experts`, read through `COUNCIL_CATALOG_DIR`). The repo
 fingerprint comes from the B4 dataset.
 
 | Panel | Rule |

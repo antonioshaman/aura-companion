@@ -141,7 +141,7 @@ describe("detectFingerprint — needs-confirmation (AC1.3)", () => {
 // PLAN-aura-uiux-agent-enrichment Task 4), so it gates in the aura repo's CI (which has
 // no ~/.claude — the earlier skipIf-only version silently skipped there, observer WARN
 // 1). The frozen __fixtures__ snapshot it used to read is retired (EC-20).
-const VOCAB_SNAPSHOT = join(COUNCIL_CATALOG_DIR, ".verify", "capability-vocabulary.json");
+const IN_REPO_VOCAB = join(COUNCIL_CATALOG_DIR, ".verify", "capability-vocabulary.json");
 
 function signalSet(raw: { signals: Record<string, string[]> }): Set<string> {
   const s = new Set<string>();
@@ -159,10 +159,10 @@ function emittedTokens(frameworksOnly = false): Set<string> {
 }
 
 describe("emit-side vocabulary closure (hashimoto #3 / observer WARN 1) — hermetic", () => {
-  const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]> };
+  const repoVocab = JSON.parse(readFileSync(IN_REPO_VOCAB, "utf8")) as { signals: Record<string, string[]> };
 
   it("every fingerprint emit token is in the closed vocabulary (in-repo catalog)", () => {
-    const vocab = signalSet(snap);
+    const vocab = signalSet(repoVocab);
     const orphans = [...emittedTokens()].filter((t) => !vocab.has(t)).sort();
     expect(orphans, `emit tokens absent from the vocab snapshot: ${orphans.join(", ")}`).toEqual([]);
   });
@@ -171,7 +171,7 @@ describe("emit-side vocabulary closure (hashimoto #3 / observer WARN 1) — herm
   // vocab's `frameworks` GROUP; a framework-dimension emit token missing from it makes
   // the guard silently no-op. Hermetic against the in-repo catalog.
   it("every framework-dimension emit token is in the vocab frameworks group (in-repo catalog)", () => {
-    const frameworks = new Set((snap.signals.frameworks ?? []).map((t) => t.toLowerCase()));
+    const frameworks = new Set((repoVocab.signals.frameworks ?? []).map((t) => t.toLowerCase()));
     const orphans = [...emittedTokens(true)].filter((t) => !frameworks.has(t)).sort();
     expect(
       orphans,
@@ -190,8 +190,8 @@ describe("box vocab stays in sync with the in-repo vocab (observer WARN 1)", () 
     join(homedir(), ".claude", "skills", "_council-experts", ".verify", "capability-vocabulary.json");
   it.skipIf(!existsSync(livePath))("in-repo vocab equals the box vocab (signals + domains)", () => {
     const live = JSON.parse(readFileSync(livePath, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
-    const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
-    expect(snap.signals, "box vocab signals drifted from packs/skills — port the edit into the repo").toEqual(live.signals);
-    expect([...snap.domains].sort(), "box vocab domains drifted from packs/skills").toEqual([...live.domains].sort());
+    const repoVocab = JSON.parse(readFileSync(IN_REPO_VOCAB, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
+    expect(repoVocab.signals, "box vocab signals drifted from packs/skills — port the edit into the repo").toEqual(live.signals);
+    expect([...repoVocab.domains].sort(), "box vocab domains drifted from packs/skills").toEqual([...live.domains].sort());
   });
 });
