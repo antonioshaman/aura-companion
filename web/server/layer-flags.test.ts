@@ -273,3 +273,37 @@ describe("applyLayerFlagsToCreateBody (create-session boundary)", () => {
     expect(body).toHaveProperty("autoProceedOnIdle");
   });
 });
+
+// PLAN Task 8 — the `uiux` layer (shipped UI/UX toolkit). Same fail-closed parse as
+// the other layers; Settings → "UI/UX toolkit" (`uiuxToolkit`) lowers the default
+// for new sessions, an explicit per-session `layers.uiux` still wins.
+describe("uiux layer", () => {
+  it("defaults on and is switched by COMPANION_LAYER_UIUX", () => {
+    expect(DEFAULT_LAYER_FLAGS.uiux).toBe(true);
+    expect(resolveLayerFlagsFromEnv({ COMPANION_LAYER_UIUX: "off" }).flags.uiux).toBe(false);
+    const typo = resolveLayerFlagsFromEnv({ COMPANION_LAYER_UIUX: "of" });
+    expect(typo.flags.uiux).toBe(true);
+    expect(typo.warnings.join()).toContain("COMPANION_LAYER_UIUX");
+  });
+
+  it("all-default + setting on → body unchanged (prod parity)", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, DEFAULT_LAYER_FLAGS, { uiuxToolkit: true });
+    expect(res.ok && res.body).toEqual({ cwd: "/w" });
+  });
+
+  it("setting off → the session persists uiux: false", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, DEFAULT_LAYER_FLAGS, { uiuxToolkit: false });
+    expect(res.ok && res.flags.uiux).toBe(false);
+    expect(res.ok && (res.body.layers as Record<string, boolean>).uiux).toBe(false);
+  });
+
+  it("an explicit per-session layers.uiux beats the setting", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w", layers: { uiux: "on" } }, DEFAULT_LAYER_FLAGS, { uiuxToolkit: false });
+    expect(res.ok && res.flags.uiux).toBe(true);
+  });
+
+  it("server env off is not re-enabled by the setting being on", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, { ...DEFAULT_LAYER_FLAGS, uiux: false }, { uiuxToolkit: true });
+    expect(res.ok && res.flags.uiux).toBe(false);
+  });
+});

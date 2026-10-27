@@ -68,6 +68,7 @@ const mockApi = {
   refreshModels: vi.fn(),
   getModelDiagnostics: vi.fn(),
   getDeliveryMetrics: vi.fn(),
+  getSkillPack: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -87,6 +88,7 @@ vi.mock("../api.js", () => ({
     refreshModels: (...args: unknown[]) => mockApi.refreshModels(...args),
     getModelDiagnostics: (...args: unknown[]) => mockApi.getModelDiagnostics(...args),
     getDeliveryMetrics: (...args: unknown[]) => mockApi.getDeliveryMetrics(...args),
+    getSkillPack: (...args: unknown[]) => mockApi.getSkillPack(...args),
   },
 }));
 
@@ -126,6 +128,7 @@ beforeEach(() => {
     publicUrl: "",
   });
   mockApi.getAuthToken.mockResolvedValue({ token: "abc123testtoken" });
+  mockApi.getSkillPack.mockResolvedValue({ installed: false, error: "no valid current.json", rows: [] });
   mockApi.regenerateAuthToken.mockResolvedValue({ token: "newtoken456" });
   mockApi.getAuthQr.mockResolvedValue({
     qrCodes: [
@@ -197,6 +200,36 @@ describe("SettingsPage", () => {
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ defaultSessionMode: "council" }));
       fireEvent.click(screen.getByRole("switch", { name: "Load knowledge base at session start" }));
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAutoPrime: true }));
+    });
+
+    // PLAN Task 8: the "UI/UX toolkit" row. Default on (an older server omits
+    // the field), hydrates an opt-out, persists a toggle, and renders the skill
+    // list fetched from /settings/skill-pack.
+    it("UI/UX toolkit: hydrates off, persists a toggle and lists the pack's skills", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({ anthropicApiKeyConfigured: true, anthropicModel: "claude-sonnet-4-6", uiuxToolkit: false });
+      mockApi.getSkillPack.mockResolvedValueOnce({
+        installed: true,
+        version: "0123456789abcdef",
+        rows: [{
+          name: "council-plan",
+          kind: "skill",
+          claude: { name: "council-plan", outcome: "provide", reasons: [] },
+          codex: { name: "council-plan", outcome: "requires-claude", reasons: ["Task tool"] },
+        }],
+      });
+      render(<SettingsPage />);
+      const sw = await screen.findByRole("switch", { name: "UI/UX toolkit" });
+      await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "false"));
+      expect(await screen.findByText("Requires Claude Code")).toBeInTheDocument();
+      await waitFor(() => expect(sw).not.toBeDisabled());
+      fireEvent.click(sw);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ uiuxToolkit: true }));
+    });
+
+    it("UI/UX toolkit: a failed skill-list request is shown, not an empty list", async () => {
+      mockApi.getSkillPack.mockRejectedValueOnce(new Error("HTTP 500"));
+      render(<SettingsPage />);
+      expect(await screen.findByText(/Could not load the skill list: HTTP 500/)).toBeInTheDocument();
     });
 
     // Usage-limit auto-resume: default on (older server omits the field),

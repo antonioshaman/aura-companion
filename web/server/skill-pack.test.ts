@@ -19,6 +19,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -38,8 +39,10 @@ import {
   type SkillManifest,
 } from "./skill-manifest.js";
 import {
+  ensurePluginExposure,
   installPack,
   isSafeRelPath,
+  PLUGIN_NAME,
   listExistingSkills,
   manifestPathErrors,
   PACK_MANIFEST_FILE,
@@ -516,5 +519,81 @@ describe("syncCopies / sweepCopies", () => {
     sync(s);
     const files = readTree(join(s.parent, "polish"));
     expect([...files.keys()].sort()).toEqual([OWNER_MARKER_FILE, ...Object.keys(s.manifest.entries[0].files)].sort());
+  });
+});
+
+// Phase B3: the Claude plugin exposure. Claude Code loads `--plugin-dir <dir>` and
+// reads `<dir>/skills/<name>/SKILL.md`; the dir is built from relative links into
+// the verified version, never by writing into the user's ~/.claude.
+describe("ensurePluginExposure (Claude --plugin-dir)", () => {
+  function installed() {
+    const src = source();
+    const root = tmp();
+    const { version } = installPack({ sourceDir: src.dir, manifest: src.manifest, root });
+    return { root, version };
+  }
+
+  it("builds a read-only plugin dir whose skills are relative links into the version", () => {
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
+    if ("error" in r) throw new Error(r.error);
+    expect(readdirSync(r.dir).sort()).toEqual([".claude-plugin", "skills"]);
+    expect(JSON.parse(readFileSync(join(r.dir, ".claude-plugin", "plugin.json"), "utf8")).name).toBe(PLUGIN_NAME);
+    expect(readdirSync(join(r.dir, "skills")).sort()).toEqual(["audit", "polish"]);
+    expect(readlinkSync(join(r.dir, "skills", "polish"))).toBe(`../../../versions/${version}/polish`);
+    // The link resolves to the verified tree: the CLI reads the real SKILL.md through it.
+    expect(readFileSync(join(r.dir, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
+    expect(statSync(r.dir).mode & 0o222).toBe(0);
+  });
+
+  it("is content-addressed and idempotent: same version + names → same dir", () => {
+    const { root, version } = installed();
+    const a = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
+    const b = ensurePluginExposure({ root, version, names: ["audit", "polish"] });
+    const c = ensurePluginExposure({ root, version, names: ["polish"] });
+    expect(a).toEqual(b);
+    expect(c).not.toEqual(a);
+  });
+
+  it("refuses names that are not skills of the verified version (blocked, unknown, traversal)", () => {
+    const { root, version } = installed();
+    // The blocked entry is never in a version dir, so it can never be exposed.
+    for (const names of [["blocked-one"], ["nope"], ["../polish"], []]) {
+      expect(ensurePluginExposure({ root, version, names })).toHaveProperty("error");
+    }
+    expect(ensurePluginExposure({ root, version: "zz", names: ["polish"] })).toHaveProperty("error");
+  });
+
+  it("replaces a tampered exposure instead of handing it to the CLI", () => {
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish"] });
+    if ("error" in r) throw new Error(r.error);
+    chmodSync(join(r.dir, "skills"), 0o755);
+    symlinkSync("/etc", join(r.dir, "skills", "evil"));
+    const again = ensurePluginExposure({ root, version, names: ["polish"] });
+    expect(again).toEqual(r);
+    expect(readdirSync(join(r.dir, "skills"))).toEqual(["polish"]);
+  });
+
+  it("sweepPackRoot prunes exposures of pruned versions and keeps those of kept versions", () => {
+    const src = source();
+    const root = tmp();
+    const v1 = installPack({ sourceDir: src.dir, manifest: src.manifest, root }).version;
+    const e1 = ensurePluginExposure({ root, version: v1, names: ["polish"] });
+    // Two newer versions push v1 out of current/previous.
+    for (const body of ["v2", "v3"]) {
+      writeFileSync(join(src.dir, "polish", "SKILL.md"), `---\nname: polish\n---\n${body}\n`);
+      src.manifest.entries[0] = plant(src.dir, "polish", { "SKILL.md": `---\nname: polish\n---\n${body}\n`, "references/a.md": "a\n" });
+      installPack({ sourceDir: src.dir, manifest: src.manifest, root });
+    }
+    if ("error" in e1) throw new Error(e1.error);
+    // A live session still uses v1: kept with its exposure.
+    expect(sweepPackRoot(root, { keep: [v1] }).removedExposures).toEqual([]);
+    expect(existsSync(e1.dir)).toBe(true);
+    // No session uses it any more: the version and its exposure go together.
+    const swept = sweepPackRoot(root, { keep: [] });
+    expect(swept.removedVersions).toEqual([v1]);
+    expect(swept.removedExposures).toEqual([e1.dir]);
+    expect(existsSync(e1.dir)).toBe(false);
   });
 });

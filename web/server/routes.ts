@@ -491,6 +491,7 @@ export function createRoutes(
     // the host-side gates (observer → no council pair, autoProceed → strip).
     const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags(), {
       kbAutoPrime: getSettings().kbAutoPrime,
+      uiuxToolkit: getSettings().uiuxToolkit,
     });
     for (const w of layered.warnings) console.warn(`[layer-flags] ${w}`);
     if (!layered.ok) {

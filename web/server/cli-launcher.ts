@@ -62,6 +62,21 @@ import {
   composeSystemPrompt,
   type LayerFlags,
 } from "./layer-flags.js";
+import {
+  DEFAULT_PACK_ROOT,
+  ensurePluginExposure,
+  listExistingSkills,
+  readCurrentPack,
+  syncCopies,
+  verifyVersionDir,
+} from "./skill-pack.js";
+import {
+  claudeSupportsPluginDir,
+  decideSkillExposure,
+  parseSkillExposure,
+  providedNames,
+  type SkillExposure,
+} from "./skill-exposure.js";
 
 /**
  * Control-channel transport for Claude sessions.
@@ -285,6 +300,9 @@ export interface SdkSessionInfo {
   /** Opt-in KB auto-prime directive (default off). Persisted so a relaunch
    *  re-applies it. */
   kbAutoPrime?: boolean;
+  /** UI/UX toolkit exposure (PLAN Task 7), decided at the first spawn and
+   *  reused on relaunch/resume. See `skill-exposure.ts`. */
+  skillExposure?: SkillExposure;
   /** aura-meta-diet AP-WIRE — validated auto-proceed opt-in; set only on a
    *  council orchestrator-half. Persisted so the opt-in survives restarts. */
   autoProceedOnIdle?: { idleMs: number; maxIterations: number };
@@ -409,6 +427,9 @@ export interface LaunchOptions {
   /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
    *  appended to Claude's system prompt / Codex `developerInstructions`. */
   layerSystemPrompt?: string;
+  /** Internal: the Aura toolkit plugin dir (`--plugin-dir`), set by
+   *  `applyClaudeSkillExposure`. */
+  skillPluginDir?: string;
 }
 
 /**
@@ -823,6 +844,7 @@ export class CliLauncher {
         liveBeforeRestart.push(info.sessionId);
       }
       delete info.resumeOnBoot;
+      info.skillExposure = parseSkillExposure(info.skillExposure);
       if (info.backendType === "codex" && Array.isArray(info.rejectedCodexModels)) {
         this.syncRejectedCodexModels(info.sessionId, new Set(info.rejectedCodexModels));
       }
@@ -1819,6 +1841,11 @@ export class CliLauncher {
         args.push("--disallowedTools", tool);
       }
     }
+    // Session-only plugin with the Aura toolkit; re-passed on every spawn
+    // (resume included) so the decision persisted at first spawn holds.
+    if (options.skillPluginDir) {
+      args.push("--plugin-dir", options.skillPluginDir);
+    }
 
     // Relaunch restores the CLI's conversation context. This is what makes a
     // session resume where it stopped after the transport (or the server) died.
@@ -1942,6 +1969,7 @@ export class CliLauncher {
       ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
       : `ws://localhost:${this.port}/ws/cli/${sessionId}`;
 
+    options = this.applyClaudeSkillExposure(sessionId, info, options, binary, isContainerized);
     const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, sdkUrl);
 
     const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
@@ -2046,6 +2074,7 @@ export class CliLauncher {
       return;
     }
 
+    options = this.applyClaudeSkillExposure(sessionId, info, options, binary, isContainerized);
     const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, null);
     const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
       info, options, binary, args, isContainerized,
@@ -2168,6 +2197,152 @@ export class CliLauncher {
     });
 
     this.persistState();
+  }
+
+  /** Root of the Aura skill-pack tree; a seam for tests. */
+  skillPackRoot = DEFAULT_PACK_ROOT;
+  /** `--plugin-dir` support of a Claude binary; a seam for tests. */
+  probeClaudePluginDir: (binary: string) => boolean = claudeSupportsPluginDir;
+
+  /** The `uiux` layer for this spawn. Observers are read-only reviewers: no toolkit. */
+  private uiuxWanted(options: LaunchOptions): boolean {
+    return options.layers?.uiux !== false && options.sessionGroupRole !== "observer";
+  }
+
+  /** Decide once (first spawn) and persist; later spawns reuse the stored decision. */
+  private decideOnce(
+    info: SdkSessionInfo,
+    decide: () => SkillExposure,
+  ): SkillExposure {
+    if (info.skillExposure) return info.skillExposure;
+    const exposure = decide();
+    info.skillExposure = exposure;
+    log.info("skill-exposure", "toolkit exposure decided", {
+      event: "skill_exposure.decided",
+      sessionId: info.sessionId,
+      backend: exposure.backend,
+      status: exposure.status,
+      reason: exposure.reason,
+      version: exposure.version,
+      provided: providedNames(exposure),
+    });
+    this.persistState();
+    return exposure;
+  }
+
+  /**
+   * Claude: expose the toolkit as a session-only plugin (`--plugin-dir`), never
+   * by writing into the user's `~/.claude`. Names the user already has (user
+   * or project skills dir) are not provided — the user's skill wins.
+   */
+  private applyClaudeSkillExposure(
+    sessionId: string,
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    binary: string,
+    isContainerized: boolean,
+  ): LaunchOptions {
+    try {
+      const exposure = this.decideOnce(info, () => {
+        const pack = readCurrentPack(this.skillPackRoot);
+        const configDir = options.env?.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+        const existing = "error" in pack ? [] : [
+          ...listExistingSkills(join(configDir, "skills"), pack.manifest),
+          ...listExistingSkills(join(info.cwd, ".claude", "skills"), pack.manifest),
+        ];
+        return decideSkillExposure({
+          backend: "claude",
+          enabled: this.uiuxWanted(options),
+          containerized: isContainerized,
+          // Probed only when a pack exists: no `--help` spawn on installs without one.
+          cliSupportsPluginDir: !isContainerized && !("error" in pack) && this.probeClaudePluginDir(binary),
+          pack,
+          existing,
+        });
+      });
+      const names = providedNames(exposure);
+      if (exposure.backend !== "claude" || !exposure.version || names.length === 0) return options;
+      const built = ensurePluginExposure({ root: this.skillPackRoot, version: exposure.version, names });
+      if ("error" in built) {
+        log.warn("skill-exposure", "toolkit plugin dir unavailable for this spawn", {
+          event: "skill_exposure.plugin_dir_failed", sessionId, version: exposure.version, error: built.error,
+        });
+        return options;
+      }
+      exposure.pluginDir = built.dir;
+      return {
+        ...options,
+        skillPluginDir: built.dir,
+        // A skill script must not drop __pycache__ next to itself (B1 observer STOP).
+        env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" },
+      };
+    } catch (err) {
+      log.warn("skill-exposure", "toolkit exposure failed; spawning without it", {
+        event: "skill_exposure.failed", sessionId, error: err instanceof Error ? err.message : String(err),
+      });
+      return options;
+    }
+  }
+
+  /**
+   * Codex: converge `<CODEX_HOME>/skills` (Aura-managed per-session home, never
+   * the user's ~/.codex) on the decision — marked read-only copies of provided
+   * skills; Aura copies of anything else (toolkit off included) are removed.
+   * Dirs that are not provably Aura's are never touched (skill-pack.syncCopies).
+   */
+  private applyCodexSkillExposure(
+    sessionId: string,
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    codexHome: string,
+    isContainerized: boolean,
+  ): LaunchOptions {
+    if (isContainerized) {
+      this.decideOnce(info, () => decideSkillExposure({
+        backend: "codex", enabled: this.uiuxWanted(options), containerized: true,
+        pack: { error: "container" }, existing: [],
+      }));
+      return options;
+    }
+    const parent = join(codexHome, "skills");
+    try {
+      const exposure = this.decideOnce(info, () => {
+        const pack = readCurrentPack(this.skillPackRoot);
+        return decideSkillExposure({
+          backend: "codex",
+          enabled: this.uiuxWanted(options),
+          containerized: false,
+          pack,
+          existing: "error" in pack ? [] : listExistingSkills(parent, pack.manifest),
+        });
+      });
+      const names = providedNames(exposure);
+      if (exposure.backend !== "codex" || !exposure.version || names.length === 0) {
+        // Off / unavailable / nothing provided: remove only Aura's own copies.
+        if (existsSync(parent)) syncCopies({ parent, packDir: "", manifest: { entries: [] }, plan: [] });
+        return options;
+      }
+      const packDir = join(this.skillPackRoot, "versions", exposure.version);
+      const v = verifyVersionDir(packDir);
+      if ("errors" in v) {
+        log.warn("skill-exposure", "decided pack version no longer verifies; Codex copies left as they are", {
+          event: "skill_exposure.version_missing", sessionId, version: exposure.version, errors: v.errors.slice(0, 3),
+        });
+        return options;
+      }
+      syncCopies({
+        parent,
+        packDir,
+        manifest: v.manifest,
+        plan: exposure.items.map((i) => ({ name: i.name, outcome: i.outcome === "provide" ? "provide" : "disabled", reasons: i.reasons })),
+      });
+      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" } };
+    } catch (err) {
+      log.warn("skill-exposure", "Codex toolkit sync failed; spawning without changes", {
+        event: "skill_exposure.failed", sessionId, error: err instanceof Error ? err.message : String(err),
+      });
+      return options;
+    }
   }
 
   /**
@@ -2374,6 +2549,7 @@ export class CliLauncher {
     if (!isContainerized) {
       this.prepareCodexHome(codexHome);
     }
+    options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);
 
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
@@ -2655,6 +2831,7 @@ export class CliLauncher {
     if (!isContainerized) {
       this.prepareCodexHome(codexHome);
     }
+    options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);
 
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;

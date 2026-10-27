@@ -11,6 +11,10 @@
  *                    pair creation).
  *  - `council`     — the multi-expert `/council-*` skills.
  *  - `autoProceed` — the AFK idle-timeout driver (`autoProceedOnIdle`).
+ *  - `uiux`        — the shipped skill pack (UI/UX skills + the Council
+ *                    catalog, `packs/skills`), exposed at spawn by
+ *                    `skill-exposure.ts`. Settings → "UI/UX toolkit"
+ *                    (`settings.uiuxToolkit`) lowers the default to off.
  *
  * Defaults are every layer ON — i.e. the layers are AVAILABLE, and a
  * default-flag session produces a byte-identical spawn argv. "Available" is
@@ -20,7 +24,7 @@
  * opt-in {@link KB_AUTO_PRIME_DIRECTIVE} restores load-at-start).
  *
  * Two inputs, one precedence rule:
- *  1. Server env `COMPANION_LAYER_{KNOWLEDGE,OBSERVER,COUNCIL,AUTO_PROCEED}`
+ *  1. Server env `COMPANION_LAYER_{KNOWLEDGE,OBSERVER,COUNCIL,AUTO_PROCEED,UIUX}`
  *     sets the server default (read at boot; warnings logged there).
  *  2. Per-session `layers: { knowledge?: "on"|"off", ... }` on
  *     `POST /sessions/create[-stream]` overrides the server default.
@@ -38,12 +42,14 @@
  *    (documented limitation — soft for Codex).
  *  - `observer` / `autoProceed` are enforced host-side (routes) and are
  *    provider-independent.
+ *  - `uiux` OFF: the session gets no `--plugin-dir` (Claude) and Aura's
+ *    copies are removed from its Codex home — enforced by not delivering.
  * Residual confound: the workspace CLAUDE.md/AGENTS.md still mentions the KB;
  * the directive tells the agent to ignore it. Full removal of those files is
  * the bench harness's job (naked variants), not the server's.
  */
 
-export const LAYER_NAMES = ["knowledge", "observer", "council", "autoProceed"] as const;
+export const LAYER_NAMES = ["knowledge", "observer", "council", "autoProceed", "uiux"] as const;
 export type LayerName = (typeof LAYER_NAMES)[number];
 export type LayerFlags = Readonly<Record<LayerName, boolean>>;
 
@@ -52,6 +58,7 @@ export const DEFAULT_LAYER_FLAGS: LayerFlags = Object.freeze({
   observer: true,
   council: true,
   autoProceed: true,
+  uiux: true,
 });
 
 export const LAYER_ENV_KEYS: Readonly<Record<LayerName, string>> = Object.freeze({
@@ -59,6 +66,7 @@ export const LAYER_ENV_KEYS: Readonly<Record<LayerName, string>> = Object.freeze
   observer: "COMPANION_LAYER_OBSERVER",
   council: "COMPANION_LAYER_COUNCIL",
   autoProceed: "COMPANION_LAYER_AUTO_PROCEED",
+  uiux: "COMPANION_LAYER_UIUX",
 });
 
 const ON_VALUES = new Set(["on", "1", "true"]);
@@ -266,15 +274,18 @@ export type LayerBoundaryResult =
  *  - `autoProceed` OFF → drops `autoProceedOnIdle`, so no group is ever
  *    configured to auto-proceed;
  *  - `kbAutoPrime` (opt-in KB directive) resolved against `defaults`
- *    (the server setting) and kept only when ON with `knowledge` ON.
+ *    (the server setting) and kept only when ON with `knowledge` ON;
+ *  - `defaults.uiuxToolkit === false` (Settings → "UI/UX toolkit") lowers
+ *    the `uiux` default to off; an explicit `layers.uiux` still wins.
  */
 export function applyLayerFlagsToCreateBody(
   body: Record<string, unknown>,
   serverFlags: LayerFlags,
-  defaults: { kbAutoPrime?: boolean } = {},
+  defaults: { kbAutoPrime?: boolean; uiuxToolkit?: boolean } = {},
 ): LayerBoundaryResult {
   const { layers: rawLayers, ...rest } = body;
-  const { flags, warnings } = resolveSessionLayerFlags(rawLayers, serverFlags);
+  const base = defaults.uiuxToolkit === false ? Object.freeze({ ...serverFlags, uiux: false }) : serverFlags;
+  const { flags, warnings } = resolveSessionLayerFlags(rawLayers, base);
   if (!flags.observer && rest.councilMode === "council") {
     return {
       ok: false,

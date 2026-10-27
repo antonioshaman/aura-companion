@@ -24,8 +24,10 @@
 //    Each carries the ownership marker; a dir is replaced or removed only while
 //    readOwnership() says `aura`, re-checked after it has been renamed out of the way.
 //
-// Wiring (boot sweep, spawn exposure, Codex homes, the container) is Phase B3; this
-// module only provides the operations.
+// 3. Claude plugin exposures, `exposures/<version>-<hash>/` (Phase B3, see below).
+//
+// Wiring (boot sweep + install, spawn exposure, Codex homes) lives in
+// skill-exposure.ts and cli-launcher.ts; this module only provides the operations.
 
 import { randomBytes } from "node:crypto";
 import {
@@ -38,9 +40,11 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -519,6 +523,8 @@ function trashVersion(root: string, version: string): void {
 export interface SweepResult {
   removedStaging: string[];
   removedVersions: string[];
+  /** Claude plugin exposures of pruned versions (plus their stale staging/trash). */
+  removedExposures: string[];
 }
 
 /**
@@ -528,7 +534,7 @@ export interface SweepResult {
  */
 export function sweepPackRoot(root = DEFAULT_PACK_ROOT, opts: { keep?: string[]; now?: number } = {}): SweepResult {
   const vdir = versionsDir(root);
-  const result: SweepResult = { removedStaging: sweepStaging(vdir, STAGING_PREFIX, opts.now ?? Date.now()), removedVersions: [] };
+  const result: SweepResult = { removedStaging: sweepStaging(vdir, STAGING_PREFIX, opts.now ?? Date.now()), removedVersions: [], removedExposures: [] };
   let names: string[];
   try {
     names = readdirSync(vdir);
@@ -547,10 +553,132 @@ export function sweepPackRoot(root = DEFAULT_PACK_ROOT, opts: { keep?: string[];
     trashVersion(root, name);
     result.removedVersions.push(name);
   }
-  if (result.removedStaging.length || result.removedVersions.length) {
+  if (ptr) result.removedExposures = sweepExposures(root, keep, opts.now ?? Date.now());
+  if (result.removedStaging.length || result.removedVersions.length || result.removedExposures.length) {
     log.info("skill-pack", "pack root swept", { event: "skill_pack.swept", ...result });
   }
   return result;
+}
+
+// ─── Claude plugin exposures (Phase B3) ─────────────────────────────────────
+//
+// Claude Code loads a session-only plugin with `--plugin-dir <dir>`; its skills
+// are `<dir>/skills/<name>/SKILL.md` and answer as `/aura-toolkit:<name>`. An
+// exposure is one such plugin dir per (version, provided names):
+//   exposures/<version>-<12-hex>/.claude-plugin/plugin.json
+//   exposures/<version>-<12-hex>/skills/<name> -> ../../../versions/<version>/<name>
+// The links are relative and stay inside the pack root; the trees they point at are
+// the verified read-only versions. Nothing is written into a user's skills dir.
+
+export const PLUGIN_NAME = "aura-toolkit";
+const EXPOSURE_RE = /^([0-9a-f]{16})-[0-9a-f]{12}$/;
+
+function exposuresDir(root: string): string {
+  return join(root, "exposures");
+}
+
+function pluginJson(): string {
+  return `${JSON.stringify({ name: PLUGIN_NAME, description: "UI/UX and Council skills shipped with Aura Companion" }, null, 2)}\n`;
+}
+
+/** What `exposures/<id>` must contain, exactly. */
+function exposureMismatches(dir: string, version: string, names: string[]): string[] {
+  const out: string[] = [];
+  const list = (d: string): string[] => {
+    try {
+      return readdirSync(d).sort();
+    } catch {
+      return [];
+    }
+  };
+  if (list(dir).join("\0") !== [".claude-plugin", "skills"].join("\0")) out.push("unexpected top-level entries");
+  if (list(join(dir, ".claude-plugin")).join("\0") !== "plugin.json") out.push("unexpected .claude-plugin entries");
+  try {
+    if (readFileSync(join(dir, ".claude-plugin", "plugin.json"), "utf8") !== pluginJson()) out.push("plugin.json differs");
+  } catch {
+    out.push("plugin.json unreadable");
+  }
+  const want = [...names].sort();
+  if (list(join(dir, "skills")).join("\0") !== want.join("\0")) out.push("skill links differ");
+  for (const n of want) {
+    const link = join(dir, "skills", n);
+    const st = lstatSync(link, { throwIfNoEntry: false });
+    if (!st?.isSymbolicLink() || readlinkSync(link) !== `../../../versions/${version}/${n}`) out.push(`${n}: not the expected link`);
+  }
+  return out;
+}
+
+/**
+ * The plugin dir that exposes `names` from version `version` to a Claude session,
+ * built once (staging → rename, read-only) and reused while it verifies. Only names
+ * of `skill` entries present in that verified version are accepted.
+ */
+export function ensurePluginExposure(opts: { root?: string; version: string; names: string[] }): { dir: string } | { error: string } {
+  const root = opts.root ?? DEFAULT_PACK_ROOT;
+  if (!VERSION_RE.test(opts.version)) return { error: `bad version ${JSON.stringify(opts.version)}` };
+  const v = verifyVersionDir(join(versionsDir(root), opts.version));
+  if ("errors" in v) return { error: `version ${opts.version}: ${v.errors.slice(0, 3).join("; ")}` };
+  const skills = new Set(v.manifest.entries.filter((e) => e.kind === "skill").map((e) => e.name));
+  const names = [...new Set(opts.names)].sort();
+  const bad = names.filter((n) => !skills.has(n) || !isPackName(n));
+  if (bad.length) return { error: `not skills of version ${opts.version}: ${bad.join(", ")}` };
+  if (names.length === 0) return { error: "nothing to expose" };
+
+  const edir = exposuresDir(root);
+  mkdirSync(edir, { recursive: true, mode: 0o755 });
+  const dest = join(edir, `${opts.version}-${sha256(names.join("\n")).slice(0, 12)}`);
+  if (lstatSync(dest, { throwIfNoEntry: false })) {
+    if (exposureMismatches(dest, opts.version, names).length === 0) return { dir: dest };
+    const trash = join(edir, `${TRASH_PREFIX}${rand()}`);
+    renameSync(dest, trash);
+    removeTree(trash);
+  }
+  const staging = beginStaging(edir, STAGING_PREFIX);
+  try {
+    mkdirSync(join(staging.dir, ".claude-plugin"), { mode: 0o755 });
+    writeNewFile(join(staging.dir, ".claude-plugin", "plugin.json"), pluginJson(), 0o444);
+    mkdirSync(join(staging.dir, "skills"), { mode: 0o755 });
+    for (const n of names) symlinkSync(`../../../versions/${opts.version}/${n}`, join(staging.dir, "skills", n));
+    makeReadOnly(staging.dir);
+    const miss = exposureMismatches(staging.dir, opts.version, names);
+    if (miss.length) throw new Error(miss.join("; "));
+    try {
+      renameSync(staging.dir, dest);
+    } catch (err) {
+      // Lost a race to a concurrent builder: theirs is the same content address.
+      if (exposureMismatches(dest, opts.version, names).length) throw err;
+      abandonStaging(staging);
+      return { dir: dest };
+    }
+    rmSync(staging.intent, { force: true });
+  } catch (err) {
+    if (existsSync(staging.dir)) abandonStaging(staging);
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+  log.info("skill-pack", "plugin exposure built", { event: "skill_pack.exposure_built", dir: dest, version: opts.version, names });
+  return { dir: dest };
+}
+
+/** Prune exposures of versions not in `keep`, leftover trash and stale staging (EC-8). */
+function sweepExposures(root: string, keep: Set<string>, now: number): string[] {
+  const edir = exposuresDir(root);
+  const removed = sweepStaging(edir, STAGING_PREFIX, now);
+  let names: string[];
+  try {
+    names = readdirSync(edir);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const m = EXPOSURE_RE.exec(name);
+    if (name.startsWith(TRASH_PREFIX) || (m && !keep.has(m[1]))) {
+      const trash = name.startsWith(TRASH_PREFIX) ? join(edir, name) : join(edir, `${TRASH_PREFIX}${rand()}`);
+      if (!name.startsWith(TRASH_PREFIX)) renameSync(join(edir, name), trash);
+      removeTree(trash);
+      removed.push(join(edir, name));
+    }
+  }
+  return removed;
 }
 
 // ─── Copies outside the Aura tree (Codex homes, container) ──────────────────

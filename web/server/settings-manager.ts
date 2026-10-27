@@ -69,6 +69,11 @@ export interface CompanionSettings {
    */
   kbAutoPrime: boolean;
   /**
+   * Expose the shipped UI/UX toolkit (`packs/skills`) to new sessions — the
+   * default of the `uiux` layer flag. Default on; applies to new sessions only.
+   */
+  uiuxToolkit: boolean;
+  /**
    * When a session stops on a usage limit (Claude session/weekly limit,
    * Codex usage limit), automatically send a continuation prompt shortly
    * after the limit resets. Default ON. See `auto-resume-scheduler.ts`.
@@ -119,6 +124,7 @@ let settings: CompanionSettings = {
   telemetryEnabled: true,
   defaultSessionMode: "solo",
   kbAutoPrime: false,
+  uiuxToolkit: true,
   autoResumeAfterLimit: true,
   councilSecondReviewer: { ...DEFAULT_SECOND_REVIEWER_CONFIG },
   kbAnalysis: { ...DEFAULT_KB_ANALYSIS_SETTINGS },
@@ -157,6 +163,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : true,
     defaultSessionMode: raw?.defaultSessionMode === "council" ? "council" : "solo",
     kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
+    uiuxToolkit: typeof raw?.uiuxToolkit === "boolean" ? raw.uiuxToolkit : true,
     autoResumeAfterLimit: typeof raw?.autoResumeAfterLimit === "boolean" ? raw.autoResumeAfterLimit : true,
     councilSecondReviewer: normalizeSecondReviewerConfig(raw?.councilSecondReviewer),
     kbAnalysis: normalizeKbAnalysisSettings(raw?.kbAnalysis),
@@ -191,7 +198,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "uiuxToolkit" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -221,6 +228,7 @@ export function updateSettings(
     telemetryEnabled: patch.telemetryEnabled ?? settings.telemetryEnabled,
     defaultSessionMode: patch.defaultSessionMode ?? settings.defaultSessionMode,
     kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
+    uiuxToolkit: patch.uiuxToolkit ?? settings.uiuxToolkit,
     autoResumeAfterLimit: patch.autoResumeAfterLimit ?? settings.autoResumeAfterLimit,
     councilSecondReviewer: patch.councilSecondReviewer ?? settings.councilSecondReviewer,
     kbAnalysis: patch.kbAnalysis ?? settings.kbAnalysis,
