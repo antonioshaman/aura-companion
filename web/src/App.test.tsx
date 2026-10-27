@@ -16,7 +16,7 @@
  * - Various page routes (settings, environments, etc.)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // ─── Hoisted mocks (must be before vi.mock calls) ────────────────
@@ -406,6 +406,44 @@ describe("App", () => {
       rerender(<App />);
 
       // The slow session list finally arrives with a live session.
+      setStoreValues({
+        sdkSessions: [
+          { sessionId: "live", state: "connected", cwd: "/repo", createdAt: 100, archived: false },
+        ],
+      });
+      rerender(<App />);
+
+      expect(navigateToSession).not.toHaveBeenCalled();
+    });
+
+    it("does not redirect to an old session once the user touched the home form before the list loaded", () => {
+      // Regression: on a phone over a slow link the home form is visible before
+      // the first /api/sessions poll lands. The user starts picking a model or
+      // project folder (no "+" tap, so homeResetKey stays 0); when the list
+      // arrived the recovery yanked them into the newest live session and the
+      // half-made choice was lost. Any pointer/key input must disarm it.
+      setStoreValues({ currentSessionId: null, sdkSessions: [] });
+      const { rerender } = render(<App />);
+
+      fireEvent.pointerDown(document.body);
+
+      setStoreValues({
+        sdkSessions: [
+          { sessionId: "live", state: "connected", cwd: "/repo", createdAt: 100, archived: false },
+        ],
+      });
+      rerender(<App />);
+
+      expect(navigateToSession).not.toHaveBeenCalled();
+    });
+
+    it("disarms the recovery on a keypress before the list loaded", () => {
+      // Same as above for keyboard users typing into the home composer.
+      setStoreValues({ currentSessionId: null, sdkSessions: [] });
+      const { rerender } = render(<App />);
+
+      fireEvent.keyDown(document.body, { key: "a" });
+
       setStoreValues({
         sdkSessions: [
           { sessionId: "live", state: "connected", cwd: "/repo", createdAt: 100, archived: false },

@@ -204,6 +204,24 @@ export default function App() {
     }
   }, [currentSessionId, homeResetKey, isAuthenticated, route.page, sdkSessions]);
 
+  // Any tap or keypress before the session list lands also disarms the
+  // recovery: on a slow phone link the home form is already on screen and the
+  // user may be picking a model or folder when the list arrives — yanking them
+  // into an old session then throws that choice away.
+  useEffect(() => {
+    const disarm = () => {
+      initialServerSessionRecoveryRef.current = true;
+      document.removeEventListener("pointerdown", disarm, true);
+      document.removeEventListener("keydown", disarm, true);
+    };
+    document.addEventListener("pointerdown", disarm, true);
+    document.addEventListener("keydown", disarm, true);
+    return () => {
+      document.removeEventListener("pointerdown", disarm, true);
+      document.removeEventListener("keydown", disarm, true);
+    };
+  }, []);
+
   // Keep git changed-files count in sync for the badge regardless of which tab is active.
   // DiffPanel does the same when mounted; this covers the case where the diff tab is closed.
   const changedFilesTick = useStore((s) => currentSessionId ? s.changedFilesTick.get(currentSessionId) ?? 0 : 0);
