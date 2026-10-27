@@ -53,6 +53,7 @@ import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
+import { registerGuardRoutes } from "./routes/guard-routes.js";
 import { registerStatsRoutes } from "./routes/stats-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
@@ -2620,6 +2621,8 @@ export function createRoutes(
     wsBridge,
     terminalManager,
   });
+  // Guards-pack "Allow once" / "Dismiss" (Claude-only; guard-denial.ts).
+  registerGuardRoutes(api, { wsBridge });
 
   registerSkillRoutes(api);
   registerCronRoutes(api, cronScheduler);

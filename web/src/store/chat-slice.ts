@@ -11,6 +11,8 @@ export interface ChatSlice {
   appendMessage: (sessionId: string, msg: ChatMessage) => void;
   setMessages: (sessionId: string, msgs: ChatMessage[]) => void;
   updateLastAssistantMessage: (sessionId: string, updater: (msg: ChatMessage) => ChatMessage) => void;
+  /** Apply a guards-pack denial resolution (live `guard_denial_resolved` or a local API success). Idempotent. */
+  resolveGuardDenial: (sessionId: string, toolUseId: string, status: "allowed" | "dismissed", resolvedAt?: number) => void;
   setStreaming: (sessionId: string, text: string | null) => void;
   setStreamingStats: (sessionId: string, stats: { startedAt?: number; outputTokens?: number } | null) => void;
 
@@ -41,6 +43,22 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set) 
     set((s) => {
       const messages = new Map(s.messages);
       messages.set(sessionId, msgs);
+      return { messages };
+    }),
+
+  resolveGuardDenial: (sessionId, toolUseId, status, resolvedAt) =>
+    set((s) => {
+      const list = s.messages.get(sessionId);
+      if (!list) return s;
+      let changed = false;
+      const next = list.map((m) => {
+        if (!m.guardDenial || m.guardDenial.toolUseId !== toolUseId || m.guardDenial.status === status) return m;
+        changed = true;
+        return { ...m, guardDenial: { ...m.guardDenial, status, resolvedAt: resolvedAt ?? Date.now() } };
+      });
+      if (!changed) return s;
+      const messages = new Map(s.messages);
+      messages.set(sessionId, next);
       return { messages };
     }),
 

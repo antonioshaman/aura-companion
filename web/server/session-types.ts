@@ -101,7 +101,26 @@ export interface CLIHookResponseMessage {
   session_id: string;
 }
 
+/**
+ * Emitted by the CLI when a tool call is denied without a can_use_tool
+ * control_request — e.g. a PreToolUse hook answered "ask" while the session
+ * runs with permissionMode bypassPermissions. A tool_result with the same
+ * text follows. Aura maps only guards-pack hook denials (see
+ * guard-denial.ts); other shapes are tolerated and ignored (EC-5).
+ */
+export interface CLIPermissionDeniedMessage {
+  type: "system";
+  subtype: "permission_denied";
+  tool_name?: string;
+  tool_use_id?: string;
+  decision_reason_type?: string;
+  message?: string;
+  uuid?: string;
+  session_id?: string;
+}
+
 export type CLISystemMessage =
+  | CLIPermissionDeniedMessage
   | CLISystemInitMessage
   | CLISystemStatusMessage
   | CLICompactBoundaryMessage
@@ -409,6 +428,16 @@ export type BrowserIncomingMessageBase =
     timestamp?: number;
   }
   | { type: "result"; data: CLIResultMessage }
+  // Guards-pack hook denial (Claude-only; see guard-denial.ts). History-backed:
+  // the record in messageHistory is updated in place when resolved, so a
+  // reload shows the final status. `guard_denial_resolved` is the live update.
+  | { type: "guard_denied"; denial: import("./guard-denial.js").GuardDenial; timestamp?: number }
+  | {
+    type: "guard_denial_resolved";
+    toolUseId: string;
+    status: "allowed" | "dismissed";
+    resolvedAt: number;
+  }
   | { type: "permission_request"; request: PermissionRequest }
   | { type: "permission_cancelled"; request_id: string }
   | { type: "permission_auto_resolved"; request: PermissionRequest; behavior: "allow" | "deny"; reason: string }

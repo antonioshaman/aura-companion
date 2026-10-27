@@ -1,0 +1,144 @@
+{
+  "_comment": "Frame shape of a guards-pack PreToolUse 'ask' under permissionMode bypassPermissions, as observed on prod 2026-10-27 (Claude CLI auto-denies, emits system/permission_denied, then a tool_result with the same text). Reason text is the pre-fix guards.py wording (legacy 'Disable with GUARDS_DISABLE' footer, no '(guards decision:' marker). Host names are real-shape; ids synthetic.",
+  "command": "ssh root@91.222.236.11 'systemctl restart auraengine-bot.service && systemctl status auraengine-bot.service --no-pager | head -5'",
+  "toolUseId": "toolu_01GuardsReplayServiceRestart",
+  "frames": [
+    {
+      "dir": "in",
+      "raw": {
+        "type": "system",
+        "subtype": "init",
+        "cwd": "/root/auraengine",
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11",
+        "tools": [
+          "Bash",
+          "Read",
+          "Edit"
+        ],
+        "mcp_servers": [],
+        "model": "claude-opus-5-5",
+        "permissionMode": "bypassPermissions",
+        "apiKeySource": "none",
+        "claude_code_version": "2.1.300",
+        "slash_commands": [],
+        "output_style": "default",
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0001"
+      }
+    },
+    {
+      "dir": "in",
+      "raw": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_01GuardsReplay1",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-opus-5-5",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01GuardsReplayServiceRestart",
+              "name": "Bash",
+              "input": {
+                "command": "ssh root@91.222.236.11 'systemctl restart auraengine-bot.service && systemctl status auraengine-bot.service --no-pager | head -5'",
+                "description": "Restart the bot on the RU host"
+              }
+            }
+          ],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 80,
+            "cache_read_input_tokens": 40000,
+            "cache_creation_input_tokens": 0
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11",
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0002"
+      }
+    },
+    {
+      "dir": "in",
+      "raw": {
+        "type": "system",
+        "subtype": "permission_denied",
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01GuardsReplayServiceRestart",
+        "decision_reason_type": "hook",
+        "message": "[guards:service-restart] `systemctl restart auraengine-bot.service` on remote host 'root@91.222.236.11' (via ssh from local host 'aura-prod'). Confirm this is the intended host and that the service runs the right branch/commit with migrations applied (aurasoul 10-04: prod was started from a branch without migrations). If this service hosts your own agent session (e.g. the Aura/companion server), restarting it kills this very command (exit 137) - run it detached (`systemd-run --on-active=2 systemctl restart ...`) and verify afterwards.\n(Disable with GUARDS_DISABLE=service-restart if this is a false positive.)",
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0003",
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11"
+      }
+    },
+    {
+      "dir": "in",
+      "raw": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01GuardsReplayServiceRestart",
+              "content": "[guards:service-restart] `systemctl restart auraengine-bot.service` on remote host 'root@91.222.236.11' (via ssh from local host 'aura-prod'). Confirm this is the intended host and that the service runs the right branch/commit with migrations applied (aurasoul 10-04: prod was started from a branch without migrations). If this service hosts your own agent session (e.g. the Aura/companion server), restarting it kills this very command (exit 137) - run it detached (`systemd-run --on-active=2 systemctl restart ...`) and verify afterwards.\n(Disable with GUARDS_DISABLE=service-restart if this is a false positive.)",
+              "is_error": true
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11",
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0004"
+      }
+    },
+    {
+      "dir": "in",
+      "raw": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_01GuardsReplay2",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-opus-5-5",
+          "content": [
+            {
+              "type": "text",
+              "text": "The guards hook blocked the restart. Should I restart auraengine-bot.service on 91.222.236.11?"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 5,
+            "output_tokens": 30,
+            "cache_read_input_tokens": 40100,
+            "cache_creation_input_tokens": 0
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11",
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0005"
+      }
+    },
+    {
+      "dir": "in",
+      "raw": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "duration_ms": 4200,
+        "duration_api_ms": 3900,
+        "num_turns": 2,
+        "result": "The guards hook blocked the restart.",
+        "session_id": "4f0c2d0e-6b8a-4d7e-9a51-2a0f7c3b9e11",
+        "total_cost_usd": 0.01,
+        "usage": {
+          "input_tokens": 17,
+          "output_tokens": 110
+        },
+        "uuid": "0b0f6a2e-1c7e-4a43-9a0b-5f9f0b8f0006"
+      }
+    }
+  ]
+}

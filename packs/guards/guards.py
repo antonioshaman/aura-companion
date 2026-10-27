@@ -19,13 +19,24 @@ The Stop hook answers `{"decision": "block", "reason": ...}`.
 Fail-open by design: any internal error produces no output and exit 0, so a guard
 bug can never wedge the agent. Pure stdlib; Python >= 3.8.
 
-Disable rules with GUARDS_DISABLE="rule-id,rule-id" (env) or a project file
-`.claude/guards.json` containing {"disable": ["rule-id", ...]}. `GUARDS_DISABLE=all`
-turns the pack off. Rule ids are listed in RULES below and in README.md.
+Disable rules with GUARDS_DISABLE="rule-id,rule-id" in the HOOK's environment (e.g. the `env`
+block of settings.json) or a project file `.claude/guards.json` containing
+{"disable": ["rule-id", ...]}. `GUARDS_DISABLE=all` turns the pack off. An inline
+`GUARDS_DISABLE=x cmd` prefix on the agent's command does NOT work: the hook inspects the command
+string before it runs and only reads its own environment. Rule ids are listed in RULES below and
+in README.md.
+
+One-shot approval ("Allow once", Aura): an "ask"-level decision is suppressed exactly once when
+`~/.companion/guards-allow/` holds an unexpired, HMAC-signed entry for the same rule(s) and the
+same exact command string (sha256), written by the Aura server after the user pressed
+"Allow once". The entry is consumed (renamed away, then deleted) before the command is allowed.
+"deny"-level findings can never be allowed once. See `consume_allow_once` below.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import posixpath
@@ -33,6 +44,7 @@ import re
 import shlex
 import socket
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -841,6 +853,22 @@ def _read_small(path: str) -> str:
         return ""
 
 
+def _guidance(level: str, rules: List[str]) -> str:
+    """Footer appended to ask/deny reasons. The leading `(guards decision: <level>.` marker is
+    machine-read by the Aura server (web/server/guard-denial.ts) - keep it stable."""
+    disable_json = json.dumps({"disable": rules})
+    inline_note = ("An inline `GUARDS_DISABLE=" + rules[0] + " <command>` prefix does NOT work: the hook checks "
+                   "the command before it runs and only reads its own environment.")
+    if level == "deny":
+        return ("(guards decision: deny. This cannot be approved once - do not retry; follow the advice above "
+                "or ask the user. If this is a false positive, the user can opt the project out persistently "
+                "with " + disable_json + " in <project>/.claude/guards.json. " + inline_note + ")")
+    return ("(guards decision: ask. Do not retry or work around this on your own - ask the user. In Aura the "
+            "user can press \"Allow once\" on the guard card to approve exactly this command one time. For a "
+            "persistent project-level opt-out of a false positive, add " + disable_json
+            + " to <project>/.claude/guards.json. " + inline_note + ")")
+
+
 def decide(findings: List[Finding], disabled: set) -> Optional[dict]:
     if "all" in disabled:
         return None
@@ -860,12 +888,148 @@ def decide(findings: List[Finding], disabled: set) -> Optional[dict]:
     text = "\n".join(lines)
     hso: dict = {"hookEventName": "PreToolUse"}
     if top.level in ("deny", "ask"):
+        blocking = []
+        for f in sorted(active, key=lambda f: -LEVEL_ORDER[f.level]):
+            if f.level in ("deny", "ask") and f.rule not in blocking:
+                blocking.append(f.rule)
         hso["permissionDecision"] = top.level
-        hso["permissionDecisionReason"] = text + (
-            f"\n(Disable with GUARDS_DISABLE={top.rule} if this is a false positive.)")
+        hso["permissionDecisionReason"] = text + "\n" + _guidance(top.level, blocking)
     else:
         hso["additionalContext"] = text
     return {"hookSpecificOutput": hso}
+
+
+# --------------------------------------------------------------------------------------
+# One-shot allowance ("Allow once" in Aura)
+# --------------------------------------------------------------------------------------
+#
+# Written by web/server/guard-denial.ts; keep the two in sync (format v1):
+#   ~/.companion/guards-allow/<random>.json  (dir 0700, files 0600)
+#   {"v": 1, "rule": "<first rule>", "rules": [...], "commandSha256": "<hex sha256 of the exact command>",
+#    "cwd": "<session cwd or ''>", "expiresAt": <epoch ms>, "nonce": "<hex>", "sig": "<hex hmac-sha256>"}
+#   sig = HMAC-SHA256(key, "guards-allow-v1\n" + ",".join(sorted(rules)) + "\n" + commandSha256 + "\n"
+#                          + cwd + "\n" + str(expiresAt) + "\n" + nonce)
+#   key = contents of ~/.companion/guards-allow/.hmac-key (created by the server, 0600).
+# No key file -> no entry is ever valid (fail closed). The HMAC stops an agent from approving
+# itself by just writing a JSON file; it is NOT a security boundary against an agent that
+# deliberately reads the key (same OS user) - see README "Allow once".
+
+ALLOW_SUBDIR = (".companion", "guards-allow")
+ALLOW_KEY_NAME = ".hmac-key"
+ALLOW_MAX_TTL_MS = 15 * 60 * 1000  # reject entries claiming a longer life than the server ever issues
+
+
+def allow_dir() -> str:
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return os.path.join(home, *ALLOW_SUBDIR)
+
+
+def command_sha256(command: str) -> str:
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def allow_signing_string(rules: Iterable[str], cmd_sha: str, cwd: str, expires_at: int, nonce: str) -> str:
+    return "\n".join(["guards-allow-v1", ",".join(sorted(rules)), cmd_sha, cwd, str(int(expires_at)), nonce])
+
+
+def _read_allow_key(directory: str) -> Optional[bytes]:
+    try:
+        with open(os.path.join(directory, ALLOW_KEY_NAME), "rb") as fh:
+            key = fh.read(4096).strip()
+        return key or None
+    except OSError:
+        return None
+
+
+def _cwd_matches(entry_cwd: str, cwd: str) -> bool:
+    if not entry_cwd:
+        return True
+    a = posixpath.normpath(entry_cwd)
+    b = posixpath.normpath(cwd or "")
+    return b == a or b.startswith(a.rstrip("/") + "/")
+
+
+def _valid_entry(entry: object, key: bytes, rules: set, cmd_sha: str, cwd: str, now_ms: int) -> Tuple[bool, bool]:
+    """Return (matches, expired)."""
+    if not isinstance(entry, dict) or entry.get("v") != 1:
+        return False, False
+    raw_rules = entry.get("rules")
+    if not isinstance(raw_rules, list):
+        raw_rules = [entry.get("rule")]
+    entry_rules = [r for r in raw_rules if isinstance(r, str) and r]
+    expires_at = entry.get("expiresAt")
+    sha = entry.get("commandSha256")
+    entry_cwd = entry.get("cwd") or ""
+    nonce = entry.get("nonce")
+    sig = entry.get("sig")
+    if (not entry_rules or not isinstance(expires_at, int) or isinstance(expires_at, bool)
+            or not isinstance(sha, str) or not isinstance(entry_cwd, str) or not isinstance(nonce, str)
+            or not isinstance(sig, str)):
+        return False, False
+    if expires_at <= now_ms:
+        return False, True
+    if expires_at > now_ms + ALLOW_MAX_TTL_MS:
+        return False, False
+    want = hmac.new(key, allow_signing_string(entry_rules, sha, entry_cwd, expires_at, nonce).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(want, sig):
+        return False, False
+    if not hmac.compare_digest(sha, cmd_sha):
+        return False, False
+    if not rules.issubset(set(entry_rules)):
+        return False, False
+    return _cwd_matches(entry_cwd, cwd), False
+
+
+def consume_allow_once(rules: Iterable[str], command: str, cwd: str, now_ms: Optional[int] = None,
+                       directory: Optional[str] = None) -> Optional[str]:
+    """If a valid one-shot entry covers every rule in `rules` for this exact command, consume it
+    and return its file name; else None. Consumption happens BEFORE the caller allows anything:
+    the entry is atomically renamed away (only one concurrent hook can win the rename), then
+    deleted. If the delete fails the renamed file no longer ends in .json and is never read again.
+    Expired entries are deleted opportunistically."""
+    rules = set(rules)
+    if not rules or not command:
+        return None
+    directory = directory or allow_dir()
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".json"))
+    except OSError:
+        return None
+    key = _read_allow_key(directory)
+    if key is None:
+        return None
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    cmd_sha = command_sha256(command)
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            if os.path.islink(path):
+                continue
+            with open(path, "r", encoding="utf-8") as fh:
+                entry = json.loads(fh.read(65536))
+        except (OSError, ValueError):
+            continue
+        matches, expired = _valid_entry(entry, key, rules, cmd_sha, cwd, now_ms)
+        if expired:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            continue
+        if not matches:
+            continue
+        claimed = f"{path}.consumed-{os.getpid()}-{int(time.time() * 1e6)}"
+        try:
+            os.rename(path, claimed)
+        except OSError:
+            continue  # someone else consumed it first (or it vanished)
+        try:
+            os.unlink(claimed)
+        except OSError:
+            pass
+        return name
+    return None
 
 
 def pre_tool_use(payload: dict) -> Optional[dict]:
@@ -877,6 +1041,23 @@ def pre_tool_use(payload: dict) -> Optional[dict]:
     if "all" in disabled:
         return None
     findings = Analyzer(cwd, process_env=_db_process_env()).analyze(cmd)
+    active = [f for f in findings if f.rule not in disabled]
+    levels = {f.level for f in active}
+    if "ask" in levels and "deny" not in levels:
+        # "deny" findings are never allowed once; an "ask" decision is, if the user approved
+        # exactly this command (and every ask rule in it) via Aura.
+        ask_rules = {f.rule for f in active if f.level == "ask"}
+        consumed = consume_allow_once(ask_rules, cmd, cwd)
+        if consumed:
+            rest = [f for f in active if f.level != "ask"]
+            note = ("[guards] Allowed once by the user via Aura (rules: " + ", ".join(sorted(ask_rules))
+                    + "). The approval is used up; the next run of a risky command asks again.")
+            out = decide(rest, disabled)
+            if out:
+                hso = out["hookSpecificOutput"]
+                hso["additionalContext"] = note + "\n" + hso.get("additionalContext", "")
+                return out
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}
     return decide(findings, disabled)
 
 

@@ -402,6 +402,9 @@ class HookProcess(unittest.TestCase):
 
     def run_hook(self, mode, stdin, env_extra=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("GUARDS_")}
+        # Isolated HOME: the pre hook reads (and may clean) ~/.companion/guards-allow.
+        env["HOME"] = tempfile.mkdtemp(prefix="guards-hookproc-home-")
+        self.addCleanup(shutil.rmtree, env["HOME"], True)
         env.update(env_extra or {})
         return subprocess.run([sys.executable, GUARDS_PY, mode], input=stdin, capture_output=True, text=True,
                               env=env, timeout=30)
@@ -445,6 +448,177 @@ class HookProcess(unittest.TestCase):
             stdin.read.return_value = "{}"
             self.assertEqual(guards.main(["guards.py", "pre"]), 0)
             stdout.write.assert_not_called()
+
+
+class GuidanceText(unittest.TestCase):
+    """The footer of every ask/deny reason. Before 2026-10 it said "Disable with GUARDS_DISABLE=<rule>",
+    which agents read as "prefix the command with GUARDS_DISABLE=<rule>" - that never worked (the hook
+    evaluates the command string before it runs and reads only its own env). The footer must now steer
+    the agent to the user / Allow once / .claude/guards.json and say the inline prefix does not work."""
+
+    def test_ask_footer(self):
+        _, _, text = decision_for("systemctl restart api")
+        self.assertNotIn("Disable with GUARDS_DISABLE", text)
+        self.assertIn("(guards decision: ask.", text)  # machine-read by web/server/guard-denial.ts
+        self.assertIn("Allow once", text)
+        self.assertIn('{"disable": ["service-restart"]}', text)
+        self.assertIn(".claude/guards.json", text)
+        self.assertIn("does NOT work", text)
+
+    def test_deny_footer_says_no_allow_once(self):
+        _, _, text = decision_for("pkill -f bun && git push -f")
+        self.assertIn("(guards decision: deny.", text)
+        self.assertIn("cannot be approved once", text)
+        self.assertIn('"pkill"', text)  # every blocking rule is listed for the project opt-out
+        self.assertIn('"force-push"', text)
+
+    def test_reason_starts_with_rule_tag(self):
+        # web/server/guard-denial.ts reads the rule id from the leading `[guards:<rule>]`.
+        _, _, text = decision_for("ssh h 'systemctl restart x'")
+        self.assertTrue(text.startswith("[guards:service-restart] "), text[:80])
+
+
+class AllowOnce(unittest.TestCase):
+    """One-shot approvals written by the Aura server (web/server/guard-denial.ts) after the user
+    pressed "Allow once". Every test uses a temporary HOME - never the real ~/.companion."""
+
+    CMD = "ssh prod 'systemctl restart auraengine-bot.service'"
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="guards-home-")
+        self.cwd = tempfile.mkdtemp(prefix="guards-cwd-")
+        self.env = mock.patch.dict(os.environ, {"HOME": self.home})
+        self.env.start()
+        self.dir = guards.allow_dir()
+        os.makedirs(self.dir, mode=0o700)
+        self.key = b"0123456789abcdef0123456789abcdef"
+        with open(os.path.join(self.dir, guards.ALLOW_KEY_NAME), "wb") as fh:
+            fh.write(self.key)
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(self.cwd, ignore_errors=True)
+
+    def write_entry(self, rules=("service-restart",), command=None, cwd=None, expires_in_ms=300_000,
+                    name="a.json", key=None, sig=None):
+        import hashlib
+        import hmac as _hmac
+        import time as _time
+        command = self.CMD if command is None else command
+        cwd = self.cwd if cwd is None else cwd
+        exp = int(_time.time() * 1000) + expires_in_ms
+        sha = guards.command_sha256(command)
+        nonce = "n" + name
+        signing = guards.allow_signing_string(rules, sha, cwd, exp, nonce)
+        entry = {"v": 1, "rule": rules[0], "rules": list(rules), "commandSha256": sha, "cwd": cwd,
+                 "expiresAt": exp, "nonce": nonce,
+                 "sig": sig or _hmac.new(key or self.key, signing.encode(), hashlib.sha256).hexdigest()}
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            json.dump(entry, fh)
+        return path
+
+    def pre(self, command=None, cwd=None):
+        out = guards.pre_tool_use({"tool_name": "Bash", "tool_input": {"command": command or self.CMD},
+                                   "cwd": cwd or self.cwd})
+        return (out or {}).get("hookSpecificOutput", {})
+
+    def test_match_consumes_and_second_use_asks_again(self):
+        path = self.write_entry()
+        first = self.pre()
+        self.assertNotIn("permissionDecision", first)          # allowed
+        self.assertIn("Allowed once", first.get("additionalContext", ""))
+        self.assertFalse(os.path.exists(path))                 # consumed (single use)
+        self.assertEqual(os.listdir(self.dir), [guards.ALLOW_KEY_NAME])  # no leftover claim file
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")  # second use blocked again
+
+    def test_mismatched_command_still_asks(self):
+        path = self.write_entry()
+        # Different whitespace is a different command: the approval is for the exact string.
+        self.assertEqual(self.pre(self.CMD.replace("restart", "restart ")).get("permissionDecision"), "ask")
+        self.assertEqual(self.pre("systemctl restart other").get("permissionDecision"), "ask")
+        self.assertTrue(os.path.exists(path))                  # not consumed by a mismatch
+
+    def test_expired_entry_ignored_and_cleaned(self):
+        path = self.write_entry(expires_in_ms=-1)
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+        self.assertFalse(os.path.exists(path))
+
+    def test_far_future_entry_rejected(self):
+        # The server only issues 5-minute approvals; a signed day-long one is not honoured.
+        self.write_entry(expires_in_ms=24 * 3600 * 1000)
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+
+    def test_deny_level_cannot_be_allowed_once(self):
+        cmd = "ssh prod 'pkill -f bot && systemctl restart bot'"
+        self.write_entry(rules=("pkill", "service-restart"), command=cmd)
+        self.assertEqual(self.pre(cmd).get("permissionDecision"), "deny")
+        self.assertEqual(len([n for n in os.listdir(self.dir) if n.endswith(".json")]), 1)  # untouched
+
+    def test_unsigned_or_forged_entry_rejected(self):
+        # An agent writing the JSON itself (without the server's key) must not approve itself.
+        self.write_entry(sig="0" * 64)
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+        self.write_entry(key=b"wrong-key", name="b.json")
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+
+    def test_missing_key_fails_closed(self):
+        self.write_entry()
+        os.unlink(os.path.join(self.dir, guards.ALLOW_KEY_NAME))
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+
+    def test_entry_must_cover_every_ask_rule(self):
+        cmd = "git reset --hard && systemctl restart api"
+        self.write_entry(rules=("service-restart",), command=cmd)
+        self.assertEqual(self.pre(cmd).get("permissionDecision"), "ask")
+        self.write_entry(rules=("git-reset-hard", "service-restart"), command=cmd, name="b.json")
+        self.assertNotIn("permissionDecision", self.pre(cmd))
+
+    def test_cwd_scoping(self):
+        self.write_entry()
+        other = tempfile.mkdtemp(prefix="guards-other-")
+        try:
+            self.assertEqual(self.pre(cwd=other).get("permissionDecision"), "ask")
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+        sub = os.path.join(self.cwd, "sub")
+        os.mkdir(sub)
+        self.assertNotIn("permissionDecision", self.pre(cwd=sub))  # a subdir of the session cwd is fine
+
+    def test_missing_dir_is_harmless(self):
+        shutil.rmtree(self.dir)
+        self.assertEqual(self.pre().get("permissionDecision"), "ask")
+
+    def test_concurrent_consumers_only_one_wins(self):
+        # Simulate the loser of the rename race: the file vanishes between listdir and rename.
+        self.write_entry()
+        real_rename = os.rename
+
+        def racing_rename(src, dst):
+            os.unlink(src)  # another hook consumed it first
+            return real_rename(src, dst)
+
+        with mock.patch.object(guards.os, "rename", side_effect=racing_rename):
+            self.assertIsNone(guards.consume_allow_once({"service-restart"}, self.CMD, self.cwd))
+
+    def test_check_mode_never_consumes(self):
+        path = self.write_entry()
+        guards.decide(guards.Analyzer(self.cwd).analyze(self.CMD), set())
+        self.assertTrue(os.path.exists(path))
+
+    def test_end_to_end_hook_process(self):
+        path = self.write_entry()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GUARDS_")}
+        env["HOME"] = self.home
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": self.CMD}, "cwd": self.cwd})
+        p = subprocess.run([sys.executable, GUARDS_PY, "pre"], input=payload, capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertNotIn("permissionDecision", json.loads(p.stdout)["hookSpecificOutput"])
+        self.assertFalse(os.path.exists(path))
+        p = subprocess.run([sys.executable, GUARDS_PY, "pre"], input=payload, capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
 
 
 class Installer(unittest.TestCase):

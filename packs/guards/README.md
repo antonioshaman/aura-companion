@@ -123,12 +123,57 @@ All of these cases are in the test table.
 ## Disabling rules
 
 - For one session or machine: set `GUARDS_DISABLE=pkill,rm-rf` in the environment Claude Code
-  runs in (for example the `env` block of `settings.json`). `GUARDS_DISABLE=all` turns the
-  whole pack off.
+  runs in (for example the `env` block of `settings.json`). The hook reads it from **its own**
+  environment. `GUARDS_DISABLE=all` turns the whole pack off.
 - For one project: create `<project>/.claude/guards.json` with `{"disable": ["service-restart"]}`.
 - To remove everything: `packs/guards/install.sh --uninstall --apply`.
 
-Each `ask`/`deny` reason ends with the exact `GUARDS_DISABLE=<id>` that would silence it.
+An inline prefix such as `GUARDS_DISABLE=service-restart ssh host 'systemctl restart x'` does
+**not** work. The hook checks the command string before it runs, so the prefix never reaches the
+hook's environment.
+
+Each `ask`/`deny` reason ends with a footer that starts with `(guards decision: ask.` or
+`(guards decision: deny.`. The footer tells the agent to ask the user instead of retrying, points
+to "Allow once" in Aura (for `ask` only), and gives the exact `.claude/guards.json` snippet for a
+project-level opt-out. The Aura server reads the `(guards decision: …` marker, so keep its wording
+stable.
+
+## Allow once (Aura)
+
+In Aura's agent mode the Claude CLI runs with `permissionMode: bypassPermissions`. In that mode an
+`ask` from this hook is denied automatically, and the user is never prompted. Aura shows the denial
+in the chat as a card with the rule, the reason, the exact command, and two buttons: **Allow once**
+and **Dismiss**.
+
+When the user presses **Allow once**, the server:
+
+1. Writes a one-shot entry to `~/.companion/guards-allow/<id>.json`. The directory is 0700 and the
+   file is 0600. The entry has `rule`/`rules`, the `commandSha256` of the exact command string the
+   server recorded from the agent's `tool_use`, the session `cwd`, `expiresAt` (now + 5 min), a
+   `nonce`, and `sig`, an HMAC-SHA256 made with the key in `~/.companion/guards-allow/.hmac-key`.
+2. Tells the agent to run exactly that command again.
+
+On the next `pre` call, the hook looks for an entry that matches the command. A matching entry must
+be unexpired, have a valid signature, list every `ask` rule the command triggers, have the same
+command hash, and have a `cwd` equal to the hook's `cwd` or a parent of it. The hook claims the
+entry first: it renames the file atomically, so only one hook can win, and then deletes it. Only
+after that does it allow the command. Then:
+
+- The approval is single-use. The next risky command asks again.
+- Expired entries are deleted.
+- Entries that claim to live longer than 15 minutes are ignored.
+- `deny`-level findings (`pkill`) can never be allowed once.
+
+If the key file is missing, no entry is valid.
+
+**What the signature protects, and what it does not.** The agent runs as the same OS user as the
+hook and the Aura server. A full guarantee is therefore not possible: an agent that reads
+`.hmac-key` on purpose can forge an entry, and it could also edit `.claude/guards.json` or the
+hook itself. The signature stops the casual case, where an agent writes a JSON file into
+`guards-allow/` to approve itself. Forging an entry takes a deliberate key read. The pack is a
+safety net against mistakes, not a sandbox.
+
+This works with Claude Code only. Codex does not run these hooks, so it never shows the card.
 
 ## Codex
 
@@ -150,6 +195,11 @@ The tests cover:
 
 - table-driven allow/ask/deny/warn cases for every rule, with false-positive guards;
 - the `test-db` heuristic: inline env, `.env`, `cd`, pytest-env, process env;
+- the footer guidance (no misleading inline `GUARDS_DISABLE=` hint);
+- Allow once: a matching entry is consumed and a second use asks again; a different command,
+  an expired entry, a forged or unsigned entry, a missing key, a deny-level rule, or an entry
+  that does not cover every `ask` rule is not honoured. Covers the cwd scope, the rename race,
+  and an end-to-end run of the hook;
 - the PostToolUse table;
 - the Stop hook with synthetic JSONL transcripts;
 - end-to-end runs of the hook over stdin/stdout, including fail-open on bad input;

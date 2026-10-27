@@ -5,6 +5,7 @@ import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 import { isResumeInterruptedResult } from "./utils/resume-interrupted.js";
 import { isDriftRecoveryMessage } from "./utils/drift-recovery-message.js";
+import { guardDenialChatMessage } from "./utils/guard-denial.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
@@ -1348,6 +1349,17 @@ function handleParsedMessage(
       break;
     }
 
+    case "guard_denied": {
+      // Guards-pack hook denial (Claude-only; Codex never emits it).
+      store.appendMessage(sessionId, guardDenialChatMessage(data.denial, data.timestamp));
+      break;
+    }
+
+    case "guard_denial_resolved": {
+      store.resolveGuardDenial(sessionId, data.toolUseId, data.status, data.resolvedAt);
+      break;
+    }
+
     case "system_event": {
       // Update structured process state from task_notification
       if (data.event?.subtype === "task_notification") {
@@ -1658,6 +1670,8 @@ function handleParsedMessage(
           // last per-turn occupancy — mirrors the live result path.
           captureContextWindow(sessionId, r.modelUsage as Record<string, { contextWindow?: number }> | undefined);
           recomputeContextPct(sessionId);
+        } else if (histMsg.type === "guard_denied") {
+          chatMessages.push(guardDenialChatMessage(histMsg.denial, histMsg.timestamp));
         } else if (histMsg.type === "system_event") {
           const summary = summarizeSystemEvent(histMsg.event);
           if (!summary) continue;

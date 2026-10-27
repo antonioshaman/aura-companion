@@ -6,8 +6,13 @@ import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./To
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ObserverFindingsBlock, parseObserverFindingsMessage } from "./chat/ObserverFindingsBlock.js";
 import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
+import { GuardDenialCard } from "./GuardDenialBanner.js";
 
 export function MessageBubble({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
+  if (message.role === "system" && message.guardDenial) {
+    return <GuardDenialCard denial={message.guardDenial} />;
+  }
+
   if (message.role === "system" && message.systemVariant === "resume-interrupted") {
     return <ResumeInterruptedNote diagnostic={message.content} />;
   }

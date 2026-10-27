@@ -65,6 +65,7 @@ import {
   type ClaudeRateLimitInfo,
 } from "./usage-limit-parse.js";
 import { resolveModelSubstitution } from "./broken-model-substitution.js";
+import { parseGuardDenial } from "./guard-denial.js";
 
 /**
  * Legacy-CLI grace between `system.init` and the probe interrupt (CLIs that
@@ -337,6 +338,14 @@ export class ClaudeAdapter implements IBackendAdapter {
   private idleTimerProbe: IdleTimerProbe | null;
 
   private protocolDriftSeen = new Set<string>();
+  /**
+   * toolUseId → Bash command from recent assistant tool_use blocks, so a
+   * guards-pack `permission_denied` frame (which carries only the id) can be
+   * shown with — and later approved for — the exact command the agent ran.
+   * Bounded FIFO; the denial follows its tool_use within the same turn.
+   */
+  private recentToolCommands = new Map<string, { name: string; command: string | null }>();
+  private static readonly RECENT_TOOL_COMMANDS_MAX = 200;
   private parseErrorSeen = new Set<string>();
 
   /**
@@ -1307,7 +1316,47 @@ export class ClaudeAdapter implements IBackendAdapter {
       return;
     }
 
+    if (subtype === "permission_denied") {
+      // Guards-pack hook "ask"/"deny" auto-denied under bypassPermissions —
+      // the CLI never asks the user, so surface it as a guard card. Any other
+      // permission_denied shape is tolerated and ignored (EC-5).
+      const parsed = parseGuardDenial(msg);
+      if (!parsed) return;
+      const recorded = this.recentToolCommands.get(parsed.toolUseId);
+      const toolName = parsed.toolName || recorded?.name || "";
+      this.browserMessageCb?.({
+        type: "guard_denied",
+        timestamp: Date.now(),
+        denial: {
+          ...parsed,
+          toolName,
+          sessionId: this.sessionId,
+          command: toolName === "Bash" ? recorded?.command ?? null : null,
+          deniedAt: Date.now(),
+          status: "pending",
+        },
+      });
+      return;
+    }
+
     // Unknown system subtypes are intentionally ignored until we map them.
+  }
+
+  private rememberToolCommands(blocks: unknown[]): void {
+    for (const b of blocks) {
+      if (!b || typeof b !== "object") continue;
+      const block = b as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
+      if (block.type !== "tool_use" || typeof block.id !== "string") continue;
+      const input = block.input as { command?: unknown } | undefined;
+      const command = typeof input?.command === "string" ? input.command : null;
+      this.recentToolCommands.delete(block.id);
+      this.recentToolCommands.set(block.id, { name: typeof block.name === "string" ? block.name : "", command });
+    }
+    while (this.recentToolCommands.size > ClaudeAdapter.RECENT_TOOL_COMMANDS_MAX) {
+      const oldest = this.recentToolCommands.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentToolCommands.delete(oldest);
+    }
   }
 
   private handleSystemInit(msg: CLISystemInitMessage): void {
@@ -1384,6 +1433,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         (b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use",
       );
     this.silenceWatchdog.setHeld(hasToolUse);
+    if (hasToolUse) this.rememberToolCommands(content as unknown[]);
 
     this.browserMessageCb?.({
       type: "assistant",
