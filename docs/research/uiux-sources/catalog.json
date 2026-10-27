@@ -12,7 +12,7 @@
       "lastActivity": null,
       "archived": false,
       "stars": null,
-      "fetchedAt": "2026-10-27T21:13:32Z",
+      "fetchedAt": "2026-10-27T21:16:06Z",
       "takeaway": "Heuristic names used to tag every audit finding, plus the 0–4 severity scale.",
       "receivers": [
         "expert:friedman",
@@ -33,7 +33,7 @@
       "lastActivity": "2026-10-06",
       "archived": false,
       "stars": 74575,
-      "fetchedAt": "2026-10-27T21:13:32Z",
+      "fetchedAt": "2026-10-27T21:16:06Z",
       "takeaway": "Pre-ship checklist items (head metadata, forms, images, performance) as review prompts.",
       "receivers": [
         "skill:polish",
@@ -53,7 +53,7 @@
       "lastActivity": "2021-01-11",
       "archived": false,
       "stars": 783,
-      "fetchedAt": "2026-10-27T21:13:32Z",
+      "fetchedAt": "2026-10-27T21:16:07Z",
       "takeaway": "Survey of published design principles across companies.",
       "receivers": [
         "expert:saarinen"
@@ -72,7 +72,7 @@
       "lastActivity": "2026-10-23",
       "archived": false,
       "stars": 1514,
-      "fetchedAt": "2026-10-27T21:13:33Z",
+      "fetchedAt": "2026-10-27T21:16:07Z",
       "takeaway": "Success criteria cited by number in a11y findings; 2.5.8 target size (24px minimum).",
       "receivers": [
         "expert:watson",
@@ -93,7 +93,7 @@
       "lastActivity": "2026-10-14",
       "archived": false,
       "stars": 1360,
-      "fetchedAt": "2026-10-27T21:13:33Z",
+      "fetchedAt": "2026-10-27T21:16:08Z",
       "takeaway": "Keyboard and role contracts for composite widgets (menu, tabs, combobox, dialog).",
       "receivers": [
         "expert:watson"
@@ -105,14 +105,14 @@
       "id": "en-301-549",
       "category": "accessibility-standards-testing",
       "title": "ETSI EN 301 549 — accessibility requirements for ICT",
-      "link": "https://www.etsi.org/human-factors-accessibility/en-301-549-v3-the-harmonized-european-standard-for-ict-accessibility",
+      "link": "https://accessible-eu-centre.ec.europa.eu/content-corner/digital-library/en-3015492021-accessibility-requirements-ict-products-and-services_en",
       "canonical": "EN 301 549 v3 (EU harmonised standard)",
       "licence": null,
       "licenceSource": "none",
       "lastActivity": null,
       "archived": false,
       "stars": null,
-      "fetchedAt": "2026-10-27T21:13:34Z",
+      "fetchedAt": "2026-10-27T21:16:08Z",
       "takeaway": "Non-web clauses (native apps, documents) that extend WCAG for mobile screens.",
       "receivers": [
         "expert:watson"
@@ -131,7 +131,7 @@
       "lastActivity": "2026-05-06",
       "archived": false,
       "stars": 54,
-      "fetchedAt": "2026-10-27T21:13:34Z",
+      "fetchedAt": "2026-10-27T21:16:08Z",
       "takeaway": "Cognitive-accessibility and media notes beyond WCAG success criteria.",
       "receivers": [
         "expert:watson"
@@ -150,7 +150,7 @@
       "lastActivity": "2026-10-26",
       "archived": false,
       "stars": 7717,
-      "fetchedAt": "2026-10-27T21:13:34Z",
+      "fetchedAt": "2026-10-27T21:16:09Z",
       "takeaway": "Rendered-UI rule engine for the council-review a11y scan (run as a tool, not vendored).",
       "receivers": [
         "council-review:a11y-scan"
@@ -169,7 +169,7 @@
       "lastActivity": "2026-10-26",
       "archived": false,
       "stars": 4586,
-      "fetchedAt": "2026-10-27T21:13:35Z",
+      "fetchedAt": "2026-10-27T21:16:09Z",
       "takeaway": "Comparison point for scan outcomes and CI reporting shape.",
       "receivers": [
         "council-review:a11y-scan"
@@ -188,7 +188,7 @@
       "lastActivity": "2026-10-22",
       "archived": false,
       "stars": 3904,
-      "fetchedAt": "2026-10-27T21:13:35Z",
+      "fetchedAt": "2026-10-27T21:16:09Z",
       "takeaway": "Plain-language checklist for the manual items axe cannot see.",
       "receivers": [
         "expert:watson",
@@ -208,7 +208,7 @@
       "lastActivity": "2026-10-16",
       "archived": false,
       "stars": 786,
-      "fetchedAt": "2026-10-27T21:13:36Z",
+      "fetchedAt": "2026-10-27T21:16:10Z",
       "takeaway": "Rule-to-WCAG mapping and the needs-review outcome class.",
       "receivers": [
         "council-review:a11y-scan"
@@ -227,7 +227,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 959,
-      "fetchedAt": "2026-10-27T21:13:36Z",
+      "fetchedAt": "2026-10-27T21:16:10Z",
       "takeaway": "Assisted manual test steps (tab stops, landmarks) for the manual checklist.",
       "receivers": [
         "expert:watson",
@@ -247,7 +247,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 30958,
-      "fetchedAt": "2026-10-27T21:13:37Z",
+      "fetchedAt": "2026-10-27T21:16:11Z",
       "takeaway": "Audit categories and the split between lab metrics and manual audits.",
       "receivers": [
         "skill:audit",
@@ -267,7 +267,7 @@
       "lastActivity": "2026-01-06",
       "archived": false,
       "stars": 3631,
-      "fetchedAt": "2026-10-27T21:13:37Z",
+      "fetchedAt": "2026-10-27T21:16:12Z",
       "takeaway": "Static JSX rules (clickable div without role, label association) as aura-check rule candidates.",
       "receivers": [
         "aura-check"
@@ -286,7 +286,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 11539,
-      "fetchedAt": "2026-10-27T21:13:38Z",
+      "fetchedAt": "2026-10-27T21:16:12Z",
       "takeaway": "Patterns for colour and spacing lint rules (no raw hex outside tokens).",
       "receivers": [
         "aura-check"
@@ -305,7 +305,7 @@
       "lastActivity": "2026-10-12",
       "archived": false,
       "stars": 1992,
-      "fetchedAt": "2026-10-27T21:13:38Z",
+      "fetchedAt": "2026-10-27T21:16:13Z",
       "takeaway": "Markup validity checks that precede any a11y scan.",
       "receivers": [
         "council-review:a11y-scan"
@@ -324,7 +324,7 @@
       "lastActivity": "2026-07-21",
       "archived": false,
       "stars": 3701,
-      "fetchedAt": "2026-10-27T21:13:39Z",
+      "fetchedAt": "2026-10-27T21:16:13Z",
       "takeaway": "Hint catalogue for compatibility, a11y and performance with fix guidance.",
       "receivers": [
         "skill:audit",
@@ -344,7 +344,7 @@
       "lastActivity": "2026-10-16",
       "archived": false,
       "stars": 8663,
-      "fetchedAt": "2026-10-27T21:13:39Z",
+      "fetchedAt": "2026-10-27T21:16:13Z",
       "takeaway": "INP / CLS / LCP thresholds for responsiveness findings.",
       "receivers": [
         "skill:optimize"
@@ -363,7 +363,7 @@
       "lastActivity": "2026-10-21",
       "archived": false,
       "stars": 2156,
-      "fetchedAt": "2026-10-27T21:13:40Z",
+      "fetchedAt": "2026-10-27T21:16:14Z",
       "takeaway": "Token types and alias semantics for the semantic token ladder.",
       "receivers": [
         "expert:saarinen",
@@ -384,7 +384,7 @@
       "lastActivity": "2025-12-17",
       "archived": false,
       "stars": 1720,
-      "fetchedAt": "2026-10-27T21:13:40Z",
+      "fetchedAt": "2026-10-27T21:16:14Z",
       "takeaway": "12-step scale with a stated job per step (backgrounds, borders, solid, text).",
       "receivers": [
         "expert:saarinen",
@@ -404,7 +404,7 @@
       "lastActivity": "2026-04-11",
       "archived": false,
       "stars": 8802,
-      "fetchedAt": "2026-10-27T21:13:41Z",
+      "fetchedAt": "2026-10-27T21:16:15Z",
       "takeaway": "Dark-mode surface and panel elevation handled by scale steps, not shadows.",
       "receivers": [
         "expert:saarinen"
@@ -423,7 +423,7 @@
       "lastActivity": "2026-10-26",
       "archived": false,
       "stars": 416,
-      "fetchedAt": "2026-10-27T21:13:41Z",
+      "fetchedAt": "2026-10-27T21:16:15Z",
       "takeaway": "Functional token naming (fgColor-muted, bgColor-inset) and high-contrast themes.",
       "receivers": [
         "expert:saarinen",
@@ -443,7 +443,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 9583,
-      "fetchedAt": "2026-10-27T21:13:42Z",
+      "fetchedAt": "2026-10-27T21:16:16Z",
       "takeaway": "Layering model and 2x grid spacing scale; notification and error patterns.",
       "receivers": [
         "expert:saarinen",
@@ -463,7 +463,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 11378,
-      "fetchedAt": "2026-10-27T21:13:42Z",
+      "fetchedAt": "2026-10-27T21:16:16Z",
       "takeaway": "Material 3 tonal elevation and state-layer tokens as implemented.",
       "receivers": [
         "expert:saarinen"
@@ -482,7 +482,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 126701,
-      "fetchedAt": "2026-10-27T21:13:43Z",
+      "fetchedAt": "2026-10-27T21:16:17Z",
       "takeaway": "CSS-variable theme contract common in agent-built React UIs.",
       "receivers": [
         "skill:frontend-design",
@@ -502,7 +502,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 4869,
-      "fetchedAt": "2026-10-27T21:13:43Z",
+      "fetchedAt": "2026-10-27T21:16:17Z",
       "takeaway": "Token build pipeline reference for multi-platform output.",
       "receivers": [
         "skill:extract"
@@ -521,7 +521,7 @@
       "lastActivity": "2026-03-01",
       "archived": false,
       "stars": 0,
-      "fetchedAt": "2026-10-27T21:13:44Z",
+      "fetchedAt": "2026-10-27T21:16:18Z",
       "takeaway": "Platform scale sets (desktop vs mobile) for touch-target sizing.",
       "receivers": [
         "expert:saarinen",
@@ -541,7 +541,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 20367,
-      "fetchedAt": "2026-10-27T21:13:44Z",
+      "fetchedAt": "2026-10-27T21:16:18Z",
       "takeaway": "Comparison point for elevation and focus-indicator tokens.",
       "receivers": [
         "expert:saarinen"
@@ -560,7 +560,7 @@
       "lastActivity": "2026-07-25",
       "archived": false,
       "stars": 249,
-      "fetchedAt": "2026-10-27T21:13:45Z",
+      "fetchedAt": "2026-10-27T21:16:19Z",
       "takeaway": "Perceptually even OKLCH scales with consistent contrast per step.",
       "receivers": [
         "skill:colorize"
@@ -579,7 +579,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 683,
-      "fetchedAt": "2026-10-27T21:13:45Z",
+      "fetchedAt": "2026-10-27T21:16:19Z",
       "takeaway": "Error-message patterns (say what happened and how to fix it) and question-page structure.",
       "receivers": [
         "expert:friedman",
@@ -600,7 +600,7 @@
       "lastActivity": "2026-10-24",
       "archived": false,
       "stars": 6295,
-      "fetchedAt": "2026-10-27T21:13:46Z",
+      "fetchedAt": "2026-10-27T21:16:20Z",
       "takeaway": "Rule format for machine-checkable microcopy rules.",
       "receivers": [
         "skill:clarify"
@@ -619,7 +619,7 @@
       "lastActivity": "2024-11-27",
       "archived": false,
       "stars": 5105,
-      "fetchedAt": "2026-10-27T21:13:46Z",
+      "fetchedAt": "2026-10-27T21:16:20Z",
       "takeaway": "Inclusive-language checks for UI copy.",
       "receivers": [
         "skill:clarify"
@@ -638,7 +638,7 @@
       "lastActivity": "2022-05-04",
       "archived": false,
       "stars": 562,
-      "fetchedAt": "2026-10-27T21:13:47Z",
+      "fetchedAt": "2026-10-27T21:16:21Z",
       "takeaway": "Voice-and-tone guidance for interface copy.",
       "receivers": [
         "skill:clarify"
@@ -657,7 +657,7 @@
       "lastActivity": "2026-10-10",
       "archived": false,
       "stars": 7190,
-      "fetchedAt": "2026-10-27T21:13:47Z",
+      "fetchedAt": "2026-10-27T21:16:21Z",
       "takeaway": "Scenario/viewport matrix shape for screenshot comparison.",
       "receivers": [
         "skill:polish"
@@ -676,7 +676,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 1303,
-      "fetchedAt": "2026-10-27T21:13:48Z",
+      "fetchedAt": "2026-10-27T21:16:22Z",
       "takeaway": "Diff report published to the PR for a human verdict.",
       "receivers": [
         "skill:polish"
@@ -695,7 +695,7 @@
       "lastActivity": "2026-10-17",
       "archived": false,
       "stars": 3918,
-      "fetchedAt": "2026-10-27T21:13:48Z",
+      "fetchedAt": "2026-10-27T21:16:23Z",
       "takeaway": "Per-snapshot diff thresholds and failure-diff artefacts.",
       "receivers": [
         "skill:polish"
@@ -714,7 +714,7 @@
       "lastActivity": "2026-04-22",
       "archived": true,
       "stars": 1678,
-      "fetchedAt": "2026-10-27T21:13:49Z",
+      "fetchedAt": "2026-10-27T21:16:23Z",
       "takeaway": "Storybook/page visual-regression workflow.",
       "receivers": [
         "skill:polish"
@@ -733,7 +733,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 98663,
-      "fetchedAt": "2026-10-27T21:13:50Z",
+      "fetchedAt": "2026-10-27T21:16:23Z",
       "takeaway": "Masking dynamic regions and per-project viewports in screenshot assertions.",
       "receivers": [
         "skill:polish"
@@ -752,7 +752,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 91392,
-      "fetchedAt": "2026-10-27T21:13:51Z",
+      "fetchedAt": "2026-10-27T21:16:24Z",
       "takeaway": "Story-per-state isolation, the model behind Aura's Playground.",
       "receivers": [
         "skill:polish",
@@ -772,7 +772,7 @@
       "lastActivity": null,
       "archived": false,
       "stars": null,
-      "fetchedAt": "2026-10-27T21:13:51Z",
+      "fetchedAt": "2026-10-27T21:16:24Z",
       "takeaway": "44pt targets, Dynamic Type, safe areas and navigation conventions for iOS.",
       "receivers": [
         "expert:friedman",
@@ -793,7 +793,7 @@
       "lastActivity": null,
       "archived": false,
       "stars": null,
-      "fetchedAt": "2026-10-27T21:13:51Z",
+      "fetchedAt": "2026-10-27T21:16:24Z",
       "takeaway": "48dp targets, tonal elevation, system back behaviour for Android.",
       "receivers": [
         "expert:friedman",
@@ -814,7 +814,7 @@
       "lastActivity": "2026-10-16",
       "archived": false,
       "stars": 17435,
-      "fetchedAt": "2026-10-27T21:13:51Z",
+      "fetchedAt": "2026-10-27T21:16:24Z",
       "takeaway": "Component-level accessibility defaults on Android.",
       "receivers": [
         "expert:watson"
@@ -833,7 +833,7 @@
       "lastActivity": null,
       "archived": false,
       "stars": null,
-      "fetchedAt": "2026-10-27T21:13:52Z",
+      "fetchedAt": "2026-10-27T21:16:25Z",
       "takeaway": "BackButton/MainButton, themeParams, safe-area insets, closing confirmation, native popups.",
       "receivers": [
         "expert:friedman",
@@ -855,7 +855,7 @@
       "lastActivity": "2026-10-12",
       "archived": false,
       "stars": 1207,
-      "fetchedAt": "2026-10-27T21:13:52Z",
+      "fetchedAt": "2026-10-27T21:16:25Z",
       "takeaway": "Typed wrappers that show which platform events a Mini App must handle.",
       "receivers": [
         "expert:friedman"
@@ -873,8 +873,8 @@
       "licenceSource": "github-api",
       "lastActivity": "2026-10-26",
       "archived": false,
-      "stars": 141526,
-      "fetchedAt": "2026-10-27T21:13:52Z",
+      "stars": 141528,
+      "fetchedAt": "2026-10-27T21:16:25Z",
       "takeaway": "Vendored skill: searchable style/palette/UX-guideline data for agents.",
       "receivers": [
         "skill:ui-ux-pro-max"
@@ -893,7 +893,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 103603,
-      "fetchedAt": "2026-10-27T21:13:52Z",
+      "fetchedAt": "2026-10-27T21:16:26Z",
       "takeaway": "Vendored skill: art direction, house rules and the look-and-fix screenshot loop.",
       "receivers": [
         "skill:taste-skill"
@@ -911,8 +911,8 @@
       "licenceSource": "github-api",
       "lastActivity": "2026-10-27",
       "archived": false,
-      "stars": 90374,
-      "fetchedAt": "2026-10-27T21:13:53Z",
+      "stars": 90377,
+      "fetchedAt": "2026-10-27T21:16:27Z",
       "takeaway": "Upstream of the repo's audit/polish/critique/… skills (skills-lock.json).",
       "receivers": [
         "skill:audit",
@@ -933,7 +933,7 @@
       "lastActivity": "2026-10-09",
       "archived": false,
       "stars": 184224,
-      "fetchedAt": "2026-10-27T21:13:53Z",
+      "fetchedAt": "2026-10-27T21:16:27Z",
       "takeaway": "Skill authoring shape and the frontend-design skill as a comparison point.",
       "receivers": [
         "skill:frontend-design"
@@ -952,7 +952,7 @@
       "lastActivity": "2026-10-27",
       "archived": false,
       "stars": 33108,
-      "fetchedAt": "2026-10-27T21:13:54Z",
+      "fetchedAt": "2026-10-27T21:16:28Z",
       "takeaway": "Web-interface guideline list as a comparison point for aura-check rules.",
       "receivers": [
         "aura-check"

@@ -10,12 +10,23 @@
 //      a hand-edited verdict ("make it redistributable") is caught in CI.
 
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { join, relative, resolve } from "node:path";
 
 import {
   buildEntry,
   CATEGORIES,
   checkCatalog,
   classifySource,
+  CORPUS_DIR,
+  corpusItem,
+  corpusTextPath,
+  corpusTextUrl,
+  htmlToText,
+  loadCorpusManifest,
+  THIN_TEXT_BYTES,
+  UIUX_SOURCES_DIR,
+  verifyCorpus,
   factsFromGithub,
   loadCatalogEntries,
   loadSeeds,
@@ -155,5 +166,69 @@ describe("committed catalog.json (hermetic re-validation)", () => {
     const { readFileSync } = await import("node:fs");
     const { CATALOG_MD_FILE } = await import("./uiux-sources.js");
     expect(readFileSync(CATALOG_MD_FILE, "utf8")).toBe(renderMarkdown(entries));
+  });
+});
+
+// ─── Task 2: source-text corpus ─────────────────────────────────────────────
+// The corpus is what the Phase C copy check compares enrichment against. These
+// tests pin the two properties it must have: it is reproducible/tamper-evident
+// (sha256 manifest), and it never reaches git or the npm package.
+
+describe("corpus — manifest verification", () => {
+  const entries = [
+    { id: "a-src", link: "https://github.com/o/a", verdict: "redistributable" as const },
+    { id: "b-src", link: "https://example.org/std", verdict: "reference-only" as const },
+    { id: "c-src", link: "https://github.com/o/c", verdict: "excluded" as const },
+  ];
+  const texts: Record<string, string> = { "a-src": "alpha text", "b-src": "beta text" };
+  const manifest = Object.entries(texts).map(([id, t]) => corpusItem(id, "u", t, "2026-10-27T00:00:00Z"));
+
+  it("repo sources read their README via the API; web sources their page; excluded ones nothing", () => {
+    expect(corpusTextUrl(entries[0])).toBe("https://api.github.com/repos/o/a/readme");
+    expect(corpusTextUrl(entries[1])).toBe("https://example.org/std");
+    expect(corpusTextUrl(entries[2])).toBeNull();
+  });
+
+  it("an intact corpus verifies clean", () => {
+    expect(verifyCorpus(manifest, entries, (id) => texts[id] ?? null)).toEqual([]);
+  });
+
+  it("a planted edit to one text is caught by its sha256 (red on a planted defect)", () => {
+    const tampered = { ...texts, "b-src": "beta text, quietly edited" };
+    expect(verifyCorpus(manifest, entries, (id) => tampered[id] ?? null)).toEqual([
+      "b-src: corpus text does not match manifest sha256",
+    ]);
+  });
+
+  it("a missing text and an included source with no manifest item are both reported", () => {
+    const errs = verifyCorpus(manifest.slice(1), entries, (id) => (id === "b-src" ? null : texts[id]));
+    expect(errs).toContain("a-src: included source has no corpus item");
+    expect(errs).toContain("b-src: corpus text missing (run `corpus`)");
+  });
+
+  it("thin texts (JS-rendered pages) are flagged so the copy check cannot silently pass on them", () => {
+    expect(corpusItem("x-src", "u", "short", "t").thin).toBe(true);
+    expect(corpusItem("x-src", "u", "x".repeat(THIN_TEXT_BYTES), "t").thin).toBe(false);
+  });
+
+  it("corpus ids cannot escape the corpus directory", () => {
+    expect(() => corpusTextPath("../../etc/passwd")).toThrow(/bad corpus id/);
+  });
+
+  it("htmlToText drops scripts and markup and decodes entities", () => {
+    expect(htmlToText("<p>A&amp;B</p><script>evil()</script><div>C&nbsp;D</div>")).toBe("A&B\nC D");
+  });
+});
+
+describe("corpus — never committed, never shipped", () => {
+  it("the committed manifest covers every included catalog source", () => {
+    expect(verifyCorpus(loadCorpusManifest(), loadCatalogEntries(), () => "").filter((e) => e.includes("no corpus item"))).toEqual([]);
+  });
+
+  it("corpus/ is gitignored and outside web/ (the npm package root)", () => {
+    const repoRoot = resolve(UIUX_SOURCES_DIR, "..", "..", "..");
+    expect(relative(join(repoRoot, "web"), CORPUS_DIR).startsWith("..")).toBe(true);
+    const r = spawnSync("git", ["check-ignore", "-q", join(relative(repoRoot, CORPUS_DIR), "x.txt")], { cwd: repoRoot });
+    expect(r.status, "corpus/ must be gitignored — its texts are third-party").toBe(0);
   });
 });

@@ -14,13 +14,25 @@
 // (`checkCatalog`) are pure, so the committed catalog.json is re-validated
 // hermetically in CI without network access.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export const UIUX_SOURCES_DIR = resolve(import.meta.dirname, "..", "..", "docs", "research", "uiux-sources");
 export const SEED_FILE = join(UIUX_SOURCES_DIR, "seed.json");
 export const CATALOG_FILE = join(UIUX_SOURCES_DIR, "catalog.json");
 export const CATALOG_MD_FILE = join(UIUX_SOURCES_DIR, "CATALOG.md");
+/**
+ * Source-text corpus (PLAN Task 2): the texts the verbatim-copy check compares
+ * enrichment against. The texts are third-party and mostly NOT redistributable,
+ * and this repo is public, so the directory is gitignored and lives outside
+ * `web/` (never in the npm package). Only the manifest (url + sha256) is
+ * committed, so anyone can rebuild the exact corpus and prove it unchanged.
+ */
+export const CORPUS_DIR = join(UIUX_SOURCES_DIR, "corpus");
+export const CORPUS_MANIFEST_FILE = join(UIUX_SOURCES_DIR, "corpus-manifest.json");
+/** Below this many bytes a fetched text is too thin to compare against (JS-rendered page). */
+export const THIN_TEXT_BYTES = 2_000;
 
 /** The 8 categories AC1.1 requires, in display order. */
 export const CATEGORIES = [
@@ -276,6 +288,131 @@ export function renderMarkdown(entries: CatalogEntry[]): string {
   return lines.join("\n");
 }
 
+// ─── Corpus (Task 2) ─────────────────────────────────────────────────────────
+
+export interface CorpusItem {
+  id: string;
+  /** Where the text was fetched from (README API for repos, the page for web sources). */
+  textUrl: string;
+  sha256: string;
+  bytes: number;
+  fetchedAt: string;
+  /** True when the text is too short to be a useful comparison base. */
+  thin: boolean;
+}
+
+export function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** Where a source's comparison text comes from. Excluded sources get no text. */
+export function corpusTextUrl(e: Pick<CatalogEntry, "link" | "verdict">): string | null {
+  if (e.verdict === "excluded") return null;
+  const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+)$/.exec(e.link);
+  return gh ? `https://api.github.com/repos/${gh[1]}/readme` : e.link;
+}
+
+/** Crude, dependency-free HTML → text: drop script/style/markup, decode the common entities. */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<\/(p|div|li|h[1-6]|tr|section|article|br)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&rsquo;|&lsquo;/g, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/^ +| +$/gm, "")
+    .replace(/\n\s*\n+/g, "\n\n")
+    .trim();
+}
+
+export function corpusItem(id: string, textUrl: string, text: string, fetchedAt: string): CorpusItem {
+  const bytes = Buffer.byteLength(text, "utf8");
+  return { id, textUrl, sha256: sha256(text), bytes, fetchedAt, thin: bytes < THIN_TEXT_BYTES };
+}
+
+/**
+ * Prove a local corpus matches the committed manifest. Errors on a missing text,
+ * a hash mismatch (drift or tampering), or an included catalog source with no
+ * corpus item. Empty result = the copy check may trust this corpus.
+ */
+export function verifyCorpus(
+  manifest: CorpusItem[],
+  entries: Pick<CatalogEntry, "id" | "link" | "verdict">[],
+  readText: (id: string) => string | null,
+): string[] {
+  const errs: string[] = [];
+  const byId = new Map(manifest.map((m) => [m.id, m]));
+  for (const e of entries) {
+    if (corpusTextUrl(e) !== null && !byId.has(e.id)) errs.push(`${e.id}: included source has no corpus item`);
+  }
+  for (const m of manifest) {
+    const text = readText(m.id);
+    if (text === null) errs.push(`${m.id}: corpus text missing (run \`corpus\`)`);
+    else if (sha256(text) !== m.sha256) errs.push(`${m.id}: corpus text does not match manifest sha256`);
+  }
+  return errs;
+}
+
+export function corpusTextPath(id: string): string {
+  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id)) throw new Error(`bad corpus id ${JSON.stringify(id)}`);
+  return join(CORPUS_DIR, `${id}.txt`);
+}
+
+async function fetchCorpusText(url: string): Promise<string> {
+  const headers: Record<string, string> = { "User-Agent": "aura-uiux-sources" };
+  if (url.startsWith("https://api.github.com/")) {
+    headers.Accept = "application/vnd.github.raw+json";
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const body = await res.text();
+  return url.startsWith("https://api.github.com/") ? body : htmlToText(body);
+}
+
+async function runCorpus(): Promise<number> {
+  const entries = loadCatalogEntries();
+  mkdirSync(CORPUS_DIR, { recursive: true });
+  const items: CorpusItem[] = [];
+  for (const e of entries) {
+    const url = corpusTextUrl(e);
+    if (url === null) continue;
+    const text = await fetchCorpusText(url);
+    writeFileSync(corpusTextPath(e.id), text);
+    items.push(corpusItem(e.id, url, text, new Date().toISOString().replace(/\.\d{3}Z$/, "Z")));
+  }
+  writeFileSync(
+    CORPUS_MANIFEST_FILE,
+    JSON.stringify({ _doc: "GENERATED by scripts/uiux-sources.ts corpus — texts live in corpus/ (gitignored, never shipped).", items }, null, 2) + "\n",
+  );
+  const thin = items.filter((i) => i.thin).map((i) => i.id);
+  console.log(`uiux corpus: ${items.length} texts${thin.length ? `; thin (JS-rendered?): ${thin.join(", ")}` : ""}`);
+  return 0;
+}
+
+export function loadCorpusManifest(path = CORPUS_MANIFEST_FILE): CorpusItem[] {
+  return (JSON.parse(readFileSync(path, "utf8")) as { items: CorpusItem[] }).items;
+}
+
+function runVerifyCorpus(): number {
+  const errs = verifyCorpus(loadCorpusManifest(), loadCatalogEntries(), (id) => {
+    const p = corpusTextPath(id);
+    return existsSync(p) ? readFileSync(p, "utf8") : null;
+  });
+  if (errs.length) {
+    console.error(errs.join("\n"));
+    return 1;
+  }
+  console.log("uiux corpus: matches manifest");
+  return 0;
+}
+
 // ─── Effect shell ───────────────────────────────────────────────────────────
 
 export function loadSeeds(path = SEED_FILE): SeedSource[] {
@@ -334,8 +471,10 @@ if (import.meta.main) {
   const [, , cmd] = process.argv;
   if (cmd === "fetch") process.exit(await runFetch());
   else if (cmd === "check") process.exit(runCheck());
+  else if (cmd === "corpus") process.exit(await runCorpus());
+  else if (cmd === "verify-corpus") process.exit(runVerifyCorpus());
   else {
-    console.error("usage: bun scripts/uiux-sources.ts fetch|check");
+    console.error("usage: bun scripts/uiux-sources.ts fetch|check|corpus|verify-corpus");
     process.exit(2);
   }
 }

@@ -48,7 +48,7 @@
       "id": "en-301-549",
       "category": "accessibility-standards-testing",
       "title": "ETSI EN 301 549 — accessibility requirements for ICT",
-      "url": "https://www.etsi.org/human-factors-accessibility/en-301-549-v3-the-harmonized-european-standard-for-ict-accessibility",
+      "url": "https://accessible-eu-centre.ec.europa.eu/content-corner/digital-library/en-3015492021-accessibility-requirements-ict-products-and-services_en",
       "canonical": "EN 301 549 v3 (EU harmonised standard)",
       "takeaway": "Non-web clauses (native apps, documents) that extend WCAG for mobile screens.",
       "receivers": ["expert:watson"]
