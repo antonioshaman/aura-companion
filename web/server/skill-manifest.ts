@@ -139,6 +139,13 @@ export function nameCollisions(
   return out;
 }
 
+/** `name:` from a SKILL.md YAML frontmatter, unquoted; null when absent. */
+export function frontmatterName(skillMd: string): string | null {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd);
+  const m = fm && /^name:\s*(.+?)\s*$/m.exec(fm[1]);
+  return m ? m[1].replace(/^(['"])(.*)\1$/, "$2") : null;
+}
+
 // ─── Ownership marker ───────────────────────────────────────────────────────
 
 export function markerFor(entry: Pick<ManifestEntry, "name" | "digest" | "files">): OwnerMarker {
