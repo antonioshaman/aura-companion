@@ -140,10 +140,30 @@ export function isSafeRelPath(p: string): boolean {
   return p.split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** The fields this module reads, with the types it reads them as (a manifest file is untrusted input). */
+function isEntryShape(e: unknown): e is ManifestEntry {
+  return (
+    isRecord(e) &&
+    typeof e.name === "string" &&
+    typeof e.digest === "string" &&
+    isRecord(e.ship) &&
+    typeof e.ship.status === "string" &&
+    Array.isArray(e.ship.reasons) &&
+    isRecord(e.files) &&
+    Object.values(e.files).every((h) => typeof h === "string")
+  );
+}
+
 /** Errors that make a manifest unsafe to materialise; empty = safe. */
 export function manifestPathErrors(manifest: Pick<SkillManifest, "entries">): string[] {
   const errs: string[] = [];
-  for (const e of manifest.entries) {
+  for (const [i, e] of manifest.entries.entries()) {
+    if (!isEntryShape(e)) {
+      errs.push(`malformed entry at index ${i}`);
+      continue;
+    }
     if (!isPackName(e.name)) errs.push(`entry name ${JSON.stringify(e.name)} is not a pack name`);
     for (const p of Object.keys(e.files)) {
       if (!isSafeRelPath(p)) errs.push(`${e.name}: unsafe file path ${JSON.stringify(p)}`);
@@ -424,13 +444,15 @@ export function installPack(opts: { sourceDir: string; manifest: Pick<SkillManif
   const dir = join(vdir, version);
 
   let reused = false;
+  let damaged = false;
   if (existsSync(dir)) {
     const v = verifyVersionDir(dir);
     if ("manifest" in v) reused = true;
     else {
-      // A damaged copy of our own version: move it aside, rebuild below.
+      // A damaged copy of our own version: rebuilt below, and only replaced once
+      // the rebuild has verified — a failed rebuild leaves it where it was.
+      damaged = true;
       log.warn("skill-pack", "version dir failed verification, rebuilding", { event: "skill_pack.version_corrupt", version, errors: v.errors.slice(0, 5) });
-      trashVersion(root, version);
     }
   }
 
@@ -442,15 +464,19 @@ export function installPack(opts: { sourceDir: string; manifest: Pick<SkillManif
       const v = verifyVersionDir(staging.dir);
       if ("errors" in v) throw new Error(`staged tree failed verification: ${v.errors.slice(0, 5).join("; ")}`);
       makeReadOnly(staging.dir);
+      const aside = damaged ? join(vdir, `${TRASH_PREFIX}${version}-${rand()}`) : null;
+      if (aside) renameSync(dir, aside);
       try {
         renameSync(staging.dir, dir);
       } catch (err) {
+        if (aside) renameSync(aside, dir);
         // A concurrent installer won the rename; use its dir if it verifies.
         const code = (err as NodeJS.ErrnoException).code;
-        if ((code !== "EEXIST" && code !== "ENOTEMPTY") || !("manifest" in verifyVersionDir(dir))) throw err;
+        if (aside || (code !== "EEXIST" && code !== "ENOTEMPTY") || !("manifest" in verifyVersionDir(dir))) throw err;
         removeTree(staging.dir);
         reused = true;
       }
+      if (aside) removeTree(aside);
       rmSync(staging.intent, { force: true });
     } catch (err) {
       abandonStaging(staging);

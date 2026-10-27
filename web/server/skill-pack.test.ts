@@ -266,6 +266,36 @@ describe("installPack / readCurrentPack", () => {
     expect("manifest" in readCurrentPack(root)).toBe(true);
   });
 
+  it("a version whose manifest has a malformed entry is an error, not a throw (observer STOP 1)", () => {
+    // `entries: [{}]` used to reach Object.keys(e.files) and throw a TypeError out of
+    // readCurrentPack, so a caller could not fall back and installPack could not repair it.
+    const { dir, manifest } = source();
+    const root = tmp();
+    const r = installPack({ sourceDir: dir, manifest, root });
+    chmodSync(r.dir, 0o755);
+    chmodSync(join(r.dir, PACK_MANIFEST_FILE), 0o644);
+    writeFileSync(join(r.dir, PACK_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, entries: [{}] }));
+    const cur = readCurrentPack(root);
+    expect("error" in cur && cur.error).toContain("malformed entry");
+    expect(installPack({ sourceDir: dir, manifest, root }).reused).toBe(false);
+    expect("manifest" in readCurrentPack(root)).toBe(true);
+  });
+
+  it("a failed rebuild of a damaged version leaves that version dir in place (observer STOP 2)", () => {
+    // The damaged dir used to be deleted BEFORE the replacement was staged; a failing
+    // rebuild then left current.json pointing at nothing.
+    const { dir, manifest } = source();
+    const root = tmp();
+    const r = installPack({ sourceDir: dir, manifest, root });
+    chmodSync(join(r.dir, "polish"), 0o755);
+    writeFileSync(join(r.dir, "polish", "extra.md"), "damage\n");
+    writeFileSync(join(dir, "audit", "scripts", "run.py"), "drifted\n");
+    expect(() => installPack({ sourceDir: dir, manifest, root })).toThrow(/source bytes do not match/);
+    expect(readPointer(root)?.version).toBe(r.version);
+    expect(readFileSync(join(r.dir, "polish", "SKILL.md"), "utf8")).toContain("v1");
+    expect(readdirSync(join(root, "versions"))).toEqual([r.version]);
+  });
+
   it("ships exactly the gate-passing entries of the real packs/skills manifest", () => {
     // AC2.1 / AC2.4 against the real tree: everything with ship.status "ship" lands,
     // ui-ux-pro-max (blocked until B3/B4) does not.
