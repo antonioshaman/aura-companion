@@ -33,7 +33,7 @@ import {
   scoreAdvisors,
   type RankedCandidate,
 } from "./advisor-scorer.js";
-import type { AdvisorProfile } from "./capability-catalog.js";
+import { COUNCIL_CATALOG_DIR, loadCatalog, type AdvisorProfile } from "./capability-catalog.js";
 import { readRunStats } from "./run-stats.js";
 
 // ─── Policy ──────────────────────────────────────────────────────────────────
@@ -371,13 +371,23 @@ export function renderDispatchReport(outcomes: ReviewOutcome[]): string {
 
 const FIXTURES = join(dirname(new URL(import.meta.url).pathname), "__fixtures__");
 export const DEFAULT_HISTORY_PATH = join(FIXTURES, "council-dispatch", "history.json");
-export const DEFAULT_PROFILES_PATH = join(FIXTURES, "council-catalog", "profiles.json");
 
 export function loadHistory(path: string = DEFAULT_HISTORY_PATH): DispatchHistory {
   return parseDispatchHistory(JSON.parse(readFileSync(path, "utf8")));
 }
 
-export function loadProfiles(path: string = DEFAULT_PROFILES_PATH): AdvisorProfile[] {
+/**
+ * Seated advisor profiles. Default: the in-repo catalog (COUNCIL_CATALOG_DIR), loaded
+ * fail-loud. `path` keeps the `--profiles <json>` override ({ profiles: [...] }).
+ */
+export function loadProfiles(path?: string): AdvisorProfile[] {
+  if (path === undefined) {
+    const loaded = loadCatalog(COUNCIL_CATALOG_DIR);
+    if (loaded.errors.length > 0 || loaded.profiles.length === 0) {
+      throw new Error(`dispatch-policy: catalog load failed at ${COUNCIL_CATALOG_DIR}: ${JSON.stringify(loaded.errors)}`);
+    }
+    return loaded.profiles;
+  }
   const doc = JSON.parse(readFileSync(path, "utf8")) as { profiles?: AdvisorProfile[] };
   if (!Array.isArray(doc.profiles) || doc.profiles.length === 0) {
     throw new Error(`dispatch-policy: no profiles in ${path}`);

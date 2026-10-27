@@ -1,0 +1,4 @@
+creator: "Rich Hickey"
+stack: [common]
+paired_with: beck
+tension_axis: "fundamental-simplification ↔ incremental-TDD"

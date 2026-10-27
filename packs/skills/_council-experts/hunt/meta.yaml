@@ -1,0 +1,8 @@
+creator: "Troy Hunt"
+stack: [common]
+paired_with: null
+unpaired_reason: "security defence-in-depth specialism; rule-first-vs-LLM-emergent tension addressed via willison↔colvin axis; defer to future enrichment when a dedicated security-vs-X counterpart is seated"
+schema_version: 2
+capabilities:
+  signals: [any]
+  domains: [security]

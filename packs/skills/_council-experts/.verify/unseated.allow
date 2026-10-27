@@ -1,0 +1,35 @@
+# unseated.allow — catalog directories that no dispatcher panel names, and that
+# are deliberately kept that way.
+#
+# Read by verify-catalog.sh C2b (the reverse orphan sweep). C2 walks panel → catalog
+# and catches a panel naming a seat that does not exist. C2b walks catalog → panel
+# and catches the opposite: a directory nobody dispatches. Neither direction implies
+# the other, and until C2b existed the README promised an orphan check that no gate
+# performed.
+#
+# The point of this file is that "inert" must be a decision someone recorded, not a
+# state a directory can drift into. A new directory that is neither seated nor listed
+# here fails the gate; an entry here whose directory is gone also fails, so the list
+# cannot rot into a set of names for things that no longer exist.
+#
+# Format: one expert ID per line, optional `# reason` trailer. Blank lines and
+# whole-line comments ignored.
+
+# Ratified in the v2 expansion, no dispatcher seats them yet. Each is the second
+# half of a tension pair with a seat that IS dispatched (see <id>/meta.yaml
+# `paired_with`); seating one means adding it to a panel and re-running C6.
+evans        # paired_with fowler   — strategic-DDD ↔ emergent-microservices
+hickey       # paired_with beck     — fundamental-simplification ↔ incremental-TDD
+majors       # paired_with hashimoto — debugging-in-prod ↔ immutable-prevention
+sridharan    # paired_with majors   — resilience-skepticism ↔ operational-realism
+torvalds     # paired_with ritchie  — Linux pragmatism ↔ Unix purity
+unclebob     # paired_with fowler   — principle-purity ↔ economic-pragmatic
+lerdorf      # PHP stack; no PHP dispatcher exists
+colvin       # Pydantic/MCP; paired_with willison
+
+# Co-Pilot incubation seats — a third stack (python-telegram-bot v20 + FastAPI
+# webhook + Firestore + Cloud Run/VPS hybrid) with no dispatcher in this catalog.
+# Full disposition in README.md, "Recorded disposition: Co-Pilot incubation seats".
+backend-python-ptb
+deploy-copilot
+firestore-doc

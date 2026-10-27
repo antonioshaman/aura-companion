@@ -1,0 +1,4 @@
+creator: "Samuel Colvin"
+stack: [python]
+paired_with: willison
+tension_axis: "schema-strict-typed-LLM ↔ LLM-emergent-pipeline"

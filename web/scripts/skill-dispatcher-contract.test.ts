@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { COUNCIL_SKILLS_DIR } from "./capability-catalog.js";
 import { findContractViolations, REQUIRED_TOKENS } from "./council-skill-contract.js";
 
 const FIXTURE_ROOT = join(dirname(new URL(import.meta.url).pathname), "__fixtures__", "council-skills");
@@ -92,6 +93,10 @@ describe("findContractViolations — catches a re-embedded panel under a renamed
 
 // Never skipped — CI-hermetic tripwire for a hand-edited fixture.
 runSuite("checked-in fixture", FIXTURE_ROOT);
+
+// Never skipped — the in-repo dispatchers (packs/skills, PLAN-aura-uiux-agent-enrichment
+// Task 4) are the copy that will ship, so they must satisfy the contract in CI.
+runSuite("in-repo packs/skills", COUNCIL_SKILLS_DIR);
 
 // The operator's actual installation. Absent in bare CI.
 const liveRootExists = existsSync(LIVE_ROOT);

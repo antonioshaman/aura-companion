@@ -1,0 +1,8 @@
+creator: "Dennis Ritchie"
+stack: [aura]
+paired_with: torvalds
+tension_axis: "Unix-purity ↔ kernel-pragmatism"
+schema_version: 2
+capabilities:
+  signals: [stdio-subprocess, cli]
+  domains: [process-lifecycle, filesystem-persistence]

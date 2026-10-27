@@ -1,0 +1,8 @@
+creator: "Dan Abramov"
+stack: [aura]
+paired_with: null
+unpaired_reason: "React-architectural specialism; no current catalog member sits across an ideological tension on frontend architecture; defer to future enrichment"
+schema_version: 2
+capabilities:
+  signals: [react, vue, svelte, nextjs, browser-spa, typescript, javascript]
+  domains: [frontend-architecture]

@@ -1,0 +1,8 @@
+creator: "Kent Beck"
+stack: [common]
+paired_with: null
+unpaired_reason: "load-bearing hub for testing + simplification axes: hickey (fundamental-simplification ↔ incremental-TDD) pairs to beck; single back-reference would shape future testing-vs-other pairings asymmetrically"
+schema_version: 2
+capabilities:
+  signals: [any]
+  domains: [test-quality]

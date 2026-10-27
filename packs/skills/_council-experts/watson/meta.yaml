@@ -1,0 +1,8 @@
+creator: "Léonie Watson"
+stack: [common]
+paired_with: null
+unpaired_reason: "a11y compliance specialism; sits orthogonal to design-craft and UX-discipline axes rather than across them; defer to future enrichment when an a11y-emergent vs a11y-rule-based counterpart is seated"
+schema_version: 2
+capabilities:
+  signals: [browser-spa, react]
+  domains: [accessibility]

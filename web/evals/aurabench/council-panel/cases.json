@@ -1,5 +1,5 @@
 {
-  "_doc": "COUNCIL-PANEL-BENCH cases (P6). `title` is the PR's own merged title (commitizen prefix dropped) — what a real reviewer is given. Each case is a historical PR whose merged state carried defects that a LATER PR fixed on the same code. base..head is the diff the council reviews; knownDefects is the ground truth for recall. Evidence: fixedBy commits + (where one exists) the archived FINAL-REVIEW. Lines are hints at `head` (matching tolerates drift); files are exact repo paths at `head`. changedDomains is the closed-vocab domain set the diff touches (same vocabulary as web/scripts/__fixtures__/council-catalog/profiles.json).",
+  "_doc": "COUNCIL-PANEL-BENCH cases (P6). `title` is the PR's own merged title (commitizen prefix dropped) — what a real reviewer is given. Each case is a historical PR whose merged state carried defects that a LATER PR fixed on the same code. base..head is the diff the council reviews; knownDefects is the ground truth for recall. Evidence: fixedBy commits + (where one exists) the archived FINAL-REVIEW. Lines are hints at `head` (matching tolerates drift); files are exact repo paths at `head`. changedDomains is the closed-vocab domain set the diff touches (same vocabulary as packs/skills/_council-experts/.verify/capability-vocabulary.json).",
   "schemaVersion": 1,
   "cases": [
     {

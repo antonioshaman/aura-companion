@@ -1,0 +1,8 @@
+creator: "Vitaly Friedman"
+stack: [common]
+paired_with: saarinen
+tension_axis: "functional-state-discipline ↔ design-craft-aesthetic"
+schema_version: 2
+capabilities:
+  signals: [browser-spa, cli, telegram-mini-app]
+  domains: [ux-flow]

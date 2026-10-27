@@ -1,0 +1,4 @@
+creator: "Robert C. Martin"
+stack: [common]
+paired_with: fowler
+tension_axis: "principle-purity ↔ economic-pragmatic"

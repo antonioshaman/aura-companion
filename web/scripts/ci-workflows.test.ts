@@ -101,3 +101,23 @@ describe("CI workflow hardening (P7/CI-HARDEN)", () => {
     expect(audit?.["continue-on-error"]).toBe(true);
   });
 });
+
+// PLAN-aura-uiux-agent-enrichment Task 4: the council catalog moved into the repo
+// (packs/skills). Its canary gate only protects anything if CI actually runs it on
+// every PR, and only the exit code of the script itself can fail the job — so pin
+// that the step exists and is not masked.
+describe("council catalog canaries run in CI (uiux Task 4)", () => {
+  it("ci.yml runs verify-catalog.sh, the vendor lock check and the source-catalog check, unmasked", () => {
+    const steps = Object.values(loadWorkflow("ci.yml").jobs).flatMap((j) => j.steps);
+    const runs = steps.map((s) => s.run?.trim() ?? "");
+    for (const cmd of [
+      "bash packs/skills/_council-experts/.verify/verify-catalog.sh",
+      "bun scripts/vendored-skills.ts check",
+      "bun scripts/uiux-sources.ts check",
+    ]) {
+      const hit = runs.find((r) => r.includes(cmd));
+      expect(hit, `ci.yml must run: ${cmd}`).toBeDefined();
+      expect(hit, `${cmd} must not be masked`).not.toMatch(/\|\|\s*true|;\s*true\b|continue-on-error/);
+    }
+  });
+});

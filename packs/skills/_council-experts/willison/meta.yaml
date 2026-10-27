@@ -1,0 +1,8 @@
+creator: "Simon Willison"
+stack: [common]
+paired_with: colvin
+tension_axis: "LLM-emergent-pipeline ↔ schema-strict-typed-LLM"
+schema_version: 2
+capabilities:
+  signals: [any]
+  domains: [llm-pipeline]
