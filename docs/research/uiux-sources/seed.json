@@ -1,0 +1,406 @@
+{
+  "_doc": "Hand-authored half of the UI/UX source catalog (spec uiux-agent-enrichment.md, Story 1). It holds ONLY judgement: which source, which category, what we take, which agent setting receives it. Licence, last-activity date and archived state are NOT written here; `bun scripts/uiux-sources.ts fetch` reads them from the GitHub API and writes catalog.json. A web-only source (no repo) has no machine-readable licence, so it is always reference only and must be a canonical standard.",
+  "sources": [
+    {
+      "id": "nielsen-heuristics",
+      "category": "heuristics-evaluation",
+      "title": "Nielsen Norman Group — 10 usability heuristics",
+      "url": "https://www.nngroup.com/articles/ten-usability-heuristics/",
+      "canonical": "Nielsen's 10 usability heuristics (1994, revised 2020)",
+      "takeaway": "Heuristic names used to tag every audit finding, plus the 0–4 severity scale.",
+      "receivers": ["expert:friedman", "skill:audit", "skill:critique"]
+    },
+    {
+      "id": "frontend-checklist",
+      "category": "heuristics-evaluation",
+      "title": "Front-End Checklist",
+      "repo": "thedaviddias/Front-End-Checklist",
+      "takeaway": "Pre-ship checklist items (head metadata, forms, images, performance) as review prompts.",
+      "receivers": ["skill:polish", "skill:audit"]
+    },
+    {
+      "id": "awesome-design-principles",
+      "category": "heuristics-evaluation",
+      "title": "Awesome Design Principles",
+      "repo": "robinstickel/awesome-design-principles",
+      "takeaway": "Survey of published design principles across companies.",
+      "receivers": ["expert:saarinen"]
+    },
+    {
+      "id": "wcag-22",
+      "category": "accessibility-standards-testing",
+      "title": "W3C WCAG 2.2 (source repository)",
+      "repo": "w3c/wcag",
+      "canonical": "WCAG 2.2 (W3C Recommendation)",
+      "takeaway": "Success criteria cited by number in a11y findings; 2.5.8 target size (24px minimum).",
+      "receivers": ["expert:watson", "council-review:a11y-scan", "aura-check"]
+    },
+    {
+      "id": "aria-apg",
+      "category": "accessibility-standards-testing",
+      "title": "W3C ARIA Authoring Practices Guide",
+      "repo": "w3c/aria-practices",
+      "canonical": "WAI-ARIA Authoring Practices Guide",
+      "takeaway": "Keyboard and role contracts for composite widgets (menu, tabs, combobox, dialog).",
+      "receivers": ["expert:watson"]
+    },
+    {
+      "id": "en-301-549",
+      "category": "accessibility-standards-testing",
+      "title": "ETSI EN 301 549 — accessibility requirements for ICT",
+      "url": "https://www.etsi.org/human-factors-accessibility/en-301-549-v3-the-harmonized-european-standard-for-ict-accessibility",
+      "canonical": "EN 301 549 v3 (EU harmonised standard)",
+      "takeaway": "Non-web clauses (native apps, documents) that extend WCAG for mobile screens.",
+      "receivers": ["expert:watson"]
+    },
+    {
+      "id": "w3c-apa",
+      "category": "accessibility-standards-testing",
+      "title": "W3C Accessible Platform Architectures WG",
+      "repo": "w3c/apa",
+      "canonical": "W3C APA working-group notes",
+      "takeaway": "Cognitive-accessibility and media notes beyond WCAG success criteria.",
+      "receivers": ["expert:watson"]
+    },
+    {
+      "id": "axe-core",
+      "category": "accessibility-standards-testing",
+      "title": "axe-core",
+      "repo": "dequelabs/axe-core",
+      "takeaway": "Rendered-UI rule engine for the council-review a11y scan (run as a tool, not vendored).",
+      "receivers": ["council-review:a11y-scan"]
+    },
+    {
+      "id": "pa11y",
+      "category": "accessibility-standards-testing",
+      "title": "Pa11y",
+      "repo": "pa11y/pa11y",
+      "takeaway": "Comparison point for scan outcomes and CI reporting shape.",
+      "receivers": ["council-review:a11y-scan"]
+    },
+    {
+      "id": "a11y-project",
+      "category": "accessibility-standards-testing",
+      "title": "The A11Y Project",
+      "repo": "a11yproject/a11yproject.com",
+      "takeaway": "Plain-language checklist for the manual items axe cannot see.",
+      "receivers": ["expert:watson", "council-review:a11y-scan"]
+    },
+    {
+      "id": "ibm-equal-access",
+      "category": "accessibility-standards-testing",
+      "title": "IBM Equal Access toolkit",
+      "repo": "IBMa/equal-access",
+      "takeaway": "Rule-to-WCAG mapping and the needs-review outcome class.",
+      "receivers": ["council-review:a11y-scan"]
+    },
+    {
+      "id": "accessibility-insights",
+      "category": "accessibility-standards-testing",
+      "title": "Accessibility Insights for Web",
+      "repo": "microsoft/accessibility-insights-web",
+      "takeaway": "Assisted manual test steps (tab stops, landmarks) for the manual checklist.",
+      "receivers": ["expert:watson", "council-review:a11y-scan"]
+    },
+    {
+      "id": "lighthouse",
+      "category": "automated-ui-checking",
+      "title": "Lighthouse",
+      "repo": "GoogleChrome/lighthouse",
+      "takeaway": "Audit categories and the split between lab metrics and manual audits.",
+      "receivers": ["skill:audit", "skill:optimize"]
+    },
+    {
+      "id": "eslint-plugin-jsx-a11y",
+      "category": "automated-ui-checking",
+      "title": "eslint-plugin-jsx-a11y",
+      "repo": "jsx-eslint/eslint-plugin-jsx-a11y",
+      "takeaway": "Static JSX rules (clickable div without role, label association) as aura-check rule candidates.",
+      "receivers": ["aura-check"]
+    },
+    {
+      "id": "stylelint",
+      "category": "automated-ui-checking",
+      "title": "Stylelint",
+      "repo": "stylelint/stylelint",
+      "takeaway": "Patterns for colour and spacing lint rules (no raw hex outside tokens).",
+      "receivers": ["aura-check"]
+    },
+    {
+      "id": "nu-html-checker",
+      "category": "automated-ui-checking",
+      "title": "Nu HTML Checker",
+      "repo": "validator/validator",
+      "takeaway": "Markup validity checks that precede any a11y scan.",
+      "receivers": ["council-review:a11y-scan"]
+    },
+    {
+      "id": "webhint",
+      "category": "automated-ui-checking",
+      "title": "webhint",
+      "repo": "webhintio/hint",
+      "takeaway": "Hint catalogue for compatibility, a11y and performance with fix guidance.",
+      "receivers": ["skill:audit", "aura-check"]
+    },
+    {
+      "id": "web-vitals",
+      "category": "automated-ui-checking",
+      "title": "web-vitals",
+      "repo": "GoogleChrome/web-vitals",
+      "takeaway": "INP / CLS / LCP thresholds for responsiveness findings.",
+      "receivers": ["skill:optimize"]
+    },
+    {
+      "id": "design-tokens-format",
+      "category": "design-systems-tokens",
+      "title": "Design Tokens Community Group — format module",
+      "repo": "design-tokens/community-group",
+      "canonical": "W3C Design Tokens Format Module (community group report)",
+      "takeaway": "Token types and alias semantics for the semantic token ladder.",
+      "receivers": ["expert:saarinen", "skill:normalize", "skill:extract"]
+    },
+    {
+      "id": "radix-colors",
+      "category": "design-systems-tokens",
+      "title": "Radix Colors",
+      "repo": "radix-ui/colors",
+      "takeaway": "12-step scale with a stated job per step (backgrounds, borders, solid, text).",
+      "receivers": ["expert:saarinen", "skill:colorize"]
+    },
+    {
+      "id": "radix-themes",
+      "category": "design-systems-tokens",
+      "title": "Radix Themes",
+      "repo": "radix-ui/themes",
+      "takeaway": "Dark-mode surface and panel elevation handled by scale steps, not shadows.",
+      "receivers": ["expert:saarinen"]
+    },
+    {
+      "id": "primer-primitives",
+      "category": "design-systems-tokens",
+      "title": "Primer Primitives",
+      "repo": "primer/primitives",
+      "takeaway": "Functional token naming (fgColor-muted, bgColor-inset) and high-contrast themes.",
+      "receivers": ["expert:saarinen", "expert:watson"]
+    },
+    {
+      "id": "carbon",
+      "category": "design-systems-tokens",
+      "title": "Carbon Design System",
+      "repo": "carbon-design-system/carbon",
+      "takeaway": "Layering model and 2x grid spacing scale; notification and error patterns.",
+      "receivers": ["expert:saarinen", "expert:friedman"]
+    },
+    {
+      "id": "material-web",
+      "category": "design-systems-tokens",
+      "title": "Material Web components",
+      "repo": "material-components/material-web",
+      "takeaway": "Material 3 tonal elevation and state-layer tokens as implemented.",
+      "receivers": ["expert:saarinen"]
+    },
+    {
+      "id": "shadcn-ui",
+      "category": "design-systems-tokens",
+      "title": "shadcn/ui",
+      "repo": "shadcn-ui/ui",
+      "takeaway": "CSS-variable theme contract common in agent-built React UIs.",
+      "receivers": ["skill:frontend-design", "skill:normalize"]
+    },
+    {
+      "id": "style-dictionary",
+      "category": "design-systems-tokens",
+      "title": "Style Dictionary",
+      "repo": "style-dictionary/style-dictionary",
+      "takeaway": "Token build pipeline reference for multi-platform output.",
+      "receivers": ["skill:extract"]
+    },
+    {
+      "id": "spectrum-tokens",
+      "category": "design-systems-tokens",
+      "title": "Adobe Spectrum tokens",
+      "repo": "adobe/spectrum-tokens",
+      "takeaway": "Platform scale sets (desktop vs mobile) for touch-target sizing.",
+      "receivers": ["expert:saarinen", "expert:friedman"]
+    },
+    {
+      "id": "fluentui",
+      "category": "design-systems-tokens",
+      "title": "Fluent UI",
+      "repo": "microsoft/fluentui",
+      "takeaway": "Comparison point for elevation and focus-indicator tokens.",
+      "receivers": ["expert:saarinen"]
+    },
+    {
+      "id": "harmony-palette",
+      "category": "design-systems-tokens",
+      "title": "Harmony (OKLCH palette)",
+      "repo": "evilmartians/harmony",
+      "takeaway": "Perceptually even OKLCH scales with consistent contrast per step.",
+      "receivers": ["skill:colorize"]
+    },
+    {
+      "id": "govuk-design-system",
+      "category": "ux-writing",
+      "title": "GOV.UK Design System",
+      "repo": "alphagov/govuk-design-system",
+      "takeaway": "Error-message patterns (say what happened and how to fix it) and question-page structure.",
+      "receivers": ["expert:friedman", "skill:clarify", "aura-check"]
+    },
+    {
+      "id": "vale",
+      "category": "ux-writing",
+      "title": "Vale prose linter",
+      "repo": "vale-cli/vale",
+      "takeaway": "Rule format for machine-checkable microcopy rules.",
+      "receivers": ["skill:clarify"]
+    },
+    {
+      "id": "alex",
+      "category": "ux-writing",
+      "title": "alex — insensitive writing linter",
+      "repo": "get-alex/alex",
+      "takeaway": "Inclusive-language checks for UI copy.",
+      "receivers": ["skill:clarify"]
+    },
+    {
+      "id": "mailchimp-content-style-guide",
+      "category": "ux-writing",
+      "title": "Mailchimp Content Style Guide",
+      "repo": "mailchimp/content-style-guide",
+      "takeaway": "Voice-and-tone guidance for interface copy.",
+      "receivers": ["skill:clarify"]
+    },
+    {
+      "id": "backstopjs",
+      "category": "visual-regression",
+      "title": "BackstopJS",
+      "repo": "garris/BackstopJS",
+      "takeaway": "Scenario/viewport matrix shape for screenshot comparison.",
+      "receivers": ["skill:polish"]
+    },
+    {
+      "id": "reg-suit",
+      "category": "visual-regression",
+      "title": "reg-suit",
+      "repo": "reg-viz/reg-suit",
+      "takeaway": "Diff report published to the PR for a human verdict.",
+      "receivers": ["skill:polish"]
+    },
+    {
+      "id": "jest-image-snapshot",
+      "category": "visual-regression",
+      "title": "jest-image-snapshot",
+      "repo": "americanexpress/jest-image-snapshot",
+      "takeaway": "Per-snapshot diff thresholds and failure-diff artefacts.",
+      "receivers": ["skill:polish"]
+    },
+    {
+      "id": "lost-pixel",
+      "category": "visual-regression",
+      "title": "Lost Pixel",
+      "repo": "lost-pixel/lost-pixel",
+      "takeaway": "Storybook/page visual-regression workflow.",
+      "receivers": ["skill:polish"]
+    },
+    {
+      "id": "playwright-snapshots",
+      "category": "visual-regression",
+      "title": "Playwright visual comparisons",
+      "repo": "microsoft/playwright",
+      "takeaway": "Masking dynamic regions and per-project viewports in screenshot assertions.",
+      "receivers": ["skill:polish"]
+    },
+    {
+      "id": "storybook",
+      "category": "visual-regression",
+      "title": "Storybook",
+      "repo": "storybookjs/storybook",
+      "takeaway": "Story-per-state isolation, the model behind Aura's Playground.",
+      "receivers": ["skill:polish", "expert:saarinen"]
+    },
+    {
+      "id": "apple-hig",
+      "category": "platform-guidelines",
+      "title": "Apple Human Interface Guidelines",
+      "url": "https://developer.apple.com/design/human-interface-guidelines",
+      "canonical": "Apple Human Interface Guidelines",
+      "takeaway": "44pt targets, Dynamic Type, safe areas and navigation conventions for iOS.",
+      "receivers": ["expert:friedman", "expert:saarinen", "expert:watson"]
+    },
+    {
+      "id": "material-3",
+      "category": "platform-guidelines",
+      "title": "Material Design 3",
+      "url": "https://m3.material.io/",
+      "canonical": "Material Design 3 guidelines",
+      "takeaway": "48dp targets, tonal elevation, system back behaviour for Android.",
+      "receivers": ["expert:friedman", "expert:saarinen", "expert:watson"]
+    },
+    {
+      "id": "material-components-android",
+      "category": "platform-guidelines",
+      "title": "Material Components for Android",
+      "repo": "material-components/material-components-android",
+      "takeaway": "Component-level accessibility defaults on Android.",
+      "receivers": ["expert:watson"]
+    },
+    {
+      "id": "telegram-webapps",
+      "category": "platform-guidelines",
+      "title": "Telegram Mini Apps (Bot API WebApp docs)",
+      "url": "https://core.telegram.org/bots/webapps",
+      "canonical": "Telegram Mini Apps platform documentation",
+      "takeaway": "BackButton/MainButton, themeParams, safe-area insets, closing confirmation, native popups.",
+      "receivers": ["expert:friedman", "expert:saarinen", "expert:watson", "aura-check"]
+    },
+    {
+      "id": "tma-js",
+      "category": "platform-guidelines",
+      "title": "tma.js (Telegram Mini Apps SDK)",
+      "repo": "Telegram-Mini-Apps/tma.js",
+      "takeaway": "Typed wrappers that show which platform events a Mini App must handle.",
+      "receivers": ["expert:friedman"]
+    },
+    {
+      "id": "ui-ux-pro-max",
+      "category": "llm-agent-skill-packs",
+      "title": "UI UX Pro Max skill",
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "takeaway": "Vendored skill: searchable style/palette/UX-guideline data for agents.",
+      "receivers": ["skill:ui-ux-pro-max"]
+    },
+    {
+      "id": "taste-skill",
+      "category": "llm-agent-skill-packs",
+      "title": "tasteskill (design-taste-frontend)",
+      "repo": "Leonxlnx/taste-skill",
+      "takeaway": "Vendored skill: art direction, house rules and the look-and-fix screenshot loop.",
+      "receivers": ["skill:taste-skill"]
+    },
+    {
+      "id": "impeccable",
+      "category": "llm-agent-skill-packs",
+      "title": "impeccable",
+      "repo": "pbakaus/impeccable",
+      "takeaway": "Upstream of the repo's audit/polish/critique/… skills (skills-lock.json).",
+      "receivers": ["skill:audit", "skill:polish", "skill:critique"]
+    },
+    {
+      "id": "anthropic-skills",
+      "category": "llm-agent-skill-packs",
+      "title": "Anthropic skills (frontend-design and others)",
+      "repo": "anthropics/skills",
+      "takeaway": "Skill authoring shape and the frontend-design skill as a comparison point.",
+      "receivers": ["skill:frontend-design"]
+    },
+    {
+      "id": "vercel-agent-skills",
+      "category": "llm-agent-skill-packs",
+      "title": "Vercel agent skills (web design guidelines)",
+      "repo": "vercel-labs/agent-skills",
+      "takeaway": "Web-interface guideline list as a comparison point for aura-check rules.",
+      "receivers": ["aura-check"]
+    }
+  ]
+}
