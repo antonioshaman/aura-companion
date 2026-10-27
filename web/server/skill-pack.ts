@@ -406,11 +406,11 @@ export function verifyVersionDir(dir: string): { manifest: SkillManifest } | { e
   if (manifest?.schemaVersion !== SKILL_MANIFEST_SCHEMA_VERSION || !Array.isArray(manifest.entries)) {
     return { errors: [`${PACK_MANIFEST_FILE} has an unknown shape`] };
   }
-  const errors = [
-    ...manifestPathErrors(manifest),
-    ...manifest.entries.filter((e) => e.ship?.status !== "ship").map((e) => `${e.name} does not pass the ship gate`),
-  ];
-  if (errors.length) return { errors };
+  // Shape and paths first: the gate check below reads entry fields.
+  const pathErrors = manifestPathErrors(manifest);
+  if (pathErrors.length) return { errors: pathErrors };
+  const gated = manifest.entries.filter((e) => e.ship.status !== "ship").map((e) => `${e.name} does not pass the ship gate`);
+  if (gated.length) return { errors: gated };
   const mismatch = treeMismatches(files, manifest);
   return mismatch.length ? { errors: mismatch } : { manifest };
 }

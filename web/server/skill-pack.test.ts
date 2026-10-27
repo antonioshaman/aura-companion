@@ -274,9 +274,12 @@ describe("installPack / readCurrentPack", () => {
     const r = installPack({ sourceDir: dir, manifest, root });
     chmodSync(r.dir, 0o755);
     chmodSync(join(r.dir, PACK_MANIFEST_FILE), 0o644);
-    writeFileSync(join(r.dir, PACK_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, entries: [{}] }));
-    const cur = readCurrentPack(root);
-    expect("error" in cur && cur.error).toContain("malformed entry");
+    // `{}` and `null` (follow-up review): both must come back as an error, not a throw.
+    for (const bad of [{}, null, 7, []]) {
+      writeFileSync(join(r.dir, PACK_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, entries: [bad] }));
+      const cur = readCurrentPack(root);
+      expect("error" in cur && cur.error, JSON.stringify(bad)).toContain("malformed entry");
+    }
     expect(installPack({ sourceDir: dir, manifest, root }).reused).toBe(false);
     expect("manifest" in readCurrentPack(root)).toBe(true);
   });
