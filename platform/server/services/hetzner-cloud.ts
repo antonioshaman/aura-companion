@@ -10,6 +10,8 @@ interface HetznerServer {
   id: number;
   name: string;
   status: string;
+  created?: string;
+  labels?: Record<string, string>;
   public_net?: {
     ipv4?: { ip?: string | null } | null;
   };
@@ -20,6 +22,14 @@ interface HetznerVolume {
   name: string;
   size: number;
   linux_device?: string | null;
+  created?: string;
+  labels?: Record<string, string>;
+  /** Id of the server the volume is attached to, or null when detached. */
+  server?: number | null;
+}
+
+interface HetznerListMeta {
+  pagination?: { next_page?: number | null } | null;
 }
 
 interface CreateVolumeInput {
@@ -75,6 +85,36 @@ export class HetznerCloudClient {
 
   async deleteVolume(volumeId: string | number): Promise<void> {
     await this.request<void>("DELETE", `/volumes/${volumeId}`);
+  }
+
+  /** List every volume matching a Hetzner label selector (follows pagination). */
+  async listVolumes(labelSelector: string): Promise<HetznerVolume[]> {
+    return this.listAll<HetznerVolume>("/volumes", "volumes", labelSelector);
+  }
+
+  /** List every server matching a Hetzner label selector (follows pagination). */
+  async listServers(labelSelector: string): Promise<HetznerServer[]> {
+    return this.listAll<HetznerServer>("/servers", "servers", labelSelector);
+  }
+
+  private async listAll<T>(path: string, key: string, labelSelector: string): Promise<T[]> {
+    const items: T[] = [];
+    let page: number | null = 1;
+    // Hard cap guards against a misbehaving pagination cursor looping forever.
+    for (let i = 0; page && i < 100; i += 1) {
+      const qs = new URLSearchParams({
+        label_selector: labelSelector,
+        page: String(page),
+        per_page: "50",
+      });
+      const payload: Record<string, unknown> & { meta?: HetznerListMeta } = await this.request(
+        "GET",
+        `${path}?${qs.toString()}`,
+      );
+      items.push(...((payload?.[key] as T[] | undefined) ?? []));
+      page = payload?.meta?.pagination?.next_page ?? null;
+    }
+    return items;
   }
 
   async createServer(input: CreateServerInput): Promise<{ server: HetznerServer; action?: HetznerAction }> {

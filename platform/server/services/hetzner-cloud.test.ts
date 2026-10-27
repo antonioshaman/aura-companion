@@ -149,4 +149,38 @@ describe("HetznerCloudClient", () => {
     const server = await client.waitForServerStatus(77, "running", 5000);
     expect(server.status).toBe("running");
   });
+
+  // The orphan reconciler relies on listing ALL labelled resources, so the
+  // client must follow Hetzner's page cursor until next_page is null.
+  it("lists servers by label selector across pages", async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ servers: [{ id: 1 }], meta: { pagination: { next_page: 2 } } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ servers: [{ id: 2 }], meta: { pagination: { next_page: null } } }),
+      });
+
+    const client = new HetznerCloudClient(TOKEN);
+    const servers = await client.listServers("app=companion,organization");
+
+    expect(servers.map((s) => s.id)).toEqual([1, 2]);
+    const urls = fetchMock.mock.calls.map((c: any[]) => new URL(c[0]));
+    expect(urls[0].pathname).toBe("/v1/servers");
+    expect(urls[0].searchParams.get("label_selector")).toBe("app=companion,organization");
+    expect(urls[1].searchParams.get("page")).toBe("2");
+  });
+
+  it("lists volumes by label selector", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () => JSON.stringify({ volumes: [{ id: 9, server: null }] }),
+    });
+    const client = new HetznerCloudClient(TOKEN);
+    const volumes = await client.listVolumes("app=companion");
+    expect(volumes).toEqual([{ id: 9, server: null }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

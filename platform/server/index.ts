@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { instances } from "./routes/instances.js";
 import { billing, stripeWebhook } from "./routes/billing.js";
 import { dashboard } from "./routes/dashboard.js";
+import { instanceBootstrap } from "./routes/bootstrap.js";
+import { startOrphanReconciler } from "./services/orphan-reconciler.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT) || 3458;
@@ -55,6 +57,8 @@ app.all("/api/auth/*", async (c) => {
 });
 
 // ── API Routes ───────────────────────────────────────────────────────────────
+// Unauthenticated by design: called by new instances with a one-time token.
+app.route("/api/instance-bootstrap", instanceBootstrap);
 app.route("/api/instances", instances);
 app.route("/api/billing", billing);
 app.route("/api/webhooks", stripeWebhook);
@@ -83,6 +87,11 @@ if (process.env.NODE_ENV === "production") {
   // In dev mode, redirect to Vite dev server for the frontend.
   app.get("/", (c) => c.redirect("http://localhost:5175"));
 }
+
+// ── Orphan reconciler ───────────────────────────────────────────────────────
+// Periodically deletes labelled Hetzner servers/volumes with no DB record.
+// No-op unless HETZNER_API_TOKEN + DATABASE_URL are set (and never in tests).
+startOrphanReconciler();
 
 // ── Start ────────────────────────────────────────────────────────────────────
 export default {

@@ -78,6 +78,16 @@ describe("GET /api/status", () => {
   });
 });
 
+// The bootstrap exchange is mounted outside session auth (instances call it
+// with a one-time token); without a token it must 401, not 404/redirect.
+describe("POST /api/instance-bootstrap", () => {
+  it("is mounted and rejects a request without a bootstrap token", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await server.fetch(new Request("http://localhost/api/instance-bootstrap", { method: "POST" }));
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("unknown routes", () => {
   it("returns 404 for unrecognized paths", async () => {
     // In non-production mode there is no static file catch-all,

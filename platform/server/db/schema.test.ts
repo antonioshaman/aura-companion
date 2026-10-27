@@ -47,6 +47,19 @@ describe("organizationBilling table", () => {
 });
 
 describe("instances table", () => {
+  // Provisioning safety columns: per-org Idempotency-Key (unique, so a retried
+  // create can't produce a second server) and the hashed one-time bootstrap token.
+  it("has idempotency + bootstrap-token columns and a per-org idempotency unique index", () => {
+    const config = getTableConfig(instances);
+    const columnNames = config.columns.map((c) => c.name);
+    expect(columnNames).toContain("idempotency_key");
+    expect(columnNames).toContain("bootstrap_token_hash");
+    expect(columnNames).toContain("bootstrap_token_expires_at");
+    const idx = config.indexes.find((i) => i.config.name === "instances_org_idempotency_key_uidx");
+    expect(idx?.config.unique).toBe(true);
+    expect(idx?.config.columns.map((c: any) => c.name)).toEqual(["organization_id", "idempotency_key"]);
+  });
+
   it('uses "instances" as the underlying SQL table name', () => {
     const config = getTableConfig(instances);
     expect(config.name).toBe("instances");
