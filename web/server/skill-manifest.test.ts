@@ -199,6 +199,22 @@ describe("readOwnership — on-disk copies", () => {
     expect(r.owner === "user" && r.reason).toMatch(/symlink in skill tree: link/);
   });
 
+  it.each(["node_modules", "__pycache__"])("a file inside a skipped %s dir → user (observer STOP 2026-10-27)", (cache) => {
+    // Why: readTree does not read cache dirs, so a user file there was invisible to
+    // the hash comparison and the copy read as Aura's — B2 would delete it with the copy.
+    const root = mkdtempSync(join(tmpdir(), "skill-own-"));
+    const t = tree();
+    const e = entryFor("polish", t);
+    mkdirSync(join(root, "polish", "references"), { recursive: true });
+    for (const [p, b] of installed(e, t)) writeFileSync(join(root, "polish", p), b);
+    mkdirSync(join(root, "polish", cache));
+    writeFileSync(join(root, "polish", cache, "notes.md"), "mine");
+    expect(readOwnership(join(root, "polish"), "polish", { entries: [e] })).toEqual({
+      owner: "user",
+      reason: `cannot prove ownership: unread dir ${cache}`,
+    });
+  });
+
   it("a missing dir → user, never a throw", () => {
     expect(readOwnership("/nonexistent/aura/x", "x", { entries: [] }).owner).toBe("user");
   });

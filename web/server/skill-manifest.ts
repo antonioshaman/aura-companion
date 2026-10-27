@@ -220,13 +220,19 @@ export function readTree(root: string, skipped: string[] = []): Map<string, Buff
   return out;
 }
 
-/** Ownership of an on-disk copy. Any read failure (symlink, permissions) → the user's. */
+/**
+ * Ownership of an on-disk copy. Any read failure (symlink, permissions) → the user's.
+ * A skipped cache dir also → the user's: readTree does not look inside it, so its
+ * contents (user files, links) are unproven, and deleting the copy would take them too.
+ */
 export function readOwnership(dir: string, dirName: string, manifest: Pick<SkillManifest, "entries">): Ownership {
   let files: Map<string, Buffer>;
+  const skipped: string[] = [];
   try {
-    files = readTree(dir);
+    files = readTree(dir, skipped);
   } catch (err) {
     return { owner: "user", reason: `cannot prove ownership: ${(err as Error).message}` };
   }
+  if (skipped.length) return { owner: "user", reason: `cannot prove ownership: unread dir ${skipped[0]}` };
   return ownership(dirName, files, manifest);
 }
