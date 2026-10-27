@@ -20,10 +20,10 @@
 // `lock` regenerates hashes + inventories from the tree; `approve` records an
 // approval for the current bytes; `check` verifies the tree against the lock.
 
-import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
+import { filesDigest, readTree, sha256 } from "../server/skill-manifest.js";
 import { COUNCIL_SKILLS_DIR } from "./capability-catalog.js";
 import { SHIPPABLE_CODE_LICENCES, SLUG_RE } from "./licences.js";
 
@@ -36,8 +36,10 @@ const CODE_EXT = /\.(mjs|cjs|js|ts|py|sh)$/;
 const HOST_RE = /\bhttps?:\/\/([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)/g;
 /** Placeholder / loopback hosts that are not outbound calls. */
 const NON_OUTBOUND = new Set(["127.0.0.1", "localhost"]);
-/** Directories readTree does not hash (generated caches); reported, never silent. */
-const SKIPPED_DIRS = new Set(["__pycache__", "node_modules"]);
+
+// Hashing and the symlink-refusing tree reader live in the shipped module, so the
+// lock and the skills manifest can never hash a tree two different ways.
+export { filesDigest, readTree, sha256 };
 
 export interface HumanReview {
   status: "pending" | "approved" | "rejected";
@@ -74,10 +76,6 @@ export interface VendorLock {
 
 // ─── Pure core ──────────────────────────────────────────────────────────────
 
-export function sha256(buf: Buffer | string): string {
-  return createHash("sha256").update(buf).digest("hex");
-}
-
 /** Outbound hosts named in one code file's text, sorted and de-duplicated. */
 export function outboundHosts(text: string): string[] {
   const hosts = new Set<string>();
@@ -103,12 +101,6 @@ export function networkInventory(files: Map<string, Buffer>): Record<string, str
 /** Instruction inventory: markdown the agent reads → literal hosts (finding #3). */
 export function instructionInventory(files: Map<string, Buffer>): Record<string, string[]> {
   return inventory(files, (p) => p.endsWith(".md"));
-}
-
-/** One digest over the whole locked file map — what an approval is bound to. */
-export function filesDigest(files: Record<string, string>): string {
-  const lines = Object.keys(files).sort().map((p) => `${p}\0${files[p]}\n`);
-  return sha256(lines.join(""));
 }
 
 /**
@@ -172,32 +164,6 @@ export function checkSkill(entry: VendoredSkill, files: Map<string, Buffer>): st
 export function skillDir(name: string, root = PACK_SKILLS_DIR): string {
   if (!SLUG_RE.test(name)) throw new Error(`skill name ${JSON.stringify(name)} is not a safe slug`);
   return join(root, name);
-}
-
-/**
- * Read a skill tree. Refuses symlinks, including a symlinked root (a vendored link
- * could point anywhere). Generated cache dirs are not hashed; their paths are
- * pushed to `skipped` so a caller can report them rather than hide them.
- */
-export function readTree(root: string, skipped: string[] = []): Map<string, Buffer> {
-  if (lstatSync(root).isSymbolicLink()) throw new Error(`skill root is a symlink: ${root}`);
-  const out = new Map<string, Buffer>();
-  const walk = (dir: string) => {
-    for (const name of readdirSync(dir).sort()) {
-      const abs = join(dir, name);
-      const st = lstatSync(abs);
-      if (st.isSymbolicLink()) throw new Error(`symlink in vendored tree: ${relative(root, abs)}`);
-      if (st.isDirectory()) {
-        if (SKIPPED_DIRS.has(name)) {
-          skipped.push(relative(root, abs).split(sep).join("/"));
-          continue;
-        }
-        walk(abs);
-      } else if (st.isFile()) out.set(relative(root, abs).split(sep).join("/"), readFileSync(abs));
-    }
-  };
-  walk(root);
-  return out;
 }
 
 export function loadLock(path = VENDOR_LOCK_FILE): VendorLock {

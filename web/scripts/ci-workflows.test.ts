@@ -110,6 +110,7 @@ describe("CI workflow hardening (P7/CI-HARDEN)", () => {
 const GATE_COMMANDS = [
   "bash packs/skills/_council-experts/.verify/verify-catalog.sh",
   "bun scripts/vendored-skills.ts check",
+  "bun scripts/skill-manifest.ts check",
   "bun scripts/uiux-sources.ts check",
 ];
 
