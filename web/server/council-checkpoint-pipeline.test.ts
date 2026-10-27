@@ -745,3 +745,56 @@ describe("W14 unanswered observer wake", () => {
     }
   });
 });
+
+describe("CouncilCheckpointPipeline — council budget guard", () => {
+  // Budget guard: once the pair crossed its token budget, a checkpoint must
+  // NOT wake the observer (automatic spend), but must not be lost either —
+  // it waits in the newest-wins pending slot until a human continues.
+  it("queues instead of waking while the budget is exceeded, and drains after continue", () => {
+    let exceeded = true;
+    const h = makeHarness({ pipelineDeps: { isBudgetExceeded: () => exceeded } });
+    h.setCoordinator(activeCoordinator());
+
+    const outcome = h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    expect(outcome).toEqual({ kind: "skipped", reason: "budget_exceeded" });
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe("chk_1");
+
+    // A second checkpoint while paused supersedes the first (newest-wins).
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(2));
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe("chk_2");
+
+    // Continue → the drain delivers the newest checkpoint.
+    exceeded = false;
+    h.pipeline.drainPendingObserverWake(GROUP);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint).toBeNull();
+  });
+
+  // The guard sits after the lifecycle gates: an archived/unknown group still
+  // drops (nothing to resume), so a paused-then-archived pair leaks nothing.
+  it("does not queue for a group that is not active or degraded", () => {
+    const h = makeHarness({ pipelineDeps: { isBudgetExceeded: () => true } });
+    h.setCoordinator(activeCoordinator("archived"));
+    const outcome = h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    expect(outcome).toEqual({ kind: "skipped", reason: "group_not_active" });
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint).toBeNull();
+  });
+
+  // EC-9: the skip is one structured line with group, session and role.
+  it("logs the skip as an EC-9 structured line", () => {
+    const info = vi.spyOn(log, "info");
+    cleanups.push(() => info.mockRestore());
+    const h = makeHarness({ pipelineDeps: { isBudgetExceeded: () => true } });
+    h.setCoordinator(activeCoordinator());
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    const call = info.mock.calls.find((c) => (c[2] as { reason?: string } | undefined)?.reason === "budget_exceeded");
+    expect(call?.[2]).toMatchObject({
+      event: "group.observer_wake_skipped",
+      sessionGroupId: GROUP,
+      sessionId: OBSERVER,
+      role: "observer",
+      queued: true,
+    });
+  });
+});

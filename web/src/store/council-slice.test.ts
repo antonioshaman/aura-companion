@@ -1132,6 +1132,64 @@ describe("autoProceedRestoreGaps (FIX-AP-4)", () => {
   });
 });
 
+// ── Council budget guard ───────────────────────────────────────────────────
+describe("councilBudgets (council budget guard)", () => {
+  // The server pauses a pair's automatic activity when it crosses its token
+  // budget. The slice keeps the server snapshot per group; "Continue" is NOT
+  // optimistic (the pause stays visible until the server confirms) and a
+  // failure is surfaced next to the button.
+  const exceeded = {
+    sessionGroupId: "grp_abc", limitTokens: 100, limitSource: "env" as const, spentTokens: 120, exceeded: true, exceededAt: 5,
+    byRole: {
+      orchestrator: { inputTokens: 1, outputTokens: 60, cacheCreationTokens: 0, cacheReadTokens: 9, turns: 1 },
+      observer: { inputTokens: 59, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, turns: 1 },
+    },
+  };
+  const resumed = { ...exceeded, spentTokens: 0, exceeded: false, exceededAt: undefined };
+
+  it("continueCouncilBudget stores the server's answer and clears the in-flight flag", async () => {
+    const cont = vi.spyOn(api, "continueGroupBudget").mockResolvedValue({ budget: resumed, wasExceeded: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setCouncilBudget(exceeded);
+      const p = useStore.getState().continueCouncilBudget("grp_abc");
+      // Not optimistic: still exceeded while the request is in flight.
+      expect(useStore.getState().councilBudgets.get("grp_abc")?.exceeded).toBe(true);
+      expect(useStore.getState().councilBudgetContinuing.has("grp_abc")).toBe(true);
+      // A double click does not send a second request.
+      await useStore.getState().continueCouncilBudget("grp_abc");
+      await p;
+      expect(cont).toHaveBeenCalledTimes(1);
+      expect(useStore.getState().councilBudgets.get("grp_abc")?.exceeded).toBe(false);
+      expect(useStore.getState().councilBudgetContinuing.has("grp_abc")).toBe(false);
+    } finally {
+      cont.mockRestore();
+    }
+  });
+
+  it("keeps the pause and records an error when Continue fails", async () => {
+    const cont = vi.spyOn(api, "continueGroupBudget").mockRejectedValue(new Error("500"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setCouncilBudget(exceeded);
+      await useStore.getState().continueCouncilBudget("grp_abc");
+      expect(useStore.getState().councilBudgets.get("grp_abc")?.exceeded).toBe(true);
+      expect(useStore.getState().councilBudgetErrors.get("grp_abc")).toMatch(/Could not resume/);
+    } finally {
+      cont.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("removeGroup drops the group's budget", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setCouncilBudget(exceeded);
+    useStore.getState().removeGroup("grp_abc");
+    expect(useStore.getState().councilBudgets.has("grp_abc")).toBe(false);
+  });
+});
+
 // ── Observer rigor (2026-10-16): checkpoint coverage ────────────────────────
 // A checkpoint without a review (superseded, pair degraded mid-review) or
 // with only an unverified empty review is kept in `checkpointCoverage` so the

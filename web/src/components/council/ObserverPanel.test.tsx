@@ -757,3 +757,44 @@ describe("ObserverPanel — auto-proceed restore gaps (FIX-AP-4)", () => {
     }
   });
 });
+
+// Council budget guard: when the server paused the pair because it crossed
+// its token budget, the panel says why and offers Continue for THIS group.
+// A pair under budget shows nothing extra.
+describe("ObserverPanel — council budget guard", () => {
+  const budget = (exceeded: boolean) => ({
+    sessionGroupId: GROUP.sessionGroupId, limitTokens: 20_000_000, limitSource: "env" as const,
+    spentTokens: exceeded ? 20_100_000 : 1_000, exceeded,
+    byRole: {
+      orchestrator: { inputTokens: 100, outputTokens: 2_000_000, cacheCreationTokens: 10_000_000, cacheReadTokens: 500_000_000, turns: 200 },
+      observer: { inputTokens: 6_000_000, outputTokens: 2_099_900, cacheCreationTokens: 0, cacheReadTokens: 90_000_000, turns: 150 },
+    },
+  });
+
+  it("shows nothing while the pair is under budget", () => {
+    seedGroup();
+    act(() => { useStore.getState().setCouncilBudget(budget(false)); });
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("council-budget-notice")).toBeNull();
+  });
+
+  it("shows the pause, continues this group, and passes axe accessibility scan", async () => {
+    seedGroup();
+    const cont = vi.fn(async () => {});
+    const original = useStore.getState().continueCouncilBudget;
+    act(() => {
+      useStore.getState().setCouncilBudget(budget(true));
+      useStore.setState({ continueCouncilBudget: cont });
+    });
+    try {
+      const { container } = render(<ObserverPanel sessionId={SESSION} />);
+      expect(screen.getByText("Pair paused: token budget reached")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+      expect(cont).toHaveBeenCalledWith(GROUP.sessionGroupId);
+      const { axe } = await import("vitest-axe");
+      expect(await axe(container)).toHaveNoViolations();
+    } finally {
+      useStore.setState({ continueCouncilBudget: original });
+    }
+  });
+});

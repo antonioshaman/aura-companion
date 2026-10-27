@@ -3,6 +3,7 @@ import type { AppState } from "./index.js";
 import type {
   AutoProceedRestoreGap,
   BrowserCheckpointCoverageGap,
+  BrowserCouncilBudget,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
   ConvergenceNotCountedReason,
@@ -179,6 +180,16 @@ export interface CouncilSlice {
    * absent → nothing paused (or the pair never opted in).
    */
   autoProceedRestoreGaps: Map<string, AutoProceedRestoreGap[]>;
+  /**
+   * Council budget guard — per group: token spend and whether automatic
+   * activity (observer wakes, auto-proceed) is paused. Server-authoritative:
+   * filled by the findings bootstrap and live `group_budget` frames.
+   */
+  councilBudgets: Map<string, BrowserCouncilBudget>;
+  /** Pending "Continue" request per group (button disabled while in flight). */
+  councilBudgetContinuing: Set<string>;
+  /** Last "Continue" failure per group, shown next to the button. */
+  councilBudgetErrors: Map<string, string>;
 
   // Actions — group lifecycle
   upsertGroup: (group: GroupRecord) => void;
@@ -260,6 +271,14 @@ export interface CouncilSlice {
    * file stays out of the banner (FIX-B2b-1: split from `dismissStop`).
    */
   disputeStop: (findingId: string) => void;
+  /** Budget guard: store the server's snapshot for a group. */
+  setCouncilBudget: (budget: BrowserCouncilBudget) => void;
+  /**
+   * Budget guard — "Continue": ask the server to restart the pair's spend
+   * window. Not optimistic: the pause stays visible until the server confirms
+   * (the live `group_budget` frame or the response clears it).
+   */
+  continueCouncilBudget: (sessionGroupId: string) => Promise<void>;
   /** FIX-AP-4: replace a group's restore gaps with the bootstrap's list. */
   setAutoProceedRestoreGaps: (sessionGroupId: string, gaps: AutoProceedRestoreGap[]) => void;
   /**
@@ -299,6 +318,9 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
   firstRunHintDismissed: getInitialFirstRunDismissed(),
   dismissedStopIds: new Set(),
   autoProceedRestoreGaps: new Map(),
+  councilBudgets: new Map(),
+  councilBudgetContinuing: new Set(),
+  councilBudgetErrors: new Map(),
 
   upsertGroup: (group) =>
     set((s) => {
@@ -368,7 +390,11 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       clearAnnouncerScope(sessionGroupId);
       const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
       autoProceedRestoreGaps.delete(sessionGroupId);
-      return { groups, groupBySessionId, findings, groundingDowngrades, autoProceedRestoreGaps };
+      const councilBudgets = new Map(s.councilBudgets);
+      councilBudgets.delete(sessionGroupId);
+      const councilBudgetErrors = new Map(s.councilBudgetErrors);
+      councilBudgetErrors.delete(sessionGroupId);
+      return { groups, groupBySessionId, findings, groundingDowngrades, autoProceedRestoreGaps, councilBudgets, councilBudgetErrors };
     }),
 
   setGroupStatus: (sessionGroupId, status, opts) =>
@@ -604,6 +630,41 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
     api.resolveObserverStop(groupId, findingId).catch((err: unknown) => {
       console.warn("[council] STOP dismissal not sent", err);
     });
+  },
+
+  setCouncilBudget: (budget) =>
+    set((s) => {
+      const councilBudgets = new Map(s.councilBudgets);
+      councilBudgets.set(budget.sessionGroupId, budget);
+      return { councilBudgets };
+    }),
+
+  continueCouncilBudget: async (sessionGroupId) => {
+    if (get().councilBudgetContinuing.has(sessionGroupId)) return;
+    set((s) => {
+      const councilBudgetContinuing = new Set(s.councilBudgetContinuing);
+      councilBudgetContinuing.add(sessionGroupId);
+      const councilBudgetErrors = new Map(s.councilBudgetErrors);
+      councilBudgetErrors.delete(sessionGroupId);
+      return { councilBudgetContinuing, councilBudgetErrors };
+    });
+    try {
+      const res = await api.continueGroupBudget(sessionGroupId);
+      if (get().groups.has(sessionGroupId)) get().setCouncilBudget(res.budget);
+    } catch (err: unknown) {
+      console.warn("[council] budget continue failed", err);
+      set((s) => {
+        const councilBudgetErrors = new Map(s.councilBudgetErrors);
+        councilBudgetErrors.set(sessionGroupId, "Could not resume the pair. Try again.");
+        return { councilBudgetErrors };
+      });
+    } finally {
+      set((s) => {
+        const councilBudgetContinuing = new Set(s.councilBudgetContinuing);
+        councilBudgetContinuing.delete(sessionGroupId);
+        return { councilBudgetContinuing };
+      });
+    }
   },
 
   setAutoProceedRestoreGaps: (sessionGroupId, gaps) =>

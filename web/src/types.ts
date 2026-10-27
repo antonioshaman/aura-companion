@@ -17,6 +17,8 @@ import type {
   ContextAdvisoryPayload,
   ContextAdvisorySignal,
   BrowserCheckpointCoverageGap,
+  BrowserCouncilBudget,
+  CouncilRoleUsage,
 } from "../server/session-types.js";
 
 export type {
@@ -38,6 +40,8 @@ export type {
   ContextAdvisoryPayload,
   ContextAdvisorySignal,
   BrowserCheckpointCoverageGap,
+  BrowserCouncilBudget,
+  CouncilRoleUsage,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";
 

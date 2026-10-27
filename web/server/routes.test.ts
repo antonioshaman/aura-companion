@@ -1064,6 +1064,55 @@ describe("POST /api/groups/:groupId/stops/resolve", () => {
   });
 });
 
+// Council budget guard: GET the pair's budget snapshot; POST continue resumes
+// a pair paused by its token budget (optionally with a pair-specific limit).
+// The routes validate and map outcomes; accounting + resume semantics are
+// covered in council-budget.test.ts and session-orchestrator.test.ts.
+describe("council budget routes", () => {
+  const budget = {
+    sessionGroupId: "grp_x", limitTokens: 100, limitSource: "env", spentTokens: 0, exceeded: false,
+    byRole: {
+      orchestrator: { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, turns: 0 },
+      observer: { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, turns: 0 },
+    },
+  };
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/budget/continue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+    });
+
+  it("GET returns the snapshot, 404 for an unknown group", async () => {
+    orchestrator.getGroupBudget = vi.fn(() => ({ ok: true, budget }));
+    const res = await app.request("/api/groups/grp_x/budget");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ budget });
+    orchestrator.getGroupBudget = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await app.request("/api/groups/grp_y/budget")).status).toBe(404);
+  });
+
+  it("continue without a body resumes with the current limit; with limitTokens sets a pair limit", async () => {
+    orchestrator.continueGroupBudget = vi.fn(() => ({ ok: true, budget, wasExceeded: true }));
+    const res = await post(undefined);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ budget, wasExceeded: true });
+    expect(orchestrator.continueGroupBudget).toHaveBeenCalledWith("grp_x", {});
+    await post({ limitTokens: 5_000_000 });
+    expect(orchestrator.continueGroupBudget).toHaveBeenLastCalledWith("grp_x", { limitTokens: 5_000_000 });
+  });
+
+  it("rejects a non-numeric limit with 400 and maps outcomes to 404 / 400", async () => {
+    orchestrator.continueGroupBudget = vi.fn();
+    expect((await post({ limitTokens: "lots" })).status).toBe(400);
+    expect(orchestrator.continueGroupBudget).not.toHaveBeenCalled();
+    orchestrator.continueGroupBudget = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({})).status).toBe(404);
+    orchestrator.continueGroupBudget = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ limitTokens: -1 })).status).toBe(400);
+  });
+});
+
 // FIX-AP-4: "Ignore this file" for a review file that keeps the auto-proceed
 // hold restore incomplete. The route validates the body and maps controller
 // outcomes to HTTP; persistence + re-arm are covered in

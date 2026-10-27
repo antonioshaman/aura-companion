@@ -639,7 +639,51 @@ export type BrowserIncomingMessageBase =
     notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean" | "awaiting_second_review" | "second_review_blocked" | "second_review_missing";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
+  }
+  | {
+    /**
+     * Council budget guard (`council-budget.ts`): the pair's token spend
+     * changed state — it crossed its budget (`exceeded`, automatic activity
+     * paused) or a human continued it (`continued`). Full snapshot, not a
+     * delta, so the panel renders without tracking prior values.
+     */
+    type: "group_budget";
+    sessionGroupId: string;
+    transition: "exceeded" | "continued";
+    budget: BrowserCouncilBudget;
   };
+
+/** Per-role lifetime token usage of a council pair (`council-budget.ts`). */
+export interface CouncilRoleUsage {
+  /** Uncached prompt tokens (Codex: input minus cached input). */
+  inputTokens: number;
+  outputTokens: number;
+  /** Prompt-cache writes (Claude only; Codex reports none). */
+  cacheCreationTokens: number;
+  /** Prompt-cache reads — tracked, but NOT counted against the budget. */
+  cacheReadTokens: number;
+  /** Turns that reported any usage. */
+  turns: number;
+}
+
+/**
+ * Council budget guard snapshot for one pair. `spentTokens` is the budgeted
+ * spend (input + output + cache-creation, both halves) since the pair was
+ * created or last continued; cache reads are excluded. `limitTokens` 0 =
+ * guard disabled for this pair.
+ */
+export interface BrowserCouncilBudget {
+  sessionGroupId: string;
+  limitTokens: number;
+  /** `env` = server default (`COMPANION_COUNCIL_MAX_TOKENS_PER_GROUP`), `group` = set on Continue. */
+  limitSource: "env" | "group";
+  spentTokens: number;
+  exceeded: boolean;
+  /** Epoch ms the budget was crossed (only while `exceeded`). */
+  exceededAt?: number;
+  /** Lifetime usage per half (never reset by Continue). */
+  byRole: { orchestrator: CouncilRoleUsage; observer: CouncilRoleUsage };
+}
 
 /**
  * Browser-shape observer finding. The server-side `ObserverReviewFinding`

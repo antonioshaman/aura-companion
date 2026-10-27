@@ -174,6 +174,8 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       const findings = new Map(s.findings);
       const groundingDowngrades = new Map(s.groundingDowngrades);
       const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
+      const councilBudgets = new Map(s.councilBudgets);
+      const councilBudgetErrors = new Map(s.councilBudgetErrors);
       if (groupId) {
         const existing = s.groups.get(groupId);
         groups.delete(groupId);
@@ -184,6 +186,8 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         findings.delete(groupId);
         groundingDowngrades.delete(groupId);
         autoProceedRestoreGaps.delete(groupId);
+        councilBudgets.delete(groupId);
+        councilBudgetErrors.delete(groupId);
       }
       return {
         // Sessions slice fields
@@ -227,6 +231,8 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         findings,
         groundingDowngrades,
         autoProceedRestoreGaps,
+        councilBudgets,
+        councilBudgetErrors,
         // PLAN T12 (Phase G) - drop any cli-status-slice entry
         // when the session leaves the store. Sibling of the
         // permissionPermissions cleanup above.
