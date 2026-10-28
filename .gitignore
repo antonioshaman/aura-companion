@@ -11,6 +11,8 @@ bun.lock
 package-lock.json
 test-live.ts
 web/dist/
+# The shipped skill pack, staged by `prepack` for the npm tarball (web/scripts/skill-pack-build.ts).
+web/packs/
 .env
 web/.env.local
 .dev-*.pid

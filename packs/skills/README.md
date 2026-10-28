@@ -74,3 +74,36 @@ profiles or vocabulary drift apart.
 
 These guarantees hold only if CI blocks merges: `main` requires the `council-skills`,
 `quality` and `test (ubuntu-latest)` checks.
+
+## Packaging (npm tarball and Docker image)
+
+- **What ships.** Only entries with `ship.status: "ship"`, and within them only the
+  files `skills-manifest.json` lists. Dev-only files never ship, and the manifest does
+  not hash them: `.verify/` canary scripts (except `capability-vocabulary.json`, which
+  `selection-engine.md` reads), `evals/`, `tests/`, fixtures and `.gitignore`.
+  The rule is `excludedReason()` in `web/scripts/skill-manifest.ts`. `generate` prints
+  how many files each reason left out.
+- **npm.** `prepack` stages the shipped set into `web/packs/skills/` (gitignored), with
+  `skills-manifest.json`, `THIRD_PARTY_NOTICES.md` and the repo `LICENSE`. Every byte
+  is checked against the manifest. `postpack` removes the staged dir. The server reads
+  `<package>/packs/skills` (`defaultPackSource()`); `COMPANION_SKILL_PACK_SOURCE`
+  overrides it.
+- **Gate.** `bun scripts/skill-pack-build.ts gate <npm-pack.json>` fails closed if:
+  - the package is over 15 MB packed;
+  - a blocked or excluded file is packed, or a shipped file is missing;
+  - a shipped entry's licence is not shippable;
+  - the licence or notices file is missing;
+  - there are dev-only trees anywhere in the package.
+
+  It names every entry it left out, with the reason.
+- **pack-smoke.** `bun scripts/pack-smoke.ts <tgz>` installs the tarball into a clean
+  HOME and boots the installed server three times:
+  - plain: `--plugin-dir` is in the spawn argv;
+  - with a pre-seeded user skill of the same name: that skill is byte-identical
+    afterwards and not exposed;
+  - with the toolkit off: no `--plugin-dir`.
+- **Docker.** The repo-root `Dockerfile` builds the server image from the npm
+  tarball. The images are pinned by digest and the CLIs by version, and the image
+  has python3 and node. `scripts/docker-smoke.sh` probes it.
+
+CI job `package` runs the gate and pack-smoke; CI job `docker` builds and smokes the image.

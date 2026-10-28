@@ -187,6 +187,57 @@ jobs:
         working-directory: web
         run: bun scripts/uiux-sources.ts check
 
+  # The npm tarball and the server image, tested as artifacts
+  # (PLAN-aura-uiux-agent-enrichment Task 9). `npm pack` runs prepack, which
+  # stages the shipped skill pack into web/packs/skills. The gate fails closed
+  # on size (15 MB), licence and the exact shipped set. pack-smoke installs the
+  # tarball into a clean HOME and boots the server three times: plain, with a
+  # pre-seeded user skill of the same name, and with the toolkit off. bun is
+  # pinned here (not latest): these jobs attest an artifact.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: web
+        run: bun run build
+
+      - name: Pack the npm tarball (prepack stages packs/skills)
+        working-directory: web
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --json --pack-destination "$RUNNER_TEMP/pack" > "$RUNNER_TEMP/pack/pack.json"
+
+      - name: Package gate (size budget, licence, exact shipped set)
+        working-directory: web
+        run: bun scripts/skill-pack-build.ts gate "$RUNNER_TEMP/pack/pack.json"
+
+      - name: pack-smoke (clean HOME; plain, pre-seeded user skill, toolkit off)
+        working-directory: web
+        run: bun scripts/pack-smoke.ts "$RUNNER_TEMP"/pack/aura-companion-*.tgz
+
+  # The server image users pull (Dockerfile): built from the npm tarball with
+  # pinned base images and CLI versions, then booted and probed.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the server image
+        run: docker build -t aura-companion:ci .
+
+      - name: Smoke the image (runtimes, boot, skill pack installed, toolkit view)
+        run: bash scripts/docker-smoke.sh aura-companion:ci
+
   experience-packs:
     runs-on: ubuntu-latest
     steps:

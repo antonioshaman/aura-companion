@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { filesDigest, hashTree, OWNER_MARKER_FILE } from "../server/skill-manifest.js";
 import {
   buildManifest,
+  excludedReason,
   frontmatterName,
   MANIFEST_FILE,
   readInput,
@@ -85,6 +86,58 @@ describe("buildManifest — a clean pack", () => {
     expect(Object.keys(v.files)).toEqual(["LICENSE", "SKILL.md"]);
     expect(manifest.entries[0].source).toEqual({ type: "first-party", repo: "o/aura" });
     expect(manifest.entries[0].frontmatterName).toBeNull();
+  });
+});
+
+// PLAN Task 9 / B1 decision 7: the package carries no dev-only files (canary
+// scripts, evals, upstream test suites, fixtures, VCS metadata), and the manifest
+// must hash EXACTLY what ships — otherwise an installed copy never matches its
+// manifest and ownership() reads every Aura copy as the user's.
+describe("buildManifest — the shipped set excludes dev-only files (Task 9)", () => {
+  it("names a reason for each excluded path and keeps everything else", () => {
+    for (const p of [".verify/c2.py", ".verify/verify-catalog.sh", "a/.gitignore", ".gitignore", "evals/evals.json",
+      "scripts/tests/test_core.py", "x/__fixtures__/a.json", ".git/HEAD", "x/__tests__/a.ts"]) {
+      expect(excludedReason(p), p).toEqual(expect.any(String));
+    }
+    // Runtime data the selection engine reads stays, and only whole path segments match.
+    for (const p of ["SKILL.md", ".verify/capability-vocabulary.json", "references/tests-guide.md", "scripts/search.py", "evals.md"]) {
+      expect(excludedReason(p), p).toBeNull();
+    }
+  });
+
+  it("hashes only the shipped files and reports the rest", () => {
+    const mine = files({ "SKILL.md": "---\nname: mine\n---\n", "evals/e.json": "{}", ".gitignore": "x\n" });
+    const { manifest, errors, excluded } = buildManifest(input({ trees: new Map([["mine", mine], ["vend", vendoredTree()]]) }));
+    expect(errors).toEqual([]);
+    const e = manifest.entries.find((x) => x.name === "mine")!;
+    expect(Object.keys(e.files)).toEqual(["SKILL.md"]);
+    expect(e.digest).toBe(filesDigest(e.files));
+    expect(excluded).toEqual([
+      { entry: "mine", path: ".gitignore", reason: expect.any(String) },
+      { entry: "mine", path: "evals/e.json", reason: expect.any(String) },
+    ]);
+  });
+
+  it("a vendored skill is still checked against its lock over the FULL tree", () => {
+    // The lock pins every upstream byte (tests included); excluding a file from the
+    // package must not hide drift in it from the vendored-skills gate.
+    const vt = vendoredTree();
+    vt.set("scripts/tests/t.py", Buffer.from("ok\n"));
+    const lockSkill = lockEntry(vt);
+    const drifted = new Map(vt);
+    drifted.set("scripts/tests/t.py", Buffer.from("tampered\n"));
+    const ok = buildManifest(input({ lockSkill, trees: new Map([["mine", files({ "SKILL.md": "x" })], ["vend", vt]]) }));
+    expect(ok.manifest.entries[1].ship.status).toBe("ship");
+    expect(Object.keys(ok.manifest.entries[1].files)).toEqual(["LICENSE", "SKILL.md"]);
+    const bad = buildManifest(input({ lockSkill, trees: new Map([["mine", files({ "SKILL.md": "x" })], ["vend", drifted]]) }));
+    expect(bad.manifest.entries[1].ship.status).toBe("blocked");
+  });
+
+  it("an entry left with no shipped files is a structural error", () => {
+    const { errors } = buildManifest(input({ trees: new Map([["mine", files({ "evals/a.json": "{}" })], ["vend", vendoredTree()]]),
+      pack: { entries: [{ name: "mine", kind: "catalog", origin: "first-party", compat: { claude: true, codex: true } },
+        { name: "vend", kind: "skill", origin: "vendored", compat: { claude: true, codex: false, note: "n" } }] } }));
+    expect(errors.join("\n")).toMatch(/mine: every file is excluded/);
   });
 });
 
@@ -206,5 +259,13 @@ describe("the real packs/skills tree", () => {
       if (s.humanReview.status !== "approved" || s.knownIssues.length) expect(e.ship.status, s.name).toBe("blocked");
     }
     expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("blocked");
+  });
+
+  it("the committed manifest lists no excluded file, and the catalog keeps its runtime vocabulary", () => {
+    const m = JSON.parse(readFileSync(MANIFEST_FILE, "utf8")) as { entries: Array<{ name: string; files: Record<string, string> }> };
+    for (const e of m.entries) for (const p of Object.keys(e.files)) expect(excludedReason(p), `${e.name}/${p}`).toBeNull();
+    const cat = m.entries.find((e) => e.name === "_council-experts")!;
+    expect(cat.files[".verify/capability-vocabulary.json"]).toEqual(expect.any(String));
+    expect(cat.files[".verify/verify-catalog.sh"]).toBeUndefined();
   });
 });

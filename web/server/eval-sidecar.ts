@@ -33,8 +33,8 @@ import {
   type EvalLineFacts,
   type EvalRawFinding,
   type EvalSidecarArtifact,
-} from "../evals/schema/eval-artifact.js";
-import { existsWithinWorkspace, isEvalSlug } from "../evals/schema/eval-paths.js";
+} from "../eval-schema/eval-artifact.js";
+import { existsWithinWorkspace, isEvalSlug } from "../eval-schema/eval-paths.js";
 
 /**
  * Opt-in, default OFF. Mirrors `isRecordingHubEnabled`'s strict parse — only

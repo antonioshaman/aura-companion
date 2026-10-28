@@ -87,6 +87,17 @@ describe("UiuxToolkitSettings", () => {
     expect(screen.getByText(/Claude Code sessions: unavailable/)).toBeInTheDocument();
   });
 
+  it("names a runtime the server lacks and the skills that need it (Task 9: reported, not silent)", () => {
+    setup({ view: { ...VIEW, missingRuntimes: [{ runtime: "python3", skills: ["ui-ux-pro-max", "data-skill"] }] } });
+    expect(screen.getByText(/python3 is not installed on this server/)).toBeInTheDocument();
+    expect(screen.getByText(/ui-ux-pro-max, data-skill/)).toBeInTheDocument();
+  });
+
+  it("has no axe violations (missing runtime)", async () => {
+    const { container } = setup({ view: { ...VIEW, missingRuntimes: [{ runtime: "node", skills: ["taste-skill"] }] } });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("has no axe violations (list, on)", async () => {
     const { container } = setup();
     expect(await axe(container)).toHaveNoViolations();

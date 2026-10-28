@@ -1,0 +1,16 @@
+# Build context for the server image (Dockerfile). The pack stage needs web/,
+# packs/skills (the full tree: the vendored-skills gate re-hashes every pinned
+# file) and LICENSE; everything else is left out.
+.git
+**/node_modules
+web/dist
+web/packs
+web/coverage
+landing
+landing-legacy
+platform
+docs
+relay
+stats
+deploy
+.council

@@ -418,6 +418,7 @@ export function registerSettingsRoutes(api: Hono): void {
       claudeExisting: listExistingSkills(join(claudeDir, "skills"), manifest),
       codexExisting: listExistingSkills(join(getLegacyCodexHome(), "skills"), manifest),
       claudeSupportsPluginDir: !!claudeBin && claudeSupportsPluginDir(claudeBin),
+      hasRuntime: (bin) => resolveBinary(bin) !== null,
     }));
   });
 
