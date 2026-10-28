@@ -45,7 +45,6 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
-  unlinkSync,
   writeSync,
 } from "node:fs";
 import { dirname, join, sep } from "node:path";

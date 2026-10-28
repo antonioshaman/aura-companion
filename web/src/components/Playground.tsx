@@ -3687,6 +3687,9 @@ function CouncilModeSection() {
         <Card label="UiuxToolkitSettings — Settings row: skills per CLI, user override, Codex 'Requires Claude Code' (Task 8)">
           <UiuxToolkitPlaygroundDemo />
         </Card>
+        <Card label="UiuxToolkitSettings — a runtime the shipped skills need is missing (Task 9)">
+          <UiuxToolkitSettings enabled onEnabledChange={() => {}} view={{ ...(PLAYGROUND_TOOLKIT_VIEW as Extract<ToolkitView, { installed: true }>), missingRuntimes: [{ runtime: "node", skills: ["taste-skill"] }] }} />
+        </Card>
         <Card label="UiuxToolkitSettings — not installed on this server">
           <UiuxToolkitSettings enabled onEnabledChange={() => {}} view={{ installed: false, error: "no valid current.json", rows: [] }} />
         </Card>

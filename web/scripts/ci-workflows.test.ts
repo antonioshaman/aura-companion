@@ -181,3 +181,41 @@ describe("council-skills job toolchain is pinned", () => {
     expect(pip?.run).toMatch(/--require-hashes -r \.github\/council-canary-requirements\.txt/);
   });
 });
+
+// PLAN-aura-uiux-agent-enrichment Task 9: the npm tarball and the server image are
+// tested as artifacts. Each gate must exist and be unmasked; the jobs that attest
+// an artifact run on a pinned bun, and the Dockerfile pins its bases by digest and
+// its CLIs by exact version.
+describe("artifact gates (uiux Task 9)", () => {
+  const ARTIFACT_GATES = [
+    "npm pack --json",
+    "bun scripts/skill-pack-build.ts gate",
+    "bun scripts/pack-smoke.ts",
+    "docker build -t aura-companion:ci .",
+    "bash scripts/docker-smoke.sh aura-companion:ci",
+  ];
+
+  it("ci.yml runs the package gate, pack-smoke and the image smoke, unmasked", () => {
+    expect(gateMaskingErrors(loadWorkflow("ci.yml"), ARTIFACT_GATES)).toEqual([]);
+  });
+
+  it("the package job pins bun to an exact version", () => {
+    const steps = loadWorkflow("ci.yml").jobs.package.steps as (Step & { uses?: string; with?: Record<string, string> })[];
+    const bun = steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
+    expect(bun?.with?.["bun-version"]).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("the Dockerfile pins base images by digest and the CLIs by exact version", () => {
+    const df = readFileSync(join(repoRoot, "Dockerfile"), "utf-8");
+    const images = [...df.matchAll(/^ARG (\w+_IMAGE)=(\S+)$/gm)].map((m) => m[2]);
+    expect(images.length).toBe(2);
+    for (const img of images) expect(img).toMatch(/:\d+\.\d+\.\d+[\w.-]*@sha256:[0-9a-f]{64}$/);
+    expect(df).toMatch(/^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$/m);
+    expect(df).toMatch(/^ARG CODEX_VERSION=\d+\.\d+\.\d+$/m);
+    expect(df).not.toMatch(/:latest\b/);
+    // python3 + node for skill scripts; the image is built from the npm tarball.
+    expect(df).toMatch(/apt-get install[^\n]*python3/);
+    expect(df).toMatch(/bun pm pack/);
+    expect(df).toMatch(/test -f packs\/skills\/skills-manifest\.json/);
+  });
+});

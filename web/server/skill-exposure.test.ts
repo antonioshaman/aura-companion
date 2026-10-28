@@ -9,18 +9,20 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { filesDigest, hashTree, type ManifestEntry, type SkillManifest } from "./skill-manifest.js";
+import { filesDigest, hashTree, sha256, type ManifestEntry, type SkillManifest } from "./skill-manifest.js";
 import { readCurrentPack, type CurrentPack, type ExistingSkill } from "./skill-pack.js";
 import {
   _resetPluginDirProbeForTest,
   claudeSupportsPluginDir,
   decideSkillExposure,
+  defaultPackSource,
   describeToolkit,
   maintainSkillPack,
+  missingRuntimes,
   parseSkillExposure,
   providedNames,
 } from "./skill-exposure.js";
@@ -161,6 +163,15 @@ describe("describeToolkit (Settings row)", () => {
     expect(row("ui-ux-pro-max").claude.outcome).toBe("blocked-by-gate");
   });
 
+  it("names a runtime the server lacks, with the skills that need it", () => {
+    const pack: CurrentPack = { ...PACK, manifest: { ...MANIFEST, entries: [entry("taste-skill", { files: { "SKILL.md": "h", "scripts/lint.mjs": "h" } })] } };
+    const v = describeToolkit({ pack, claudeExisting: [], codexExisting: [], claudeSupportsPluginDir: true, hasRuntime: () => false });
+    if (!v.installed) throw new Error("expected installed");
+    expect(v.missingRuntimes).toEqual([{ runtime: "node", skills: ["taste-skill"] }]);
+    const ok = describeToolkit({ pack, claudeExisting: [], codexExisting: [], claudeSupportsPluginDir: true, hasRuntime: () => true });
+    expect(ok.installed && ok.missingRuntimes).toBeUndefined();
+  });
+
   it("reports a missing pack instead of an empty list", () => {
     expect(describeToolkit({ pack: { error: "no valid current.json" }, claudeExisting: [], codexExisting: [], claudeSupportsPluginDir: true }))
       .toEqual({ installed: false, error: "no valid current.json", rows: [] });
@@ -185,9 +196,75 @@ describe("maintainSkillPack (boot)", () => {
     expect("error" in pack ? pack.error : pack.version).toBe(r.installed);
   });
 
+  it("reports a runtime the shipped skills need but the server lacks (never a silent failure)", () => {
+    const dir = sourceDir();
+    mkdirSync(join(dir, "polish", "scripts"));
+    writeFileSync(join(dir, "polish", "scripts", "run.py"), "print(1)\n");
+    const m = JSON.parse(readFileSync(join(dir, "skills-manifest.json"), "utf8")) as SkillManifest;
+    m.entries[0].files["scripts/run.py"] = sha256(Buffer.from("print(1)\n"));
+    m.entries[0].digest = filesDigest(m.entries[0].files);
+    writeFileSync(join(dir, "skills-manifest.json"), JSON.stringify(m));
+    const r = maintainSkillPack({ root: tmp(), sourceDir: dir, keepVersions: [], codexSkillDirs: [], hasRuntime: (b) => b !== "python3" });
+    expect(r.installed).toMatch(/^[0-9a-f]{16}$/);
+    expect(r.missingRuntimes).toEqual([{ runtime: "python3", skills: ["polish"] }]);
+  });
+
   it("no shipped pack (e.g. an npm install before B4) → error, no throw", () => {
     const r = maintainSkillPack({ root: tmp(), sourceDir: tmp(), keepVersions: [undefined], codexSkillDirs: [join(tmp(), "missing")] });
     expect(r.installed).toBeUndefined();
     expect(r.error).toMatch(/skills-manifest\.json/);
+  });
+});
+
+// PLAN Task 9 "Runtimes": a skill whose scripts need python3 or node must be reported
+// when the server lacks that runtime, not fail silently inside a session.
+describe("missingRuntimes", () => {
+  const m = (entries: ManifestEntry[]): SkillManifest => ({ ...MANIFEST, entries });
+  it("derives runtimes from shipped scripts only, never from browser assets or blocked entries", () => {
+    const entries = [
+      entry("taste-skill", { files: { "SKILL.md": "h", "scripts/lint.mjs": "h", "scripts/lib/cdp.mjs": "h", "assets/base.js": "h" } }),
+      entry("ui-ux-pro-max", { files: { "scripts/search.py": "h" }, ship: { status: "blocked", reasons: ["x"] } }),
+      entry("py-skill", { files: { "SKILL.md": "h", "scripts/run.py": "h" } }),
+      entry("docs-only", { files: { "SKILL.md": "h", "references/a.js": "h" } }),
+    ];
+    expect(missingRuntimes(m(entries), () => false)).toEqual([
+      { runtime: "node", skills: ["taste-skill"] },
+      { runtime: "python3", skills: ["py-skill"] },
+    ]);
+    expect(missingRuntimes(m(entries), (b) => b === "node")).toEqual([{ runtime: "python3", skills: ["py-skill"] }]);
+    expect(missingRuntimes(m(entries), () => true)).toEqual([]);
+  });
+});
+
+// PLAN Task 9: the npm tarball carries the pack at `<package>/packs/skills` (staged by
+// prepack); a git clone keeps it at `<repo>/packs/skills`. The packaged location wins
+// when it holds a manifest, so an npm install never reaches outside its own package
+// (`<package>/../packs` would be `node_modules/packs` — some other package's dir).
+describe("defaultPackSource", () => {
+  function layout(withPackaged: boolean): { serverDir: string; packaged: string; clone: string } {
+    const root = tmp();
+    const serverDir = join(root, "web", "server");
+    mkdirSync(serverDir, { recursive: true });
+    const packaged = join(root, "web", "packs", "skills");
+    if (withPackaged) {
+      mkdirSync(packaged, { recursive: true });
+      writeFileSync(join(packaged, "skills-manifest.json"), "{}");
+    }
+    return { serverDir, packaged, clone: join(root, "packs", "skills") };
+  }
+
+  it("an npm install uses the pack inside its own package", () => {
+    const l = layout(true);
+    expect(defaultPackSource({}, l.serverDir)).toBe(l.packaged);
+  });
+
+  it("a git clone (nothing staged) uses <repo>/packs/skills", () => {
+    const l = layout(false);
+    expect(defaultPackSource({}, l.serverDir)).toBe(l.clone);
+  });
+
+  it("COMPANION_SKILL_PACK_SOURCE overrides both", () => {
+    const l = layout(true);
+    expect(defaultPackSource({ COMPANION_SKILL_PACK_SOURCE: "/opt/pack" }, l.serverDir)).toBe("/opt/pack");
   });
 });

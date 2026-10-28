@@ -25,6 +25,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { log } from "./logger.js";
+import { resolveBinary } from "./path-resolver.js";
 import type { SkillManifest } from "./skill-manifest.js";
 import type { CurrentPack, ExistingSkill, PackOutcome } from "./skill-pack.js";
 import { DEFAULT_PACK_ROOT, installPack, planPack, PACK_MANIFEST_FILE, sweepCopies, sweepPackRoot } from "./skill-pack.js";
@@ -167,14 +168,58 @@ export function _resetPluginDirProbeForTest(): void {
 
 // ─── Boot maintenance ───────────────────────────────────────────────────────
 
-/** `packs/skills` next to the server (git clone); overridable for packaged installs (B4). */
-export function defaultPackSource(env: Record<string, string | undefined> = process.env): string {
-  return env.COMPANION_SKILL_PACK_SOURCE || resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "packs", "skills");
+const SERVER_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * Where the shipped pack is read from at boot:
+ *  1. `COMPANION_SKILL_PACK_SOURCE`,
+ *  2. `<package>/packs/skills` — staged into the npm tarball by `prepack`
+ *     (scripts/skill-pack-build.ts), used when it holds a manifest,
+ *  3. `<repo>/packs/skills` — a git clone.
+ * The packaged location wins so an npm install never reads outside its own package.
+ */
+export function defaultPackSource(env: Record<string, string | undefined> = process.env, serverDir = SERVER_DIR): string {
+  if (env.COMPANION_SKILL_PACK_SOURCE) return env.COMPANION_SKILL_PACK_SOURCE;
+  const packaged = resolve(serverDir, "..", "packs", "skills");
+  if (existsSync(join(packaged, PACK_MANIFEST_FILE))) return packaged;
+  return resolve(serverDir, "..", "..", "packs", "skills");
 }
+
+export interface MissingRuntime {
+  runtime: "node" | "python3";
+  skills: string[];
+}
+
+const RUNTIME_BY_EXT: ReadonlyArray<[RegExp, MissingRuntime["runtime"]]> = [
+  [/\.(mjs|cjs|js)$/, "node"],
+  [/\.py$/, "python3"],
+];
+
+/**
+ * Pure: runtimes the shipped skills' `scripts/` need and `hasRuntime` says are absent
+ * (PLAN Task 9 — reported, not a silent failure inside a session). Only `scripts/`
+ * counts: `assets/*.js` are browser files, not something the agent runs.
+ */
+export function missingRuntimes(manifest: Pick<SkillManifest, "entries">, hasRuntime: (bin: string) => boolean): MissingRuntime[] {
+  const need = new Map<MissingRuntime["runtime"], string[]>();
+  for (const e of manifest.entries) {
+    if (e.ship.status !== "ship") continue;
+    const rts = new Set<MissingRuntime["runtime"]>();
+    for (const p of Object.keys(e.files)) {
+      if (!p.split("/").includes("scripts")) continue;
+      for (const [re, rt] of RUNTIME_BY_EXT) if (re.test(p)) rts.add(rt);
+    }
+    for (const rt of rts) need.set(rt, [...(need.get(rt) ?? []), e.name]);
+  }
+  return [...need].filter(([rt]) => !hasRuntime(rt)).map(([runtime, skills]) => ({ runtime, skills })).sort((a, b) => (a.runtime < b.runtime ? -1 : 1));
+}
+
+const defaultHasRuntime = (bin: string): boolean => resolveBinary(bin) !== null;
 
 export interface MaintainResult {
   installed?: string;
   error?: string;
+  missingRuntimes?: MissingRuntime[];
 }
 
 /**
@@ -187,6 +232,7 @@ export function maintainSkillPack(opts: {
   codexSkillDirs: string[];
   root?: string;
   sourceDir?: string;
+  hasRuntime?: (bin: string) => boolean;
 }): MaintainResult {
   const root = opts.root ?? DEFAULT_PACK_ROOT;
   const sourceDir = opts.sourceDir ?? defaultPackSource();
@@ -205,6 +251,13 @@ export function maintainSkillPack(opts: {
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as SkillManifest;
       out.installed = installPack({ sourceDir, manifest, root }).version;
+      const missing = missingRuntimes(manifest, opts.hasRuntime ?? defaultHasRuntime);
+      if (missing.length) out.missingRuntimes = missing;
+      for (const m of missing) {
+        log.warn("skill-exposure", `${m.runtime} is not installed; these skills cannot run their scripts`, {
+          event: "skill_exposure.runtime_missing", runtime: m.runtime, skills: m.skills,
+        });
+      }
     } catch (err) {
       out.error = err instanceof Error ? err.message : String(err);
       log.warn("skill-exposure", "skill pack install failed", { event: "skill_exposure.install_failed", sourceDir, error: out.error });
@@ -230,7 +283,7 @@ export interface ToolkitRow {
 }
 
 export type ToolkitView =
-  | { installed: true; version: string; claudeUnavailable?: string; rows: ToolkitRow[] }
+  | { installed: true; version: string; claudeUnavailable?: string; missingRuntimes?: MissingRuntime[]; rows: ToolkitRow[] }
   | { installed: false; error: string; rows: [] };
 
 /**
@@ -242,12 +295,15 @@ export function describeToolkit(input: {
   claudeExisting: ExistingSkill[];
   codexExisting: ExistingSkill[];
   claudeSupportsPluginDir: boolean;
+  /** Omitted → runtimes are not checked. */
+  hasRuntime?: (bin: string) => boolean;
 }): ToolkitView {
   if ("error" in input.pack) return { installed: false, error: input.pack.error, rows: [] };
   const claude = decideSkillExposure({
     backend: "claude", enabled: true, containerized: false, cliSupportsPluginDir: true, pack: input.pack, existing: input.claudeExisting,
   });
   const codex = decideSkillExposure({ backend: "codex", enabled: true, containerized: false, pack: input.pack, existing: input.codexExisting });
+  const missing = input.hasRuntime ? missingRuntimes(input.pack.manifest, input.hasRuntime) : [];
   const rows = input.pack.manifest.entries.map((e, i): ToolkitRow => ({
     name: e.name,
     kind: e.kind,
@@ -258,6 +314,7 @@ export function describeToolkit(input: {
     installed: true,
     version: input.pack.version,
     ...(input.claudeSupportsPluginDir ? {} : { claudeUnavailable: "the installed Claude Code CLI does not support --plugin-dir" }),
+    ...(missing.length ? { missingRuntimes: missing } : {}),
     rows,
   };
 }

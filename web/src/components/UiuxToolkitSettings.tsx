@@ -91,6 +91,11 @@ export function UiuxToolkitSettings({ enabled, onEnabledChange, view, disabled =
           {view.claudeUnavailable && (
             <p className="text-xs text-cc-muted px-1">Claude Code sessions: unavailable — {view.claudeUnavailable}.</p>
           )}
+          {view.missingRuntimes?.map((m) => (
+            <p key={m.runtime} className="text-xs text-cc-muted px-1">
+              {m.runtime} is not installed on this server, so these skills cannot run their scripts: {m.skills.join(", ")}.
+            </p>
+          ))}
           <ul aria-label="Toolkit skills" className={`space-y-1 ${enabled ? "" : "opacity-60"}`}>
             {view.rows.map((row) => (
               <li key={row.name} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-cc-card text-sm">

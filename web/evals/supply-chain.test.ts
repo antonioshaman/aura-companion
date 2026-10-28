@@ -72,7 +72,9 @@ describe("fixture secret-scanner", () => {
 
 describe("pack-exclusion guard", () => {
   it("the eval tree never enters the published npm tarball", () => {
-    const out = execFileSync("bun", ["pm", "pack", "--dry-run"], {
+    // --ignore-scripts: prepack stages the skill pack into web/packs/ (Task 9); a
+    // test must not write into the source tree. The eval-tree rule is unaffected.
+    const out = execFileSync("bun", ["pm", "pack", "--dry-run", "--ignore-scripts"], {
       cwd: WEB_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
