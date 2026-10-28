@@ -60,6 +60,114 @@
       "kind": "skill",
       "origin": "vendored",
       "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which only Claude substitutes (Aura's exposure mirrors .claude/skills for it); Codex does not set it." }
+    },
+    {
+      "name": "adapt",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "animate",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "audit",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "bolder",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "clarify",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "colorize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "critique",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "delight",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "distill",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "extract",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "frontend-design",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "harden",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "normalize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "onboard",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "optimize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "polish",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "quieter",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+    },
+    {
+      "name": "teach-impeccable",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
     }
   ]
 }

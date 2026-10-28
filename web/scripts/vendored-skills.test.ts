@@ -125,11 +125,23 @@ describe("readTree", () => {
 describe("committed packs/skills vendor lock", () => {
   const lock = loadLock();
 
-  it("pins ui-ux-pro-max and taste-skill, both MIT, at full commit shas", () => {
+  it("pins ui-ux-pro-max and taste-skill (MIT) and the 18 impeccable skills (Apache-2.0, B5) at full commit shas", () => {
+    const IMPECCABLE = ["adapt", "animate", "audit", "bolder", "clarify", "colorize", "critique", "delight", "distill",
+      "extract", "frontend-design", "harden", "normalize", "onboard", "optimize", "polish", "quieter", "teach-impeccable"];
     expect(lock.skills.map((s) => [s.name, s.licence.spdx])).toEqual([
       ["ui-ux-pro-max", "MIT"],
       ["taste-skill", "MIT"],
+      ...IMPECCABLE.map((n) => [n, "Apache-2.0"]),
     ]);
+    for (const s of lock.skills) expect(s.upstream.commit, s.name).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  // Apache-2.0 §4(d): a redistributed copy carries the upstream NOTICE. Each impeccable
+  // dir ships its NOTICE.md and LICENSE, both hashed by the lock.
+  it("every Apache-2.0 skill carries LICENSE and the upstream NOTICE.md in its locked files", () => {
+    for (const s of lock.skills.filter((x) => x.licence.spdx === "Apache-2.0")) {
+      expect(Object.keys(s.files), s.name).toEqual(expect.arrayContaining(["LICENSE", "NOTICE.md"]));
+    }
   });
 
   it("every vendored tree matches its lock byte-for-byte", () => {

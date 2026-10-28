@@ -1,10 +1,15 @@
 ---
 name: council-plan
-origin: aura
-description: Architect a feature with the Carmack Council before writing code. Use when explicitly asked to plan a feature, do a "council plan", "carmack plan", or invoke /council-plan. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipeline), Karri Saarinen (UI quality), Vitaly Friedman (UX quality). Interactive feature discovery followed by parallel subagent dispatch. Produces a sequenced, attributed implementation plan with no code. Stack: Python 3.11+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
+description: Architect a feature with the Carmack Council before writing code. Use when explicitly asked to plan a feature, do a "council plan", "carmack plan", or invoke /council-plan. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipeline), Karri Saarinen (UI quality), Vitaly Friedman (UX quality). Interactive feature discovery followed by parallel subagent dispatch. Produces a sequenced, attributed implementation plan with no code. Stack: Python 3.10+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 
 # Carmack Council Planner
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
+old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a council of domain experts, each running as an independent subagent via the `Task` tool. Your job is to understand the codebase, work with the developer to define the feature scope, brief the council, receive their independent recommendations, then synthesise into a sequenced implementation plan.
 
@@ -12,9 +17,9 @@ You are the **Chair** — John Carmack's philosophy made operational. You coordi
 
 ## Stack Context
 
-The opinionated stack:
-- **Python 3.11+** — async/await, type hints
-- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers
+The opinionated stack (see `STACK.md` in project root for full details):
+- **Python 3.10** (production) / **3.12** (CI) — async/await, type hints
+- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers. **NOT python-telegram-bot** — different APIs entirely.
 - **No HTTP server** — polling bot only, no FastAPI/Flask
 - **SQLAlchemy 2.x sync** — `scoped_session` + `psycopg2`; NOT async SQLAlchemy
 - **PostgreSQL 15** — primary database; Alembic for migrations
@@ -27,25 +32,55 @@ Scale concerns (sharding, read replicas, multi-region) are premature. aiogram ha
 
 ---
 
+## Phase 0: Advisor Selection (DO NOT SKIP)
+
+Council selection is **adaptive and universal** — it is defined once, for every
+`/council-*` skill, in `$CATALOG/selection-engine.md`.
+
+**Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
+Read it and run its flow before Phase 1 below. It replaces the old two-stack
+detect-or-refuse router: rather than refusing any workspace that is not one of
+two hardcoded stacks, the engine fingerprints the workspace, scores every advisor
+in the catalog against that fingerprint plus the feature's domains, and proposes
+an adaptive roster (min 3 / max 11).
+
+- **No fixed panel.** The catalog IS the panel — any advisor whose `meta.yaml`
+  declares a `capabilities` profile is seatable. Who sits is chosen per workspace.
+- **No refusal path.** An unrecognised stack becomes a recoverable *confirm-stack*
+  prompt (engine "Confirm-stack" section), never a dead-end "unsupported stack".
+- **Same engine, either entry point.** This suffixless skill carries the
+  Python-stack briefing body below; `/council-plan-aura` carries the Aura-stack
+  briefing body. The engine selects the roster identically from either; the
+  variant only changes the default stack context the Chair briefs seats with, and
+  the engine's Phase 3 briefs each seat on the *detected* stack regardless.
+
+Carry the engine's outputs — the selected roster and each seat's matched-signal
+WHY — into Phase 4's dispatch.
+
+---
+
 ## Phase 1: Context Gathering (DO NOT SKIP)
 
 Before talking to the developer about the feature, understand what already exists. Carmack never plans in a vacuum.
 
-1. **Map the architecture** — Use Glob and Grep to identify:
-   - Project structure, module boundaries, entry points
-   - Dependency graph and build configuration
-   - Existing patterns: how auth is done, how FastAPI routers are organised, how handlers are structured
-   - Schema shape: existing SQLAlchemy models, Pydantic schemas, database tables
-   - Test coverage and testing patterns
-2. **Read conventions.md** — If it exists at the project root (`conventions.md`), read it completely. These are accepted patterns from prior council reviews. The plan must respect them — never recommend against an accepted convention.
-3. **Check history** — If git is available, review recent commits to understand trajectory and current work.
-4. **Do NOT output anything from this phase to the developer.** This is your internal preparation. Move directly to Phase 2.
+### Targeted exploration (IMPORTANT)
+
+Do NOT do a full repo scan. The project structure is already known (see STACK.md, conventions.md, CLAUDE.md). Focus only on the area relevant to the upcoming feature.
+
+1. **Read conventions.md** — If it exists at the project root (`conventions.md`), read it completely. These are accepted patterns from prior council reviews. The plan must respect them.
+2. **Read STACK.md** — Quick reference for stack constraints. Do NOT re-read if already loaded in this session.
+3. **Targeted exploration** — Use Glob and Grep ONLY on the modules/directories relevant to the feature the user describes. Do NOT map the entire architecture. For example:
+   - If the feature is about antispam, explore `script/antispam/` and related imports
+   - If the feature is about events, explore `script/telegram/handlers/` and `script/database/objects.py` (relevant sections only)
+   - **Cap: read at most 5-8 files** in this phase. The developer knows the codebase — ask them about unknowns in Phase 2 instead of reading everything.
+4. **Check history** — `git log --oneline -10` for trajectory. Don't read diffs.
+5. **Do NOT output anything from this phase to the developer.** This is your internal preparation. Move directly to Phase 2.
 
 ---
 
 ## Phase 2: Feature Discovery (INTERACTIVE — HARD GATE)
 
-This phase is a conversation with the developer. Your goal is to understand what they want to build well enough to brief nine domain experts. You are NOT briefing the council yet.
+This phase is a conversation with the developer. Your goal is to understand what they want to build well enough to brief the selected domain experts. You are NOT briefing the council yet.
 
 ### How to conduct discovery
 
@@ -131,236 +166,86 @@ need changes.]
 
 ## Phase 4: Dispatch Council Members
 
-Spawn **one subagent per council member** using the `Task` tool. All nine run in parallel. Each subagent receives the context + feature brief and their reference document.
+Spawn **one subagent per selected council member** using the `Task` tool. All selected experts run in parallel. Each subagent receives the context + feature brief and their reference document.
 
-**You MUST spawn all nine.** If a council member's domain isn't relevant to this feature (e.g., no new Prisma models, no LLM pipeline work, no new UI), spawn them anyway — they will return "No recommendations in my domain" which confirms coverage. A missing subagent is a planning gap.
+**You MUST spawn every advisor the engine seated.** The scorer already dropped advisors whose domain this feature does not touch (score 0) and surfaced any crowded-out lens for you to add back — so a seated advisor is one the selection deemed relevant. A missing subagent among the seated roster is a planning gap.
 
-### Subagent 1: Troy Hunt (Security)
+### Council roster (engine-selected, catalog-resolved)
 
-**Task prompt:**
+There is NO fixed panel. The roster is the adaptive set the selection engine
+produced in Phase 0 (`selection-engine.md`): the catalog dirs whose `capabilities`
+profile the fingerprint + feature-domains scored in, within the min-3 / max-11
+guardrail, after your fail-closed arbitration. The Chair MUST dispatch one
+subagent per SELECTED advisor using the `Task` tool. The prompt for each subagent
+is the literal verbatim content of that advisor's catalog file named below, with
+`[list ONLY <X>'s domain files]` (and any other inline placeholders the prompt
+declares) substituted from the brief.
+
+**Catalog file pattern:** `$CATALOG/<id>/plan.md`
+
+For each SELECTED advisor, before dispatch:
+1. Read the catalog file at `$CATALOG/<id>/plan.md`
+2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
+   uniform, so match on the bracket, not on one literal spelling: the token is
+   spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,
+   the same with " from the assignment" appended, a role name in place of `<X>`
+   (Telegram UX, Backend/Python, a11y, React/Web UI, …), and `[paste full brief]`
+   in the plan phases. Fill each from the brief's "### Domain File Assignments"
+   section (review skills) or the domain assignments from Phase 2 (plan skills);
+   `[paste full brief]` takes the whole brief.
+3. Substitute `$TIMESTAMP` with the value captured in Phase 0 (review skills only)
+4. **Pre-dispatch assertion — MUST, do not skip.** Scan the substituted body for
+   a surviving *substitution target*: any `[`…`]` token whose text contains
+   `domain files` or `paste full brief`, and any unresolved `$` variable. If one
+   survives, DO NOT dispatch: emit the refusal below and stop. An expert handed an
+   unsubstituted file list reads the brief or improvises and still returns a
+   well-formed report, so this failure has NO downstream signal — the pre-synthesis
+   gate checks only that the output file exists and is non-empty, which makes
+   "expert was handed nothing" indistinguishable from "expert found nothing". This
+   assertion is the only place it is observable.
+
+   **Scope it to substitution targets — do NOT widen it to every bracket.** The
+   prompt body also carries the expert's *output template* — `[short descriptive
+   title]`, `[path:line-range]`, `[P1/P2/P3 …]` — which the EXPERT fills when
+   writing findings, not the Chair. Those are supposed to survive substitution: 49
+   of the 59 phase files carry at least one, so a blanket "no bracket may survive"
+   check refuses almost every dispatch. That is the same defect as a gate that can
+   only pass, just inverted — a gate that can only fail teaches its operator to
+   ignore it. The two semantic substrings above match all four known spellings of
+   the file-list token, including the role-named ones, so scoping the check does
+   not reintroduce dependence on a single literal.
+5. Dispatch via `Task` with `subagent_type=general-purpose` and the substituted
+   body as the prompt.
+
+   **Per-seat model tier (PRO economy — spec `specs/council-pro-economy.md`).**
+   Choose each seat's `Task` `model` fail-closed:
+   - a **guaranteed** cross-stack lens (security `hunt`, LLM `willison`, refactor
+     `fowler`, test `beck`) ALWAYS runs the **top** model — never cheap (Boundary 🚫);
+   - every other seat also defaults to **top** UNTIL the run-stats dataset proves a
+     `(seat, complexity-band)` safe to run cheap (never hand-guess a threshold);
+   - `top` → omit `model`; `cheap` → `model: "haiku"`.
+   Decision logic + data-derived policy live in the aura-companion engine
+   (`web/scripts/tier-policy.ts` / `stats-derive.ts`) when it is checked out. Today
+   every seat runs top — cheap-tiering switches on only once data + the guardrail exist.
+
+Refusal template for a surviving placeholder:
+
 ```
-You are Troy Hunt advising on security for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
+Dispatch refused: unsubstituted placeholder in <id>/plan.md
 
-Read the reference document at: references/security.md
+Surviving token(s):
+  - <the bracketed text, verbatim>
 
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
+Substitution source checked:
+  - <brief section name, or "Phase 2 domain assignments">
 
-Based on the feature scope and the existing codebase, identify where security risks will emerge and how the developer should design around them from the start. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from security.md]
-- What to get right: [2-3 sentences. What the developer should build and WHY from a security perspective. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What goes wrong concretely.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If no security recommendations exist for this feature, state: "No security recommendations. [1 sentence explaining why this feature has low security surface.]"
-
-Stay in your lane — only advise on security. Do not advise on refactoring, performance, frontend architecture, or Postgres patterns.
-```
-
-### Subagent 2: Martin Fowler (Refactoring / Structure)
-
-**Task prompt:**
-```
-You are Martin Fowler advising on structural design for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/refactoring.md
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase patterns, advise on how to structure this feature to avoid structural debt from day one. Where should module boundaries go? What should be extracted vs inlined? Where will complexity accumulate if not managed? Apply the economic test: only recommend structure that will pay off in weeks, not months. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from refactoring.md]
-- What to get right: [2-3 sentences. What structure to use and WHY. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What structural debt accumulates.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If no structural recommendations exist for this feature, state: "No structural recommendations. [1 sentence explaining why the feature fits cleanly into existing patterns.]"
-
-Stay in your lane — only advise on structure and design. Do not advise on security, performance, frontend patterns, or Postgres specifics.
-```
-
-### Subagent 3: Telegram UX Expert
-
-**Task prompt:**
-```
-You are a Telegram Bot UX Expert advising on conversation flow design for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-frontend.md
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on Telegram bot conversation flow design, inline keyboard layouts, callback data management, error messages to users, progressive disclosure in bot conversations, multi-step wizards (ConversationHandler patterns), proper use of edit_message vs send_message, and message formatting (MarkdownV2, HTML). For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-frontend.md]
-- What to get right: [2-3 sentences. What to build and WHY from a Telegram bot UX perspective. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What conversation flow problem emerges.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-You handle conversation flow architecture, inline keyboard design, callback data structure, and bot message UX. Visual design quality is Saarinen's domain. General UX patterns and interaction design are Friedman's domain.
-
-If no Telegram UX recommendations exist for this feature, state: "No Telegram UX recommendations. [1 sentence explaining why.]"
-
-Stay in your lane — only advise on Telegram bot conversation flow, inline keyboards, and message UX. Do not advise on security, backend patterns, database specifics, or general UX patterns.
+Fix the catalog file or the brief, then re-dispatch. Do not dispatch this
+expert with the placeholder intact.
 ```
 
-### Subagent 4: Backend/Python Expert
-
-**Task prompt:**
-```
-You are a Backend/Python Expert advising on backend architecture for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-backend.md
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on FastAPI async endpoint design, Pydantic v2 model design, asyncio patterns, python-telegram-bot handler architecture, proper error handling with HTTPException, dependency injection patterns, background tasks, and async correctness. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-backend.md]
-- What to get right: [2-3 sentences. What to build and WHY from a backend quality perspective. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What backend failure mode emerges.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If no backend recommendations exist for this feature, state: "No backend recommendations. [1 sentence explaining why.]"
-
-Stay in your lane — only advise on backend/async/error-handling/FastAPI/python-telegram-bot architecture. Do not advise on security, Telegram UX patterns, or database schema/migration specifics.
-```
-
-### Subagent 5: Brandur Leach (Database Quality)
-
-**Task prompt:**
-```
-You are Brandur Leach advising on database design for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-postgres.md
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing schema, advise on schema design, migration approach, transaction boundaries, query patterns, and data modeling. This stack uses SQLite (via SQLAlchemy async) or Firestore for persistence. Specify indexes, constraints, and any SQLAlchemy defaults that need attention for this feature. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-postgres.md]
-- What to get right: [2-3 sentences. What schema/query/migration approach to use and WHY. Be specific to THIS feature and THIS existing schema. No code.]
-- Risk if skipped: [1 sentence. What data integrity or performance problem emerges.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If no database recommendations exist for this feature, state: "No database recommendations. [1 sentence explaining why this feature doesn't touch the database.]"
-
-Stay in your lane — only advise on SQLite/Firestore/SQLAlchemy/schema/migration/query design. Do not advise on security, Telegram UX, or general backend patterns.
-```
-
-### Subagent 6: Docker/Deploy Quality Expert
-
-**Task prompt:**
-```
-You are a Docker and deployment quality expert advising on containerization and deployment for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on Dockerfile best practices (multi-stage builds, layer caching), Cloud Run optimization (cold starts, concurrency, memory limits), environment variable management, health check endpoints, graceful shutdown handling, container security (non-root users, minimal base images), and deployment pipeline considerations. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [Docker/Cloud Run best practice area]
-- What to get right: [2-3 sentences. What to build and WHY from a deployment perspective. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What deployment problem emerges.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If no deployment recommendations exist for this feature, state: "No deployment recommendations. [1 sentence explaining why.]"
-
-Stay in your lane — only advise on Docker, containerization, and deployment. Do not advise on security, correctness, or code structure unless it directly causes a deployment problem.
-```
-
-### Subagent 7: Simon Willison (LLM Pipeline Quality)
-
-**Task prompt:**
-```
-You are Simon Willison advising on LLM pipeline architecture for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-llm.md
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on prompt architecture, structured output validation, instruction-data separation, context curation per chain step, inter-step validation, LLM observability, eval coverage, model portability, and multimodal input handling. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-llm.md]
-- What to get right: [2-3 sentences. What the developer should build and WHY from an LLM pipeline perspective. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What goes wrong concretely.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If the feature does not involve LLM calls, prompts, or pipeline steps, state: "No LLM pipeline recommendations. [1 sentence explaining why this feature has no LLM surface.]"
-
-Stay in your lane — only advise on LLM pipeline quality: prompts, structured output, chain design, context management, injection boundaries, evals, observability. Do not advise on security (Hunt's domain), general backend patterns (Collina's domain), or Postgres specifics (Leach's domain).
-```
-
-### Subagent 8: Karri Saarinen (UI Quality)
-
-**Task prompt:**
-```
-You are Karri Saarinen advising on UI quality for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-ui.md
-Optionally read the full UI Architect skill at: skills/ui-architect/SKILL.md for additional methodology context.
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on Telegram message formatting, inline keyboard visual layout, information density in bot messages, use of emoji for visual hierarchy, and consistent message structure across bot responses. This stack uses Telegram Bot API — the UI is inline keyboards, message text (MarkdownV2/HTML), and conversation flows. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-ui.md]
-- What to get right: [2-3 sentences. What the developer should get right visually and WHY. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What visual problem emerges — describe the concrete consequence the user sees.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If the feature has no new UI or only modifies backend logic, state: "No UI recommendations. [1 sentence explaining why this feature has no visual surface.]"
-
-Stay in your lane — only advise on visual design quality: message formatting, information density, inline keyboard layout, emoji usage, consistent message structure. Do not advise on UX patterns or interaction design (Friedman's domain), conversation flow architecture (Telegram UX Expert's domain), or accessibility compliance.
-```
-
-### Subagent 9: Vitaly Friedman (UX Quality)
-
-**Task prompt:**
-```
-You are Vitaly Friedman advising on UX quality for a feature that hasn't been built yet. You are part of a Carmack Council planning session.
-
-Read the reference document at: references/quality-ux.md
-Optionally read the full UX Architect skill at: skills/ux-architect/SKILL.md for additional methodology context.
-
-CONTEXT + FEATURE BRIEF:
-[paste full brief]
-
-Based on the feature scope and the existing codebase, advise on screen state completeness (blank, loading, partial, error, ideal), information architecture, navigation patterns, progressive disclosure, form design, error recovery flows, empty states, interaction feedback, and cognitive load management. For each recommendation, report in this exact format:
-
-RECOMMENDATION:
-- Title: [short descriptive title]
-- Principle: [principle name and number from quality-ux.md]
-- What to get right: [2-3 sentences. What the developer should get right from a UX perspective and WHY. Be specific to THIS feature in THIS codebase. No code.]
-- Risk if skipped: [1 sentence. What UX problem emerges — describe the concrete consequence the user experiences.]
-- Depends on: [other recommendations this should come after, or "—" if independent]
-
-If the feature has no user-facing surface, state: "No UX recommendations. [1 sentence explaining why this feature has no interaction surface.]"
-
-Stay in your lane — only advise on UX patterns, interaction design, information architecture, and screen state design. Do not advise on visual design (Saarinen's domain), conversation flow architecture (Telegram UX Expert's domain), or accessibility compliance.
-```
+The expert ID MUST match `^[a-z][a-z0-9-]{1,31}$` (security canary).
+Unknown IDs MUST refuse with a structured error naming the catalog path checked
+(AC-6.1 contract from `specs/council-experts-catalog.md`).
 
 ---
 
@@ -368,7 +253,7 @@ Stay in your lane — only advise on UX patterns, interaction design, informatio
 
 Once all subagents return, the Chair (you) must:
 
-1. **Collect all recommendations** from all nine subagents.
+1. **Collect all recommendations** from all dispatched subagents.
 2. **Resolve overlaps** — If two experts recommend the same thing, keep the PRIMARY domain's recommendation and note the cross-reference. The primary domain is whichever reference doc has the more specific guidance. Specific overlap rules:
    - **Saarinen vs Telegram UX Expert:** Saarinen takes priority for message visual design decisions (formatting, information density). Telegram UX Expert takes priority for conversation flow architecture and inline keyboard design.
    - **Friedman vs Telegram UX Expert:** Friedman takes priority for interaction patterns and screen state design. Telegram UX Expert takes priority for bot-specific conversation structure and callback handling.
@@ -476,6 +361,66 @@ If no external setup is required, state: "No external setup required. All tasks 
 - The Summary table is mandatory — it gives the developer a scannable task sequence with dependencies.
 - The Risks & Watchpoints section captures awareness items that don't merit their own task but would be dangerous to miss.
 - The External Setup Required section captures actions outside the codebase — API keys, service signups, webhook configurations, DNS changes — that block specific tasks. The "Blocking task" column tells the developer when they need this done by, so they can complete setup while earlier tasks are being implemented.
+
+---
+
+## Phase 7: Emit Council Checkpoint (auto)
+
+**Purpose.** When this skill runs inside an Aura Companion Council pair, this phase tells the observer half "the orchestrator just finished planning — here is the plan, please review it." The observer wakes within ~1 second of the checkpoint POST and emits its review to `<workspace>/.council/reviews/council-plan-<provider>-observer.md`. Without this step the council loop never closes — the observer remains in "Awaiting first checkpoint" forever.
+
+**Council pairing is a property of the SESSION, not of the workspace stack.** A Python workspace paired in the Aura Companion UI has an observer that needs waking exactly like an Aura workspace does. Do not skip this phase on the grounds that this is not an Aura project.
+
+**Skip this phase entirely** if any of these are true:
+- `http://localhost:3456/api/sessions` does not respond (you are not inside the Aura Companion UI).
+- No session in the response matches the current workspace + orchestrator role.
+- The `POST .../council/checkpoint` returns 409 — that response IS the silent-skip signal.
+
+### Steps
+
+1. **Probe the API.** Run `curl -fsS http://localhost:3456/api/sessions`. Non-zero exit or empty → skip the entire phase.
+
+2. **Discover the orchestrator session id.** Filter the response array for the entry matching ALL of:
+   - `state == "connected"`
+   - `cwd == <current workspace cwd>` (the cwd you planned under)
+   - `sessionGroupRole == "orchestrator"`
+   - newest `createdAt` if more than one match
+
+   Zero matches → silent skip. One match → capture `sessionId` (= `ORCH_SID`) and `sessionGroupId` (= `GROUP_ID`).
+
+3. **Compute next sequence.** List `<workspace>/.council/checkpoints/*.json`. Read each file's `sequence` field. `next_sequence = max(...) + 1`, or `0` if the directory is empty or absent.
+
+4. **Build CheckpointPayload.**
+
+   ```json
+   {
+     "schema_version": 1,
+     "checkpoint_id": "council-plan-<seq>-<8-hex-random>",
+     "phase": "council-plan",
+     "sequence": <next_sequence>,
+     "session_group_id": "<GROUP_ID>",
+     "emitted_at": "<UTC ISO 8601 T-form, no fractional seconds>",
+     "artifact_paths": ["<workspace-relative path to PLAN-[feature-slug].md from Phase 6>"]
+   }
+   ```
+
+   `artifact_paths` must contain exactly the PLAN file you wrote in Phase 6, workspace-relative.
+
+5. **POST.** Use the Bash tool:
+
+   ```bash
+   curl -fsS -X POST \
+     "http://localhost:3456/api/sessions/$ORCH_SID/council/checkpoint" \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD"
+   ```
+
+   Expected 200 with `{"ok": true, "written": "...", ...}`.
+
+6. **On non-200:**
+   - **409** ("Session is not part of an active council group"): silent skip, not an error.
+   - **400 / 403 / 500**: surface the raw response body to the user, do not retry. Schema rejection, auth violation, or filesystem write failure needs human attention.
+
+7. **Do not wait** for the observer's review. The 200 response IS the success signal for this phase; the observer's review file lands asynchronously and surfaces in the Aura UI's ObserverPanel.
 
 ---
 
