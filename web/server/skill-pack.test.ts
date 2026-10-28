@@ -671,6 +671,46 @@ describe("containerCopyScript (Codex in a container)", () => {
     expect(run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] })).status).toBe(0);
   });
 
+  // Observer STOP 1 (checkpoint 185): the script rm -rf'd a predictable staging path,
+  // so a user dir named like it was deleted. Nothing but the claimed dest may be written.
+  it("never deletes a user dir that happens to have a staging-like name", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    for (const odd of [".aura-staging-polish", ".staging-polish"]) {
+      mkdirSync(join(parent, odd), { recursive: true });
+      writeFileSync(join(parent, odd, "keep.md"), "mine\n");
+    }
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish"] }));
+    expect(r.status, r.stderr).toBe(0);
+    for (const odd of [".aura-staging-polish", ".staging-polish"]) {
+      expect(readFileSync(join(parent, odd, "keep.md"), "utf8")).toBe("mine\n");
+    }
+    expect(readOwnership(join(parent, "polish"), "polish", manifest).owner).toBe("aura");
+  });
+
+  // Observer STOP 2 (checkpoint 185): check-then-mv raced — a dest created after the
+  // check got the staging dir moved INTO it. A `cp` shim creates the user's dest
+  // mid-run; nothing of Aura's may end up nested in it, and the user's file survives.
+  it("a dest that appears mid-run is never written into by a nested publish", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    const bin = join(tmp(), "bin");
+    mkdirSync(bin);
+    const dest = join(parent, "polish");
+    const realCp = spawnSync("sh", ["-c", "command -v cp"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(bin, "cp"), `#!/bin/sh\nmkdir -p '${dest}' 2>/dev/null; [ -f '${dest}/user.txt' ] || echo mine > '${dest}/user.txt'\nexec ${realCp} "$@"\n`, { mode: 0o755 });
+    const script = containerCopyScript({ packDir, parent, manifest, names: ["polish"] });
+    const r = spawnSync("sh", ["-c", script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    expect(r.status === 0 || r.status === 1).toBe(true);
+    expect(readFileSync(join(dest, "user.txt"), "utf8")).toBe("mine\n");
+    expect(readdirSync(dest).filter((n) => n.includes("staging"))).toEqual([]);
+    // As non-root the nested mv happens to fail on permissions (in a container it runs
+    // as root and would succeed); either way no staging dir may be left behind.
+    expect(readdirSync(parent).filter((n) => n.includes("staging"))).toEqual([]);
+    // Whatever landed, the copy is not provably Aura's (it holds the user's file).
+    expect(readOwnership(dest, "polish", manifest).owner).toBe("user");
+  });
+
   it("refuses names that are not shipped entries of the manifest, or unsafe", () => {
     const { packDir, manifest } = installed();
     for (const names of [["nope"], ["../polish"], ["blocked-one"]]) {
