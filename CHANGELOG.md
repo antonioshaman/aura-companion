@@ -1,5 +1,35 @@
 # Changelog
 
+## [2.8.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.2...aura-companion-v2.8.0) (2026-10-28)
+
+
+### Features
+
+* **council:** per-pair token budget guard that pauses automatic activity ([#427](https://github.com/antonioshaman/aura-companion/issues/427)) ([3b14416](https://github.com/antonioshaman/aura-companion/commit/3b144166330997a55510e369370f6f2c136f7cb4))
+* **guards:** surface guard denials in Aura with a one-shot "Allow once" ([#428](https://github.com/antonioshaman/aura-companion/issues/428)) ([4818153](https://github.com/antonioshaman/aura-companion/commit/481815345d1cbabe0bfa090333a87df590c2e2d0))
+* **landing:** show npm downloads for the last 30 days in the footer ([#419](https://github.com/antonioshaman/aura-companion/issues/419)) ([414b548](https://github.com/antonioshaman/aura-companion/commit/414b548c81d33bf480756d3892f3c38f6bebf5e4))
+* **sessions:** create a missing project folder and clone its repo on session start ([#420](https://github.com/antonioshaman/aura-companion/issues/420)) ([a45e11b](https://github.com/antonioshaman/aura-companion/commit/a45e11bcd5714fd3d5f5f2177e5bd178f7c454e5))
+* **skills:** apply the owner's B5 decisions — ui-ux-pro-max ships, container exposure, GHCR image, impeccable skills (phase B5) ([#435](https://github.com/antonioshaman/aura-companion/issues/435)) ([741c2b7](https://github.com/antonioshaman/aura-companion/commit/741c2b75210e4e5c0158eb9319464c03222ba3f5))
+* **skills:** expose the shipped UI/UX toolkit to Claude and Codex sessions at spawn (phase B3) ([#433](https://github.com/antonioshaman/aura-companion/issues/433)) ([a8189e5](https://github.com/antonioshaman/aura-companion/commit/a8189e5cb8d66f553cd3ded6ebea58944d9707e7))
+* **skills:** platform rules for Mini Apps, iOS and Android, an audit method and token ladder, with enrichment verifiers and a controlled eval (phase C) ([#436](https://github.com/antonioshaman/aura-companion/issues/436)) ([8dd579c](https://github.com/antonioshaman/aura-companion/commit/8dd579c28d1067ebe425d2087fc2d9e82bf0b3f3))
+* **skills:** ship the UI/UX skill pack in the npm tarball and a new server image, with fail-closed package gates (phase B4) ([#434](https://github.com/antonioshaman/aura-companion/issues/434)) ([250ac91](https://github.com/antonioshaman/aura-companion/commit/250ac91169e15b32158a4961cb846f2a0e7325e0))
+* **skills:** shipped skills manifest with a fail-closed ship gate and an ownership marker (phase B1) ([#431](https://github.com/antonioshaman/aura-companion/issues/431)) ([dfaa82a](https://github.com/antonioshaman/aura-companion/commit/dfaa82aee1c06057241a2a35024835f61daf6540))
+* **skills:** skill-pack module with a read-only versioned tree and marker-guarded copies (phase B2) ([#432](https://github.com/antonioshaman/aura-companion/issues/432)) ([7b1a547](https://github.com/antonioshaman/aura-companion/commit/7b1a547fdf2fbf3cc1e826a6dad7df5e8d5920a4))
+* **skills:** UI/UX source catalog, pinned vendoring and the council catalog in the repo (phase A + task 4) ([#429](https://github.com/antonioshaman/aura-companion/issues/429)) ([ab95b21](https://github.com/antonioshaman/aura-companion/commit/ab95b21a513526d0738884aa46066617bffaa8e4))
+
+
+### Bug Fixes
+
+* **app:** keep the new-session form open when "+" is tapped before the session list loads ([#422](https://github.com/antonioshaman/aura-companion/issues/422)) ([d570554](https://github.com/antonioshaman/aura-companion/commit/d570554e7aeb217c6fcb6431ae64bfdbfcabe9ee))
+* **app:** stop yanking the phone into an old session while the new-session form is in use ([#424](https://github.com/antonioshaman/aura-companion/issues/424)) ([14fc9d2](https://github.com/antonioshaman/aura-companion/commit/14fc9d28950d522e72bbbfc32dca6a92c2a4dadf))
+* **landing:** stop scroll flicker in Chrome on macOS by dropping the header backdrop blur and the ambient glow blur ([#417](https://github.com/antonioshaman/aura-companion/issues/417)) ([2be44d5](https://github.com/antonioshaman/aura-companion/commit/2be44d5194a9011698dd3d9b2301da487e25a509))
+* **landing:** stop the grey full-page flash near the screenshot carousel in Chrome on macOS ([#418](https://github.com/antonioshaman/aura-companion/issues/418)) ([5836252](https://github.com/antonioshaman/aura-companion/commit/583625297b9fd4e36aaee6e7829b0dff1ad0d2a3))
+* **platform:** stop orphaning Hetzner servers and leaking secrets via user_data ([#426](https://github.com/antonioshaman/aura-companion/issues/426)) ([76dbcf2](https://github.com/antonioshaman/aura-companion/commit/76dbcf29b225db8a4e2315acdda87f467a56d4d8))
+* **server:** recover from package-update restart storms and keep agent browsers per session until archive ([#423](https://github.com/antonioshaman/aura-companion/issues/423)) ([8c9917a](https://github.com/antonioshaman/aura-companion/commit/8c9917aa9e4738b9ea8bc7f07d2ddfb9783c99d8))
+* **server:** skip stale sessions and cap concurrent relaunches on boot resume ([#425](https://github.com/antonioshaman/aura-companion/issues/425)) ([751e52d](https://github.com/antonioshaman/aura-companion/commit/751e52d87490fee00a96cdf3d984edc0c232ee7a))
+* **sessions:** remove a sudo-created project folder when its clone fails ([#421](https://github.com/antonioshaman/aura-companion/issues/421)) ([2175a6d](https://github.com/antonioshaman/aura-companion/commit/2175a6d4938860e194c52e57aa3bb902e7dab37e))
+* **sidebar:** show "Continue in new session" in the row menu of active sessions ([#414](https://github.com/antonioshaman/aura-companion/issues/414)) ([e91b5df](https://github.com/antonioshaman/aura-companion/commit/e91b5df25e90fe1b6b7c4253532495c779fa077e))
+
 ## [2.7.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.1...aura-companion-v2.7.2) (2026-10-19)
 
 
