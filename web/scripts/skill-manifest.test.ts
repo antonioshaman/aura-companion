@@ -307,6 +307,15 @@ describe("the real packs/skills tree", () => {
     expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("ship");
   });
 
+  // Owner answer 4 (B5): a Codex compat flag flips only after a real run under Codex.
+  // Every vendored impeccable entry marked codex:true must say which run verified it.
+  it("vendored entries flipped to codex:true cite the Codex run that verified them", () => {
+    const { input: inp } = readInput();
+    const flipped = inp.pack.entries.filter((e) => e.origin === "vendored" && e.compat.codex && e.name !== "taste-skill");
+    expect(flipped.length).toBe(18);
+    for (const e of flipped) expect(e.compat.note, e.name).toMatch(/Verified under Codex \d+\.\d+\.\d+ .* on \d{4}-\d{2}-\d{2}/);
+  });
+
   it("the committed manifest lists no excluded file, and the catalog keeps its runtime vocabulary", () => {
     const m = JSON.parse(readFileSync(MANIFEST_FILE, "utf8")) as { entries: Array<{ name: string; files: Record<string, string> }> };
     for (const e of m.entries) for (const p of Object.keys(e.files)) expect(excludedReason(p), `${e.name}/${p}`).toBeNull();

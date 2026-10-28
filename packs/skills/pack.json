@@ -65,109 +65,109 @@
       "name": "adapt",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "animate",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "audit",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "bolder",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "clarify",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "colorize",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "critique",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "delight",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "distill",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "extract",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "frontend-design",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "harden",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "normalize",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "onboard",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "optimize",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "polish",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "quieter",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     },
     {
       "name": "teach-impeccable",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "Markdown-only, but not yet run under Codex; flip only after a real Codex run (owner answer 4, B5)." }
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     }
   ]
 }
