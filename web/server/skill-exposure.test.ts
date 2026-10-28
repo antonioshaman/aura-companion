@@ -155,8 +155,22 @@ describe("councilCatalogDir (AURA_COUNCIL_CATALOG_DIR, B5)", () => {
     expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "disabled" }]), "/r"))
       .toBe(join("/r", "versions", "v1", "_council-experts"));
   });
-  it.each(["skip-user-owns", "blocked-by-gate"])("catalog %s → undefined (fallback path stays in charge)", (outcome) => {
-    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome }]), "/r")).toBeUndefined();
+  it("catalog blocked by the gate → undefined (fallback path stays in charge)", () => {
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "blocked-by-gate" }]), "/r")).toBeUndefined();
+  });
+
+  // Observer STOP (B5 checkpoint 183): the user's catalog may live where the
+  // dispatchers' $HOME fallback never looks; export the first one that exists.
+  it("catalog the user owns → the first existing user candidate, or undefined if none exists", () => {
+    const d = tmp();
+    const a = join(d, "a", "_council-experts");
+    const b = join(d, "b", "_council-experts");
+    mkdirSync(b, { recursive: true });
+    const owned = exp([skill, { name: "_council-experts", outcome: "skip-user-owns" }]);
+    expect(councilCatalogDir(owned, "/r", [a, b])).toBe(b);
+    mkdirSync(a, { recursive: true });
+    expect(councilCatalogDir(owned, "/r", [a, b])).toBe(a);
+    expect(councilCatalogDir(owned, "/r", [])).toBeUndefined();
   });
   it("no catalog entry, nothing provided, or exposure off → undefined", () => {
     expect(councilCatalogDir(exp([skill]), "/r")).toBeUndefined();

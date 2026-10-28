@@ -4630,9 +4630,10 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(existsSync(join(pluginDirOf(argvOf(0))!, "skills", "_council-experts"))).toBe(false);
   });
 
-  // The user's own catalog wins: Aura leaves the variable unset so the dispatchers
-  // fall back to ~/.claude/skills/_council-experts (the user's copy).
-  it("Claude: user owns _council-experts → AURA_COUNCIL_CATALOG_DIR not exported", async () => {
+  // The user's own catalog wins — and the variable must point AT it: the dispatchers'
+  // fallback is only $HOME/.claude/skills, so a catalog under CLAUDE_CONFIG_DIR or the
+  // project's .claude/skills would otherwise be skipped (observer STOP, B5 checkpoint 183).
+  it("Claude: user owns _council-experts → AURA_COUNCIL_CATALOG_DIR points at the user's catalog", async () => {
     await installFixturePack(["polish", "_council-experts"]);
     const userCatalog = join(tempDir, "claude-config", "skills", "_council-experts");
     mkdirSync(userCatalog, { recursive: true });
@@ -4640,7 +4641,19 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     launcher.probeClaudePluginDir = () => true;
     launcher.launch({ cwd: tempDir, layers: ALL_ON });
     expect(pluginDirOf(argvOf(0))).toBeDefined();
-    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBeUndefined();
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBe(userCatalog);
+  });
+
+  it("Claude: a project-level user catalog (<cwd>/.claude/skills) is the one exported", async () => {
+    await installFixturePack(["polish", "_council-experts"]);
+    // `uiux-proj`: the fs mock passes real .claude paths through only under fixture roots.
+    const project = join(tempDir, "uiux-proj");
+    const projectCatalog = join(project, ".claude", "skills", "_council-experts");
+    mkdirSync(projectCatalog, { recursive: true });
+    writeFileSync(join(projectCatalog, "SKILL.md"), "---\nname: _council-experts\n---\nproject\n");
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: project, layers: ALL_ON });
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBe(projectCatalog);
   });
 
   it("Claude: a pack without a catalog → AURA_COUNCIL_CATALOG_DIR not exported", async () => {

@@ -1,13 +1,15 @@
 ---
 name: council-review-aura
+origin: aura
 description: Perform a rigorous Carmack Council code review for the Aura Companion stack (Bun + Hono + TS / React 19 + Zustand + Tailwind / WebSocket NDJSON bridge / filesystem JSON persistence / Vitest + vitest-axe). Use when explicitly asked to "council review aura", "carmack review aura", or invoke /council-review-aura. The council seats Troy Hunt (security), Martin Fowler (refactoring), Simon Willison (LLM pipelines), Karri Saarinen (UI quality), Vitaly Friedman (UX quality), Kent Beck (test quality) plus three stack-targeted experts (React/Web UI, Bun + NDJSON/WS Protocol [dahl], hashimoto [DevOps cross-stack — Docker + GHA + VPS systemd]) and two Aura-specific experts (a11y Auditor, ritchie [Unix-discipline two-axes: process lifecycle + filesystem persistence]). Uses parallel subagents for deep, independent review. Produces prioritised P1/P2/P3 findings after a mandatory deterministic Phase 0 (typecheck/tests/a11y + smoke of the changed surface). Risk-based: worth running for payments, auth, migrations/persistence-format changes, irreversible operations, and plan review before implementation; not worth it for routine UI tweaks or refactors. Stack: Bun + Hono + TypeScript / React 19 + Zustand + Tailwind / WebSocket NDJSON + JSON-RPC / FS-JSON persistence / Vitest + vitest-axe.
 ---
 
 # Carmack Council Reviewer — Aura Companion variant
 
 **Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
-Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
-old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
 (`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
 absolute path into every subagent prompt — subagents may not inherit the variable.
 

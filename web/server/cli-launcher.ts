@@ -73,6 +73,7 @@ import {
 import {
   claudeSupportsPluginDir,
   COUNCIL_CATALOG_ENV,
+  COUNCIL_CATALOG_NAME,
   councilCatalogDir,
   decideSkillExposure,
   parseSkillExposure,
@@ -2258,7 +2259,7 @@ export class CliLauncher {
     try {
       const exposure = this.decideOnce(info, () => {
         const pack = readCurrentPack(this.skillPackRoot);
-        const configDir = options.env?.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+        const configDir = this.claudeConfigDir(options);
         const existing = "error" in pack ? [] : [
           ...listExistingSkills(join(configDir, "skills"), pack.manifest),
           ...listExistingSkills(join(info.cwd, ".claude", "skills"), pack.manifest),
@@ -2295,7 +2296,15 @@ export class CliLauncher {
         ...options,
         skillPluginDir: built.dir,
         // A skill script must not drop __pycache__ next to itself (B1 observer STOP).
-        env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure) },
+        env: {
+          ...options.env,
+          PYTHONDONTWRITEBYTECODE: "1",
+          // Same order the decision listed them in (user dir, then project).
+          ...this.catalogEnv(exposure, [
+            join(this.claudeConfigDir(options), "skills", COUNCIL_CATALOG_NAME),
+            join(info.cwd, ".claude", "skills", COUNCIL_CATALOG_NAME),
+          ]),
+        },
       };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -2307,9 +2316,13 @@ export class CliLauncher {
     }
   }
 
-  /** `AURA_COUNCIL_CATALOG_DIR` → the shipped catalog of the decided version, when it is Aura's to provide. */
-  private catalogEnv(exposure: SkillExposure): Record<string, string> {
-    const dir = councilCatalogDir(exposure, this.skillPackRoot);
+  private claudeConfigDir(options: LaunchOptions): string {
+    return options.env?.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  }
+
+  /** `AURA_COUNCIL_CATALOG_DIR` → the catalog this session should read (Aura's, or the user's own). */
+  private catalogEnv(exposure: SkillExposure, userCandidates: string[]): Record<string, string> {
+    const dir = councilCatalogDir(exposure, this.skillPackRoot, userCandidates);
     return dir ? { [COUNCIL_CATALOG_ENV]: dir } : {};
   }
 
@@ -2375,7 +2388,7 @@ export class CliLauncher {
         plan: exposure.items.map((i) => ({ name: i.name, outcome: i.outcome === "provide" ? "provide" : "disabled", reasons: i.reasons })),
       });
       this.setDeliveryError(exposure, undefined);
-      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure) } };
+      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure, [join(parent, COUNCIL_CATALOG_NAME)]) } };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       log.warn("skill-exposure", "Codex toolkit sync failed; spawning without changes", {

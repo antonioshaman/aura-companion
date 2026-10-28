@@ -125,15 +125,24 @@ export const COUNCIL_CATALOG_ENV = "AURA_COUNCIL_CATALOG_DIR";
 export const COUNCIL_CATALOG_NAME = "_council-experts";
 
 /**
- * The shipped catalog dir to export for this session, or undefined. Only when the
- * exposure is on, at least one skill is provided, and the catalog itself was not
- * left to the user (`skip-user-owns`: their own `_council-experts` stays the
- * dispatchers' fallback) or blocked by the gate.
+ * The catalog dir to export for this session, or undefined. Only when the exposure is
+ * on and provides at least one skill:
+ *   - Aura's catalog → the shipped one in the decided version tree;
+ *   - the user's (`skip-user-owns`) → the first of `userCandidates` that exists, in the
+ *     CLI's own precedence order. The dispatchers' fallback is only
+ *     `$HOME/.claude/skills`, so a user catalog under CLAUDE_CONFIG_DIR or the project's
+ *     `.claude/skills` must be passed explicitly (observer STOP, B5 checkpoint 183);
+ *   - blocked by the gate, or absent → undefined (the fallback path stays in charge).
  */
-export function councilCatalogDir(exposure: SkillExposure | undefined, packRoot: string): string | undefined {
+export function councilCatalogDir(
+  exposure: SkillExposure | undefined,
+  packRoot: string,
+  userCandidates: string[] = [],
+): string | undefined {
   if (!exposure?.version || providedNames(exposure).length === 0) return undefined;
   const item = exposure.items.find((i) => i.name === COUNCIL_CATALOG_NAME);
-  if (!item || item.outcome === "skip-user-owns" || item.outcome === "blocked-by-gate") return undefined;
+  if (!item || item.outcome === "blocked-by-gate") return undefined;
+  if (item.outcome === "skip-user-owns") return userCandidates.find((d) => existsSync(d));
   return join(packRoot, "versions", exposure.version, COUNCIL_CATALOG_NAME);
 }
 

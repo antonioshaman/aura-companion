@@ -1,13 +1,15 @@
 ---
 name: council-implement
+origin: aura
 description: Execute a Carmack Council plan task by task. Use when explicitly asked to implement a plan, do a "council implement", "carmack implement", "council build", or invoke /council-implement. Reads the output of /council-plan and builds each task sequentially, loading the relevant expert's reference document per task. Verifies after each task. Produces an implementation log for /council-review. Also applies /council-review findings in fix-pass mode (cite finding, confirm diff matches the recommendation, failing test first, re-run checks, one review round max). Stack: Python 3.10+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 
 # Carmack Council Implementer
 
 **Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
-Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
-old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
 (`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
 absolute path into every subagent prompt — subagents may not inherit the variable.
 

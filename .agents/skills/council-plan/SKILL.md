@@ -1,13 +1,15 @@
 ---
 name: council-plan
+origin: aura
 description: Architect a feature with the Carmack Council before writing code. Use when explicitly asked to plan a feature, do a "council plan", "carmack plan", or invoke /council-plan. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipeline), Karri Saarinen (UI quality), Vitaly Friedman (UX quality). Interactive feature discovery followed by parallel subagent dispatch. Produces a sequenced, attributed implementation plan with no code. Stack: Python 3.10+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 
 # Carmack Council Planner
 
 **Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
-Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
-old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
 (`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
 absolute path into every subagent prompt — subagents may not inherit the variable.
 
