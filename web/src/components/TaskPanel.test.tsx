@@ -1835,6 +1835,10 @@ describe("LinearIssueSection — comments and labels rendering", () => {
     expect(await screen.findByText("Comments")).toBeInTheDocument();
     expect(screen.getByText("Looks good!")).toBeInTheDocument();
     expect(screen.getByText("Please fix the tests")).toBeInTheDocument();
+    // The list scrolls (max-h-36) and holds no focusable child, so the region
+    // itself takes focus (axe scrollable-region-focusable, WCAG 2.1.1).
+    const region = screen.getByRole("region", { name: "Issue comments" });
+    expect(region).toHaveAttribute("tabindex", "0");
   });
 
   it("renders labels when available", async () => {

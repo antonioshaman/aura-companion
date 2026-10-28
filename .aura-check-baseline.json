@@ -108,30 +108,6 @@
       "reason": "alert() for form validation / a 'coming soon' notice on the archived legacy landing (landing-legacy/site/archive), kept as history and no longer edited.",
       "ruledBy": "claude (council-implement, phase D) under the owner's apply-recommended rule; pending owner confirmation",
       "ruledAt": "2026-10-28"
-    },
-    {
-      "rule": "uiux.native-alert",
-      "path": "web/src/components/Playground.tsx",
-      "line": 1177,
-      "match": "onDismiss={() => alert(\"Dismissed!\")} | />",
-      "count": 2,
-      "ruling": "true-problem",
-      "action": "accepted",
-      "reason": "alert() as a demo onClick/onDismiss handler in the dev-only component Playground (#/playground); not a user-facing flow.",
-      "ruledBy": "claude (council-implement, phase D) under the owner's apply-recommended rule; pending owner confirmation",
-      "ruledAt": "2026-10-28"
-    },
-    {
-      "rule": "uiux.native-alert",
-      "path": "web/src/components/Playground.tsx",
-      "line": 2608,
-      "match": "onClick={() => alert(`Selected: ${suggestion}`)} | >",
-      "count": 2,
-      "ruling": "true-problem",
-      "action": "accepted",
-      "reason": "alert() as a demo onClick/onDismiss handler in the dev-only component Playground (#/playground); not a user-facing flow.",
-      "ruledBy": "claude (council-implement, phase D) under the owner's apply-recommended rule; pending owner confirmation",
-      "ruledAt": "2026-10-28"
     }
   ]
 }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -71,4 +71,21 @@ describe("Playground accessible names", () => {
     // best-practice rule, not a WCAG criterion.
     expect(await axe(container, { rules: { "landmark-unique": { enabled: false } } })).toHaveNoViolations();
   }, 60_000);
+});
+
+// aura-check uiux.native-alert (baseline 2026-10-28, ruling accepted → fixed):
+// demo actions report in an on-page status line instead of a blocking
+// window.alert, which steals focus and cannot be styled or announced politely.
+describe("Playground demo actions", () => {
+  it("suggestion chips and badge dismiss report in a status line, never window.alert", () => {
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
+    render(<Playground />);
+    fireEvent.click(screen.getByRole("button", { name: "Fix the failing test" }));
+    expect(screen.getByText("Selected: Fix the failing test")).toBeTruthy();
+    expect(screen.getByText("Selected: Fix the failing test").closest('[role="status"]')).not.toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: /dismiss/i })[0]);
+    expect(screen.getByText("Dismissed")).toBeTruthy();
+    expect(alertSpy).not.toHaveBeenCalled();
+    alertSpy.mockRestore();
+  }, 60_000); // the full Playground renders in ~6s under jsdom
 });

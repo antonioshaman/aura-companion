@@ -29,3 +29,62 @@ jobs:
       - name: Run accessibility tests (axe-core + ARIA)
         working-directory: web
         run: bun run test:a11y
+
+  # Rendered axe scan of #/playground (web/scripts/a11y-scan.ts) on a throwaway
+  # production build. jsdom has no layout, so rules like scrollable-region-focusable
+  # and color-contrast are only caught here. fail (exit 1) and skipped (exit 3)
+  # both turn the job red: a scan that could not run never reads as a pass.
+  rendered-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Install agent-browser and Chrome
+        run: |
+          npm install -g agent-browser@0.27.0
+          agent-browser install --with-deps
+
+      - name: Build the web UI
+        working-directory: web
+        run: bun run build
+
+      - name: Start a throwaway server (isolated HOME, telemetry off)
+        working-directory: web
+        env:
+          HOME: ${{ runner.temp }}/scan-home
+          TMPDIR: ${{ runner.temp }}/scan-tmp
+          HOST: 127.0.0.1
+          PORT: "3999"
+          NODE_ENV: production
+          COMPANION_TELEMETRY: "0"
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          nohup bun server/index.ts > "${{ runner.temp }}/scan-server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:3999/ && exit 0
+            sleep 1
+          done
+          echo "::error::throwaway server did not come up"; cat "${{ runner.temp }}/scan-server.log"; exit 1
+
+      - name: Scan #/playground (light + dark, 375x812)
+        working-directory: web
+        run: bun scripts/a11y-scan.ts --url "http://127.0.0.1:3999/#/playground" --out "${{ runner.temp }}/a11y-scan" --settle-ms 3000 --browser-args=--no-sandbox
+
+      - name: Upload the scan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-scan
+          path: |
+            ${{ runner.temp }}/a11y-scan
+            ${{ runner.temp }}/scan-server.log
+          if-no-files-found: warn

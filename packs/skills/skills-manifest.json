@@ -253,13 +253,13 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "8f3e1cc49eb04df52e1784c3cb2afde6ea8f03cb5209b8ac8475d91b50b75e42",
+      "digest": "ffc870ac5d95a5afac14cbc52e5f9ec52fb1cd119ff902c196de257971346cfa",
       "files": {
         "SKILL.md": "5974f47d1495ce37acd3886092e0a4843b0777e916fb7862e6abfaeedc954dcb",
         "references/android.md": "185df56faaec5432d836a323705d607cacc46bd1d636d20c54429546855a16f6",
         "references/evaluation-method.md": "2ed724140a59a4453f42c8e939705b9b73fb162752cc7392aa509a2567c534d8",
         "references/ios.md": "d0b89b592880736b0a479b11dcc6ebd5109a9a03955d68618bc636ae65fb6d07",
-        "references/telegram-mini-app.md": "e136eaad16db28d895abd173d62621474e2ea214af6b83920e2b1da9421b9c4b",
+        "references/telegram-mini-app.md": "f72a60d1d7cfab58dc971d606a69ce1bdc5b68e16153b92a220b6c8a5c3beea6",
         "references/token-ladder.md": "b3e8af22e765f318642345b721adc0c6d467574ba15f99b46be45fed71030fdd"
       }
     },

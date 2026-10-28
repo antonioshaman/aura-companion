@@ -847,3 +847,20 @@ describe("observer findings rendering gate", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 });
+
+// Rendered axe scan of #/playground (2026-10-28): wide code blocks and tables
+// scroll horizontally, and a scroll container with no focusable child cannot be
+// scrolled from the keyboard (axe scrollable-region-focusable, WCAG 2.1.1).
+// jsdom has no layout, so axe cannot see the overflow here; assert the contract.
+describe("MessageBubble - keyboard-scrollable markdown", () => {
+  it("code blocks and table wrappers are in the tab order", () => {
+    const msg = makeMessage({ role: "assistant", content: "x" });
+    const { container } = render(<MessageBubble message={msg} />);
+    const pres = container.querySelectorAll("pre.overflow-x-auto");
+    expect(pres.length).toBeGreaterThan(0);
+    pres.forEach((p) => expect(p.getAttribute("tabindex")).toBe("0"));
+    const table = container.querySelector("table")!;
+    expect(table.parentElement!.className).toContain("overflow-x-auto");
+    expect(table.parentElement!.getAttribute("tabindex")).toBe("0");
+  });
+});

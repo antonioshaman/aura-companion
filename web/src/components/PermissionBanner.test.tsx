@@ -710,6 +710,10 @@ describe("ExitPlanModeDisplay", () => {
 
     // Plan header
     expect(screen.getByText("Plan")).toBeTruthy();
+    // A long plan scrolls inside max-h-72; the region takes focus so keyboard
+    // users can scroll it (axe scrollable-region-focusable, WCAG 2.1.1).
+    const planRegion = screen.getByRole("region", { name: "Plan" });
+    expect(planRegion.getAttribute("tabindex")).toBe("0");
     // Markdown content rendered via mock
     expect(screen.getByTestId("markdown")).toBeTruthy();
     expect(screen.getByTestId("markdown").textContent).toBe("## Step 1\nDo something");
