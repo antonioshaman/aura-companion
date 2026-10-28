@@ -193,7 +193,8 @@ export function ownership(dirName: string, files: Map<string, Buffer>, manifest:
     if (sha256(buf) !== h) return { owner: "user", reason: `${p} was modified since Aura wrote this copy` };
   }
   for (const p of files.keys()) {
-    if (p !== OWNER_MARKER_FILE && !(p in marker.files)) return { owner: "user", reason: `${p} was added since Aura wrote this copy` };
+    // Object.hasOwn, not `in`: inherited names (constructor, toString…) are not listed files.
+    if (p !== OWNER_MARKER_FILE && !Object.hasOwn(marker.files, p)) return { owner: "user", reason: `${p} was added since Aura wrote this copy` };
   }
   const entry = manifest.entries.find((e) => e.name === dirName);
   return { owner: "aura", inManifest: !!entry, current: entry?.digest === marker.digest };
@@ -221,6 +222,8 @@ export function readTree(root: string, skipped: string[] = []): Map<string, Buff
         }
         walk(abs);
       } else if (st.isFile()) out.set(relative(root, abs).split(sep).join("/"), readFileSync(abs));
+      // A FIFO/socket/device is neither hashed nor ignorable: fail closed.
+      else throw new Error(`unsupported file type in skill tree: ${relative(root, abs)}`);
     }
   };
   walk(root);

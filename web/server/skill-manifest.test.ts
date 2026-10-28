@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -213,6 +214,39 @@ describe("readOwnership — on-disk copies", () => {
       owner: "user",
       reason: `cannot prove ownership: unread dir ${cache}`,
     });
+  });
+
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"])(
+    "an added user file named %s → user (review of #431, P1)",
+    (name) => {
+      // Why: the "added file" check used `p in marker.files`, which also matches
+      // properties every object inherits — a user file with one of these names read
+      // as listed, the copy as Aura's, and B2 would delete it with the copy.
+      const root = mkdtempSync(join(tmpdir(), "skill-own-"));
+      const t = tree();
+      const e = entryFor("polish", t);
+      mkdirSync(join(root, "polish", "references"), { recursive: true });
+      for (const [p, b] of installed(e, t)) writeFileSync(join(root, "polish", p), b);
+      writeFileSync(join(root, "polish", name), "mine");
+      expect(readOwnership(join(root, "polish"), "polish", { entries: [e] })).toEqual({
+        owner: "user",
+        reason: `${name} was added since Aura wrote this copy`,
+      });
+    },
+  );
+
+  it("a FIFO (or any non-file, non-dir entry) in the copy → user (review of #431, P2)", () => {
+    // Why: readTree silently dropped entries that are neither files nor dirs, so a
+    // user FIFO/socket was invisible and the copy read as Aura's.
+    const root = mkdtempSync(join(tmpdir(), "skill-own-"));
+    const t = tree();
+    const e = entryFor("polish", t);
+    mkdirSync(join(root, "polish", "references"), { recursive: true });
+    for (const [p, b] of installed(e, t)) writeFileSync(join(root, "polish", p), b);
+    execFileSync("mkfifo", [join(root, "polish", "pipe")]);
+    const r = readOwnership(join(root, "polish"), "polish", { entries: [e] });
+    expect(r.owner).toBe("user");
+    expect(r.owner === "user" && r.reason).toMatch(/unsupported file type in skill tree: pipe/);
   });
 
   it("a missing dir → user, never a throw", () => {
