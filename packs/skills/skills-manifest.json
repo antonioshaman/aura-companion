@@ -246,8 +246,8 @@
       },
       "compat": {
         "claude": true,
-        "codex": false,
-        "note": "Markdown-only; not yet run under Codex, so it stays Claude-only until a recorded Codex run."
+        "codex": true,
+        "note": "Codex run 2026-10-28: codex-cli 0.162.1, gpt-6.1-sol, read-only sandbox, skill as project .agents/skills — Codex listed aura-uiux, followed its routing to references/telegram-mini-app.md and restated its back-navigation and touch-target rules."
       },
       "ship": {
         "status": "ship",
