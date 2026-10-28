@@ -624,7 +624,7 @@ export function AgentsPage({ route }: Props) {
             className="bg-cc-card rounded-[14px] shadow-2xl p-6 w-full max-w-lg border border-cc-border"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-medium text-cc-fg mb-1">Run {runInputAgent.name}</h3>
+            <h2 className="text-sm font-medium text-cc-fg mb-1">Run {runInputAgent.name}</h2>
             <p className="text-xs text-cc-muted mb-3">This agent's prompt uses {"{{input}}"} — provide the input below.</p>
             <textarea
               value={runInput}

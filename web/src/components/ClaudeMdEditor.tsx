@@ -135,7 +135,7 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close"
             onClick={handleClose}
             className="w-7 h-7 flex items-center justify-center rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
           >

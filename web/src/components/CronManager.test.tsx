@@ -769,3 +769,15 @@ describe("CronManager — axe accessibility floor", () => {
 // Suppress unused-import warning for CODEX_MODELS (kept for future codex test).
 void CODEX_MODELS;
 void within;
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("CronManager accessible names", () => {
+  it("the modal's icon-only close button is named and closes", async () => {
+    const onClose = vi.fn();
+    render(<CronManager onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+});

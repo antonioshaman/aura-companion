@@ -520,8 +520,8 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
         <div className={`relative overflow-visible transition-all duration-200 border-t border-cc-separator sm:border sm:border-cc-border sm:bg-cc-input-bg/95 sm:rounded-[16px] sm:backdrop-blur-sm composer-card ${
           isPlan
             ? "sm:border-cc-primary/40 sm:shadow-[0_10px_30px_rgba(217,119,87,0.08)]"
-            : "sm:focus-within:border-cc-primary/25"
-        }`}>
+            : ""
+        } focus-within:border-cc-primary/70`}>
           {/* Slash command menu */}
           {slashMenuOpen && filteredCommands.length > 0 && (
             <div
@@ -763,7 +763,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
 
           {/* Textarea row */}
           <div className="px-3 sm:px-3 pt-1 sm:pt-2.5">
-            <textarea
+            <textarea // aura-check: ignore[uiux.outline-none-without-focus-style] (focus shows on the input container: focus-within border)
               ref={textareaRef}
               value={text}
               onChange={handleInput}

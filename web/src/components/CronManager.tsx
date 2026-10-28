@@ -522,7 +522,7 @@ export function CronManager({ onClose, embedded = false }: Props) {
           </p>
         </div>
         {onClose && (
-          <button
+          <button aria-label="Close"
             onClick={onClose}
             className="w-8 h-8 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
           >

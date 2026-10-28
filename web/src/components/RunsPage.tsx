@@ -198,7 +198,14 @@ export function RunsPage() {
                   <tr
                     key={`${exec.sessionId}-${exec.startedAt}`}
                     onClick={() => setSelectedExec(isSelected ? null : exec)}
-                    className={`cursor-pointer transition-colors ${
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedExec(isSelected ? null : exec);
+                      }
+                    }}
+                    className={`cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-cc-primary focus-visible:-outline-offset-2 ${
                       isSelected
                         ? "bg-cc-active"
                         : "hover:bg-cc-hover"

@@ -175,7 +175,7 @@ export function DiffPanel({ sessionId }: { sessionId: string }) {
             <span className="w-2 h-2 rounded-full bg-cc-warning" />
             <span>Changed ({relativeChangedFiles.length})</span>
           </div>
-          <button
+          <button aria-label="Close file list"
             onClick={() => setSidebarOpen(false)}
             className="w-8 h-8 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer sm:hidden"
           >

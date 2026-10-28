@@ -316,3 +316,25 @@ describe("RunsPage", () => {
     expect(select).toBeInTheDocument();
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("RunsPage keyboard selection", () => {
+  it("a run row is focusable and Enter / Space toggle its details", async () => {
+    mockApi.listExecutions.mockResolvedValue({ executions: [makeExecution({ sessionId: "kbd" })], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+    render(<RunsPage />);
+    const cell = await waitFor(() => {
+      const c = screen.getAllByText("Test Agent").find((el) => el.closest("td") !== null);
+      expect(c).toBeTruthy();
+      return c!;
+    });
+    const row = cell.closest("tr")!;
+    expect(row).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(row, { key: "Enter" });
+    await waitFor(() => expect(screen.getByText("Execution Details")).toBeInTheDocument());
+    fireEvent.keyDown(row, { key: " " });
+    await waitFor(() => expect(screen.queryByText("Execution Details")).not.toBeInTheDocument());
+  });
+});

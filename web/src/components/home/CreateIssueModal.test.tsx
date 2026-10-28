@@ -279,3 +279,15 @@ describe("CreateIssueModal", () => {
     });
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("CreateIssueModal accessible names", () => {
+  it("the icon-only close button is named and closes", () => {
+    const onClose = vi.fn();
+    render(<CreateIssueModal onCreated={vi.fn()} onClose={onClose} />);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+});

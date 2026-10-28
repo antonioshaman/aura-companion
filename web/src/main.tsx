@@ -4,8 +4,11 @@ import App from "./App.js";
 import { initAnalytics } from "./analytics.js";
 import { AppErrorBoundary } from "./components/AppErrorBoundary.js";
 import "./index.css";
+import { applyIosInputZoomGuard } from "./utils/viewport.js";
 
 initAnalytics();
+
+applyIosInputZoomGuard();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

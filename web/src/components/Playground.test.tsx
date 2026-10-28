@@ -39,3 +39,16 @@ describe("Playground", () => {
     expect(screen.getByText("Hook success: lint (post_tool_use) (exit 0).")).toBeTruthy();
   });
 });
+
+// The rendered a11y scan of #/playground (2026-10-28) found unnamed switches in
+// the panel-settings mock and unlabelled textareas in the composer mocks.
+// Agents copy these mocks, so every switch and text field must carry a name.
+describe("Playground accessible names", () => {
+  it("every switch and text field has an accessible name", () => {
+    render(<Playground />);
+    const unnamed = [...screen.getAllByRole("switch"), ...screen.getAllByRole("textbox")]
+      .filter((el) => !(el.getAttribute("aria-label") || el.getAttribute("aria-labelledby") || el.getAttribute("title") || (el.id && document.querySelector(`label[for="${el.id}"]`)) || el.closest("label")))
+      .map((el) => el.outerHTML.slice(0, 80));
+    expect(unnamed).toEqual([]);
+  });
+});
