@@ -2,24 +2,69 @@ name: Release
 
 # release-please tracks conventional commits on main, opens/maintains a
 # release PR, and on merge cuts the GitHub release + tag
-# (aura-companion-vX.Y.Z) and bumps web/package.json. That release IS the
-# deliverable: this fork deploys by git-pull + bun build on the VPS (see
-# docs/deploy/vps-systemd.mdx), NOT via npm or a container registry. There
-# is deliberately no npm-publish / Docker-push step here.
+# (aura-companion-vX.Y.Z) and bumps web/package.json. The VPS still deploys by
+# git-pull + bun build (docs/deploy/vps-systemd.mdx); npm publish stays a manual
+# step from the tag. When a release is cut, the `image` job builds the server
+# image (repo-root Dockerfile, built from the npm tarball), smoke-tests it with
+# the same script as CI, and only then pushes it to GHCR (owner decision B5-3A).
+#
+# Supply chain: every action is pinned by commit SHA; the token gets no
+# permissions by default and each job asks only for what it needs. The image
+# push uses the docker CLI with the job's GITHUB_TOKEN — no third-party action.
 
 on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+      VERSION: ${{ needs.release-please.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Build the server image from the release tag
+        run: docker build -t aura-companion:release .
+
+      - name: Smoke the image before it is published
+        run: bash scripts/docker-smoke.sh aura-companion:release
+
+      - name: Push to GHCR (version + latest)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aura-companion"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for t in "$VERSION" latest; do
+            docker tag aura-companion:release "$image:$t"
+            docker push "$image:$t"
+          done
+          docker logout ghcr.io
