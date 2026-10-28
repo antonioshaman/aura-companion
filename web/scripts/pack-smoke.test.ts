@@ -8,7 +8,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { ManifestEntry, SkillManifest } from "../server/skill-manifest.js";
-import { expectedClaudeSkills, judgeRun, SEEDED_SKILL, type RunObservation } from "./pack-smoke.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { expectedClaudeSkills, judgeRun, SEEDED_SKILL, smokeEnv, type RunObservation } from "./pack-smoke.js";
 
 const e = (name: string, over: Partial<ManifestEntry> = {}): ManifestEntry => ({
   name, frontmatterName: null, kind: "skill", source: { type: "first-party", repo: "o/a" },
@@ -81,3 +85,23 @@ describe("judgeRun", () => {
     expect(judgeRun(obs("off", { argv: argvWith })).join()).toMatch(/toolkit is off but the spawn argv has --plugin-dir/);
   });
 });
+
+// Every smoke boot is a fresh HOME, so a fresh instanceId: with telemetry on
+// (the opt-out default since PR #146) each boot registered as a new install on
+// the global stats Worker. On 2026-10-28, 68 of 78 "installs" were smoke boots.
+describe("smoke boots never report to the stats Worker", () => {
+  it("pack-smoke's server env turns telemetry off", () => {
+    const env = smokeEnv({ home: "/h", path: "/bin", tmpdir: "/t", port: 1, token: "t" });
+    expect(env.COMPANION_TELEMETRY).toBe("0");
+    expect(env.HOME).toBe("/h");
+  });
+
+  it("docker-smoke starts every container with COMPANION_TELEMETRY=0", () => {
+    const repoRoot = join(fileURLToPath(import.meta.url), "..", "..", "..");
+    const sh = readFileSync(join(repoRoot, "scripts", "docker-smoke.sh"), "utf-8");
+    const boots = sh.split("\n").filter((l) => /^\s*docker run\b/.test(l) && !/--entrypoint/.test(l));
+    expect(boots.length).toBeGreaterThan(0);
+    for (const l of boots) expect(l).toMatch(/-e COMPANION_TELEMETRY=0\b/);
+  });
+});
+
