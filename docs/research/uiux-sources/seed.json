@@ -45,7 +45,8 @@
         "expert:friedman",
         "skill:audit",
         "skill:critique",
-        "skill:distill"
+        "skill:distill",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -81,7 +82,8 @@
         "council-review:a11y-scan",
         "aura-check",
         "skill:animate",
-        "skill:harden"
+        "skill:harden",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -242,7 +244,8 @@
       "receivers": [
         "expert:saarinen",
         "skill:normalize",
-        "skill:extract"
+        "skill:extract",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -253,7 +256,8 @@
       "takeaway": "12-step scale with a stated job per step (backgrounds, borders, solid, text).",
       "receivers": [
         "expert:saarinen",
-        "skill:colorize"
+        "skill:colorize",
+        "skill:aura-uiux"
       ],
       "textUrl": "https://www.radix-ui.com/colors/docs/palette-composition/understanding-the-scale"
     },
@@ -289,7 +293,8 @@
         "expert:saarinen",
         "expert:friedman",
         "skill:onboard",
-        "skill:harden"
+        "skill:harden",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -310,7 +315,8 @@
       "takeaway": "CSS-variable theme contract common in agent-built React UIs.",
       "receivers": [
         "skill:frontend-design",
-        "skill:normalize"
+        "skill:normalize",
+        "skill:aura-uiux"
       ],
       "textUrl": "https://ui.shadcn.com/docs/theming"
     },
@@ -321,7 +327,8 @@
       "repo": "style-dictionary/style-dictionary",
       "takeaway": "Token build pipeline reference for multi-platform output.",
       "receivers": [
-        "skill:extract"
+        "skill:extract",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -452,7 +459,8 @@
         "expert:friedman",
         "expert:saarinen",
         "expert:watson",
-        "skill:adapt"
+        "skill:adapt",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -467,7 +475,8 @@
         "expert:saarinen",
         "expert:watson",
         "skill:adapt",
-        "skill:animate"
+        "skill:animate",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -478,7 +487,8 @@
       "takeaway": "Component-level accessibility defaults on Android.",
       "receivers": [
         "expert:watson",
-        "skill:adapt"
+        "skill:adapt",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -493,7 +503,8 @@
         "expert:saarinen",
         "expert:watson",
         "aura-check",
-        "skill:adapt"
+        "skill:adapt",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -503,7 +514,8 @@
       "repo": "Telegram-Mini-Apps/tma.js",
       "takeaway": "Typed wrappers that show which platform events a Mini App must handle.",
       "receivers": [
-        "expert:friedman"
+        "expert:friedman",
+        "skill:aura-uiux"
       ],
       "textUrl": "https://docs.telegram-mini-apps.com/platform/viewport"
     },
@@ -569,7 +581,8 @@
       "receivers": [
         "expert:friedman",
         "skill:audit",
-        "skill:critique"
+        "skill:critique",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -582,7 +595,8 @@
       "receivers": [
         "expert:friedman",
         "skill:audit",
-        "skill:critique"
+        "skill:critique",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -594,7 +608,8 @@
       "takeaway": "Planning research rounds, task success measurement and testing with users who have access needs.",
       "receivers": [
         "expert:friedman",
-        "skill:audit"
+        "skill:audit",
+        "skill:aura-uiux"
       ]
     },
     {
@@ -618,7 +633,8 @@
       "receivers": [
         "expert:friedman",
         "expert:saarinen",
-        "skill:adapt"
+        "skill:adapt",
+        "skill:aura-uiux"
       ]
     },
     {
