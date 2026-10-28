@@ -80,7 +80,7 @@ export function LinearAgentEditor({
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <button
+            <button aria-label="Back to agents"
               onClick={onCancel}
               className="p-1.5 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
             >

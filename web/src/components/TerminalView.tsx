@@ -198,7 +198,7 @@ export function TerminalView({
             </span>
           </div>
           {onClose && (
-            <button
+            <button aria-label="Close terminal"
               onClick={onClose}
               className="w-6 h-6 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer shrink-0"
             >

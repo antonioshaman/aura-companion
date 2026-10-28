@@ -81,8 +81,6 @@ function renderEditor(formOverrides: Partial<AgentFormData> = {}, propsOverrides
 const axeRules = {
   rules: {
     label: { enabled: false },
-    "heading-order": { enabled: false },
-    "button-name": { enabled: false },
     "select-name": { enabled: false },
   },
 };
@@ -385,5 +383,23 @@ describe("AgentEditor", () => {
     // The connection picker should not appear when linearEnabled is false.
     renderEditor({ linearEnabled: false });
     expect(screen.queryByTestId("linear-connection-picker")).not.toBeInTheDocument();
+  });
+});
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("AgentEditor accessible names", () => {
+  it("the icon-only back button is named and cancels", () => {
+    const { onCancel } = renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("each allowed-tool chip has a named remove button", () => {
+    const { setForm } = renderEditor({ allowedTools: ["Bash", "Read"] });
+    fireEvent.click(screen.getByRole("button", { name: "Remove Bash" }));
+    expect(setForm).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Remove Read" })).toBeInTheDocument();
   });
 });

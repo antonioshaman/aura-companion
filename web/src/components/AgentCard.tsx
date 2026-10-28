@@ -108,7 +108,7 @@ export function AgentCard({
           {/* Name + badges + description */}
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <h3 className="text-sm font-medium text-cc-fg truncate">{agent.name}</h3>
+              <h2 className="text-sm font-medium text-cc-fg truncate">{agent.name}</h2>
               <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-cc-hover text-cc-muted font-medium leading-none">
                 {agent.backendType === "codex" ? "Codex" : "Claude"}
               </span>

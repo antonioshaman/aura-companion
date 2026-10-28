@@ -262,12 +262,7 @@ describe("AgentCard", () => {
       agent: makeAgent({ enabled: true, name: "Accessible Agent" }),
     })} />);
 
-    const results = await axe(container, {
-      rules: {
-        // Agent card uses h3 directly (heading-order skip)
-        "heading-order": { enabled: false },
-      },
-    });
+    const results = await axe(container);
     expect(results).toHaveNoViolations();
   });
 
@@ -278,11 +273,7 @@ describe("AgentCard", () => {
       agent: makeAgent({ enabled: false, name: "Disabled Agent" }),
     })} />);
 
-    const results = await axe(container, {
-      rules: {
-        "heading-order": { enabled: false },
-      },
-    });
+    const results = await axe(container);
     expect(results).toHaveNoViolations();
   });
 });
@@ -364,5 +355,15 @@ describe("getWebhookUrl", () => {
     });
     const url = getWebhookUrl(agent, "https://example.com");
     expect(url).toContain("agent%20with%20spaces");
+  });
+});
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("AgentCard heading level", () => {
+  it("the agent name is an h2, so the Agents page (h1) does not skip a level", () => {
+    render(<AgentCard {...makeProps({ agent: makeAgent({ name: "Level Agent" }) })} />);
+    expect(screen.getByRole("heading", { level: 2, name: "Level Agent" })).toBeInTheDocument();
   });
 });

@@ -98,7 +98,7 @@ export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, on
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-cc-fg">Create Linear Issue</h3>
-          <button
+          <button aria-label="Close"
             type="button"
             onClick={onClose}
             className="inline-flex h-6 w-6 items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"

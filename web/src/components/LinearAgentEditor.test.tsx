@@ -466,18 +466,25 @@ describe("LinearAgentEditor", () => {
 
   it("passes axe accessibility checks", async () => {
     // Validates the component meets WCAG accessibility standards.
-    // The "button-name" rule is disabled because the icon-only back button
-    // in the header lacks an aria-label (known pre-existing issue, same as AgentsPage).
+    // No axe rule is switched off: the icon-only back button carries an aria-label.
     const { axe } = await import("vitest-axe");
     const props = makeProps({
       form: { name: "My Agent", prompt: "Do something" },
     });
     const { container } = render(<LinearAgentEditor {...props} />);
-    const results = await axe(container, {
-      rules: {
-        "button-name": { enabled: false },
-      },
-    });
+    const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("LinearAgentEditor accessible names", () => {
+  it("the icon-only back button is named and cancels", () => {
+    const onCancel = vi.fn();
+    render(<LinearAgentEditor {...makeProps({ onCancel })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });

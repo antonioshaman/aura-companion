@@ -289,7 +289,7 @@ export function AgentEditor({
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <button
+            <button aria-label="Back to agents"
               onClick={onCancel}
               className="p-1.5 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
             >
@@ -911,7 +911,7 @@ export function AgentEditor({
                         {form.allowedTools.map((tool) => (
                           <span key={tool} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-mono-code rounded-lg bg-cc-hover text-cc-fg">
                             {tool}
-                            <button
+                            <button aria-label={`Remove ${tool}`}
                               onClick={() => removeAllowedTool(tool)}
                               className="text-cc-muted hover:text-cc-error transition-colors cursor-pointer"
                             >

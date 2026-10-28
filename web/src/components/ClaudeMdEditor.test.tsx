@@ -89,17 +89,14 @@ describe("ClaudeMdEditor", () => {
   // ─── 2. Axe accessibility ─────────────────────────────────────────────────
 
   it("passes axe accessibility checks", async () => {
-    // The close button in the component uses an SVG icon without aria-label,
-    // which triggers axe's button-name rule. We disable that specific rule
-    // here since it's a known limitation of the component's current markup.
+    // No axe rule is switched off: the icon-only close button carries an
+    // aria-label (it used to need a button-name exclusion).
     const { axe } = await import("vitest-axe");
     const { container } = render(<ClaudeMdEditor {...defaultProps} />);
     await waitFor(() => {
       expect(screen.getByText("Files")).toBeInTheDocument();
     });
-    const results = await axe(container, {
-      rules: { "button-name": { enabled: false } },
-    });
+    const results = await axe(container);
     expect(results).toHaveNoViolations();
   });
 
@@ -595,5 +592,18 @@ describe("ClaudeMdEditor", () => {
       (el) => el.tagName === "SPAN" && el.classList.contains("text-cc-muted"),
     );
     expect(pathBarSpan).toBeTruthy();
+  });
+});
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("ClaudeMdEditor accessible names", () => {
+  it("the icon-only close button is named and closes", async () => {
+    const onClose = vi.fn();
+    render(<ClaudeMdEditor {...defaultProps} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText("Files")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
   });
 });

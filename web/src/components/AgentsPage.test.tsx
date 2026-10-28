@@ -862,18 +862,13 @@ describe("AgentsPage", () => {
   // - Hidden file input for Import lacks an explicit label (the visible "Import"
   //   button triggers it programmatically, so it's functionally accessible but
   //   axe flags the hidden <input type="file"> without a <label>).
-  // - Agent card uses <h3> directly (heading-order skip from page <h1>).
-  // - Editor has icon-only back button without aria-label, and select elements
-  //   whose visible <label> siblings are not associated via htmlFor/id.
+  // - Editor select elements whose visible <label> siblings are not associated
+  //   via htmlFor/id.
   // These are excluded so the axe scan still catches any *new* violations.
   const axeRules = {
     rules: {
       // Hidden file input has no explicit label; "Import" button acts as trigger
       label: { enabled: false },
-      // Agent cards skip heading levels (h1 -> h3)
-      "heading-order": { enabled: false },
-      // Icon-only back button in editor lacks aria-label
-      "button-name": { enabled: false },
       // Select elements in editor have visible labels but not programmatically linked
       "select-name": { enabled: false },
     },

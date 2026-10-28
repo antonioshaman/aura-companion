@@ -316,3 +316,41 @@ describe("RunsPage", () => {
     expect(select).toBeInTheDocument();
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("RunsPage keyboard selection", () => {
+  it("a run row is focusable and Enter / Space toggle its details", async () => {
+    mockApi.listExecutions.mockResolvedValue({ executions: [makeExecution({ sessionId: "kbd" })], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+    render(<RunsPage />);
+    const cell = await waitFor(() => {
+      const c = screen.getAllByText("Test Agent").find((el) => el.closest("td") !== null);
+      expect(c).toBeTruthy();
+      return c!;
+    });
+    const row = cell.closest("tr")!;
+    expect(row).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(row, { key: "Enter" });
+    await waitFor(() => expect(screen.getByText("Execution Details")).toBeInTheDocument());
+    fireEvent.keyDown(row, { key: " " });
+    await waitFor(() => expect(screen.queryByText("Execution Details")).not.toBeInTheDocument());
+  });
+});
+
+// Observer STOP (checkpoint council-implement-191): Enter on the row's nested
+// "Open" link bubbled to the <tr>, whose handler called preventDefault() and
+// toggled the details instead of following the link.
+describe("RunsPage row keys do not hijack nested controls", () => {
+  it("Enter on the Open link is not prevented and does not toggle the details", async () => {
+    mockApi.listExecutions.mockResolvedValue({ executions: [makeExecution({ sessionId: "nested" })], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+    render(<RunsPage />);
+    const link = await screen.findByRole("link", { name: "Open" });
+    const notPrevented = fireEvent.keyDown(link, { key: "Enter" });
+    expect(notPrevented).toBe(true);
+    expect(screen.queryByText("Execution Details")).not.toBeInTheDocument();
+  });
+});
+

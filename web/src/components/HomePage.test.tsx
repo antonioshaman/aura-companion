@@ -2234,3 +2234,18 @@ describe("HomePage", () => {
     });
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("HomePage accessible names", () => {
+  it("an attached image has a named remove button that removes it", async () => {
+    const { container } = render(<HomePage />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    await act(async () => { fireEvent.change(input, { target: { files: [file] } }); });
+    const remove = await screen.findByRole("button", { name: "Remove shot.png" });
+    fireEvent.click(remove);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull());
+  });
+});

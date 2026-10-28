@@ -1902,12 +1902,12 @@ export function Playground() {
                 </div>
                 {/* Comment input */}
                 <div className="px-4 py-2 border-t border-cc-border flex items-center gap-1.5">
-                  <input
+                  <input aria-label="Add a comment"
                     type="text"
                     placeholder="Add a comment..."
                     className="flex-1 text-[11px] bg-transparent border border-cc-border rounded-md px-2 py-1.5 text-cc-fg placeholder:text-cc-muted focus:outline-none focus:border-cc-primary/50"
                   />
-                  <button className="flex items-center justify-center w-6 h-6 rounded text-cc-primary cursor-pointer">
+                  <button aria-label="Send comment" className="flex items-center justify-center w-6 h-6 rounded text-cc-primary cursor-pointer">
                     <svg
                       viewBox="0 0 16 16"
                       fill="currentColor"
@@ -2040,7 +2040,7 @@ export function Playground() {
                   <span className="text-sm font-semibold text-cc-fg tracking-tight">
                     Panel Settings
                   </span>
-                  <button className="flex items-center justify-center w-6 h-6 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer">
+                  <button aria-label="Close panel settings" className="flex items-center justify-center w-6 h-6 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer">
                     <svg
                       viewBox="0 0 16 16"
                       fill="none"
@@ -2099,7 +2099,7 @@ export function Playground() {
                       }`}
                     >
                       <div className="flex flex-col gap-0.5 shrink-0">
-                        <button
+                        <button aria-label="Move up"
                           disabled={i === 0}
                           className="w-5 h-4 flex items-center justify-center text-cc-muted hover:text-cc-fg disabled:opacity-20 disabled:cursor-not-allowed cursor-pointer transition-colors"
                         >
@@ -2111,7 +2111,7 @@ export function Playground() {
                             <path d="M8 4l4 4H4l4-4z" />
                           </svg>
                         </button>
-                        <button
+                        <button aria-label="Move down"
                           disabled={i === arr.length - 1}
                           className="w-5 h-4 flex items-center justify-center text-cc-muted hover:text-cc-fg disabled:opacity-20 disabled:cursor-not-allowed cursor-pointer transition-colors"
                         >
@@ -2137,6 +2137,7 @@ export function Playground() {
                           s.enabled ? "bg-cc-primary" : "bg-cc-hover"
                         }`}
                         role="switch"
+                        aria-label={s.label}
                         aria-checked={s.enabled}
                       >
                         <span
@@ -2303,7 +2304,7 @@ export function Playground() {
                       </svg>
                       <span>code</span>
                     </div>
-                    <textarea
+                    <textarea aria-label="Message input"
                       readOnly
                       value="Can you refactor the auth module to use JWT?"
                       rows={1}
@@ -2372,7 +2373,7 @@ export function Playground() {
                     </div>
                   </div>
                   <div className="flex items-end gap-2 px-2.5 py-2">
-                    <textarea
+                    <textarea aria-label="Message input"
                       readOnly
                       value="@rev"
                       rows={1}
@@ -2412,7 +2413,7 @@ export function Playground() {
                       </svg>
                       <span>plan</span>
                     </div>
-                    <textarea
+                    <textarea aria-label="Message input"
                       readOnly
                       value=""
                       placeholder="Type a message... (/ + @)"
@@ -2485,7 +2486,7 @@ export function Playground() {
                       </svg>
                       <span>plan</span>
                     </div>
-                    <textarea
+                    <textarea aria-label="Message input"
                       readOnly
                       value="/council-plan-aura"
                       rows={1}
@@ -2543,7 +2544,7 @@ export function Playground() {
                       </svg>
                       <span>code</span>
                     </div>
-                    <textarea
+                    <textarea aria-label="Message input"
                       readOnly
                       value=""
                       placeholder="Type a message... (/ for commands)"

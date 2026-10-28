@@ -228,3 +228,15 @@ describe("DiffPanel", () => {
     });
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("DiffPanel accessible names", () => {
+  it("the file-list close button is named", async () => {
+    mockApi.getChangedFiles.mockResolvedValue({ files: [{ path: "/repo/src/app.ts", status: "M" }] });
+    render(<DiffPanel sessionId="s1" />);
+    await waitFor(() => expect(screen.getByText("Changed (1)")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Close file list" })).toBeInTheDocument();
+  });
+});

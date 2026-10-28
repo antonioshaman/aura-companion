@@ -1252,3 +1252,17 @@ describe("Composer cache-rewrite hint", () => {
     expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull();
   });
 });
+
+// ─── Accessible names and keyboard paths (aura-check uiux baseline, 2026-10-28) ──
+// These controls had no accessible name or no keyboard path; the strict uiux
+// gate listed them as true problems. Each test pins the fix by role + name.
+describe("Composer focus indicator", () => {
+  it("the input container shows focus at every width (the textarea removes its own outline)", () => {
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.className).toContain("outline-none");
+    const box = textarea.closest("div.relative") as HTMLElement;
+    expect(box.className).toMatch(/(^|\s)focus-within:border-cc-primary\/70(\s|$)/);
+    expect(box.className).not.toContain("sm:focus-within:border-cc-primary/25");
+  });
+});

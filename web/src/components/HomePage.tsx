@@ -1072,7 +1072,7 @@ export function HomePage() {
                     alt={img.name}
                     className="w-10 h-10 rounded-lg object-cover border border-cc-border"
                   />
-                  <button
+                  <button aria-label={`Remove ${img.name}`}
                     onClick={() => removeImage(i)}
                     className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer"
                   >
