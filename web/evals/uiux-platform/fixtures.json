@@ -1,0 +1,46 @@
+{
+  "_doc": "AC3.3 behavioural eval (PLAN Task 13). Each prompt names the target the way a user would and never names a platform rule. tma and native must produce their platform markers; web is the paired control task and must NOT produce them. Markers are graded by grade.ts; the live run (uiux-platform-runner.ts) stays out of CI.",
+  "fixtures": [
+    {
+      "id": "tma-checkout",
+      "kind": "platform",
+      "prompt": "Build the checkout screen of our Telegram Mini App in React + TypeScript with plain CSS. It lists the cart items, has a delivery address form and a Pay button, and the user can go back to the cart. Reply with the complete code in one message; do not create or edit any files.",
+      "markers": {
+        "safe-area": "safe[-_ ]?area|contentSafeAreaInset|--tg-(content-)?safe-area",
+        "back-button": "BackButton",
+        "main-button": "MainButton|BottomButton",
+        "theme-params": "themeParams|--tg-theme-",
+        "touch-target-44-48": "(min-?(height|width)|height|minHeight|minWidth)\\s*:\\s*['\"]?(4[4-9]|5\\d)(px|pt|dp)?\\b"
+      },
+      "antiMarkers": {
+        "browser-confirm": "\\bwindow\\.(confirm|alert)\\s*\\(",
+        "bare-100vh": "(height|min-height|max-height|minHeight|maxHeight)\\s*:\\s*['\"]?100vh\\b"
+      }
+    },
+    {
+      "id": "native-settings",
+      "kind": "platform",
+      "prompt": "Build the account settings screen of our React Native app, which ships on iOS and Android. It shows a profile row, a list of settings rows and a Delete account action that must be confirmed. Reply with the complete code in one message; do not create or edit any files.",
+      "markers": {
+        "safe-area": "SafeAreaView|useSafeAreaInsets|safe[-_ ]?area",
+        "dynamic-type": "allowFontScaling|maxFontSizeMultiplier|fontScale|Dynamic Type|adjustsFontForContentSizeCategory",
+        "touch-target-44-48": "(minHeight|minWidth|height|hitSlop)\\s*[:=]\\s*\\{?\\s*(4[4-9]|5\\d)\\b",
+        "native-confirm": "Alert\\.alert|ActionSheetIOS|showActionSheetWithOptions|BottomSheet"
+      },
+      "antiMarkers": {
+        "browser-confirm": "\\bwindow\\.(confirm|alert)\\s*\\(",
+        "web-hover": ":hover|onMouseEnter"
+      }
+    },
+    {
+      "id": "web-checkout",
+      "kind": "web-control",
+      "prompt": "Build the checkout page of our web shop in React + TypeScript with plain CSS. It lists the cart items, has a delivery address form and a Pay button, and the user can go back to the cart. Reply with the complete code in one message; do not create or edit any files.",
+      "markers": {},
+      "antiMarkers": {
+        "telegram-api-leak": "Telegram\\.WebApp|BackButton|MainButton|BottomButton|themeParams|--tg-",
+        "native-api-leak": "SafeAreaView|ActionSheetIOS|Dynamic Type"
+      }
+    }
+  ]
+}
