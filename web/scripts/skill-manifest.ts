@@ -18,8 +18,8 @@
 // `generate` writes the manifest (tmp + rename); `check` fails when the committed
 // manifest differs from what the tree produces, or on any structural error.
 
-import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, statSync, writeSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import {
   filesDigest,
@@ -111,6 +111,8 @@ export interface ManifestInput {
   trees: Map<string, Map<string, Buffer>>;
   /** Text of the repo licence file named by pack.firstParty.licenceFile (null if missing). */
   repoLicenceText: string | null;
+  /** Generated cache dirs found inside entries (`<entry>/<path>`); each is an error. */
+  skipped?: string[];
 }
 
 // ─── Pure core ──────────────────────────────────────────────────────────────
@@ -128,10 +130,51 @@ function firstPartyLicence(pack: PackDecl, text: string | null): { verdict: Mani
   return { verdict: reasons.length ? "not-shippable" : "shippable", reasons };
 }
 
+const PACK_KEYS = new Set(["_doc", "schemaVersion", "firstParty", "entries"]);
+const ENTRY_KEYS = new Set(["name", "kind", "origin", "compat"]);
+const COMPAT_KEYS = new Set(["claude", "codex", "note"]);
+
+/**
+ * Strict shape check of pack.json. It is hand-maintained and was trusted as typed:
+ * an origin typo made a vendored dir first-party (no vendor-lock checks), and a
+ * string "false" compat flag is truthy (#431 review, P2). Anything off-shape is a
+ * structural error, so the manifest is not written.
+ */
+export function packDeclErrors(raw: unknown): string[] {
+  const errs: string[] = [];
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObj(raw)) return ["pack.json: not an object"];
+  for (const k of Object.keys(raw)) if (!PACK_KEYS.has(k)) errs.push(`pack.json: unknown key "${k}"`);
+  if (raw.schemaVersion !== 1) errs.push("pack.json: schemaVersion must be 1");
+  const fp = raw.firstParty;
+  if (!isObj(fp)) errs.push("pack.json: firstParty must be an object");
+  else for (const k of ["repo", "licence", "licenceFile"]) if (typeof fp[k] !== "string") errs.push(`pack.json: firstParty.${k} must be a string`);
+  if (!Array.isArray(raw.entries)) return [...errs, "pack.json: entries must be an array"];
+  raw.entries.forEach((e, i) => {
+    if (!isObj(e) || typeof e.name !== "string") {
+      errs.push(`pack.json: entries[${i}] must be an object with a string name`);
+      return;
+    }
+    const n = e.name;
+    for (const k of Object.keys(e)) if (!ENTRY_KEYS.has(k)) errs.push(`${n}: unknown key "${k}"`);
+    if (e.kind !== "skill" && e.kind !== "catalog") errs.push(`${n}: kind must be "skill" or "catalog"`);
+    if (e.origin !== "first-party" && e.origin !== "vendored") errs.push(`${n}: origin must be "first-party" or "vendored"`);
+    if (!isObj(e.compat)) {
+      errs.push(`${n}: compat must be an object`);
+      return;
+    }
+    for (const k of Object.keys(e.compat)) if (!COMPAT_KEYS.has(k)) errs.push(`${n}: unknown compat key "${k}"`);
+    for (const k of ["claude", "codex"]) if (typeof e.compat[k] !== "boolean") errs.push(`${n}: compat.${k} must be a boolean`);
+    if (e.compat.note !== undefined && typeof e.compat.note !== "string") errs.push(`${n}: compat.note must be a string`);
+  });
+  return errs;
+}
+
 /** Build the manifest. `errors` are structural (the manifest cannot be trusted); blocked entries are not errors. */
 export function buildManifest(input: ManifestInput): { manifest: SkillManifest; errors: string[]; excluded: ExcludedFile[] } {
   const { pack, lock, trees } = input;
-  const errors: string[] = [];
+  const errors: string[] = packDeclErrors(pack);
+  for (const d of input.skipped ?? []) errors.push(`${d}: generated cache dir inside packs/skills — delete it (it would never be hashed)`);
   const excluded: ExcludedFile[] = [];
   const declared = new Set(pack.entries.map((e) => e.name));
   const locked = new Map(lock.skills.map((s) => [s.name, s]));
@@ -226,7 +269,7 @@ export function readInput(root = PACK_SKILLS_DIR): { input: ManifestInput; skipp
   } catch {
     repoLicenceText = null;
   }
-  return { input: { pack, lock, rootDirs, rootFiles, trees, repoLicenceText }, skipped };
+  return { input: { pack, lock, rootDirs, rootFiles, trees, repoLicenceText, skipped }, skipped };
 }
 
 function report(m: SkillManifest, excluded: ExcludedFile[]): void {
@@ -241,8 +284,7 @@ function report(m: SkillManifest, excluded: ExcludedFile[]): void {
 }
 
 function build(): { m: SkillManifest; excluded: ExcludedFile[] } | null {
-  const { input, skipped } = readInput();
-  for (const d of skipped) console.warn(`not hashed (generated cache dir): ${d}`);
+  const { input } = readInput();
   const { manifest, errors, excluded } = buildManifest(input);
   if (errors.length) {
     console.error(errors.join("\n"));
@@ -251,13 +293,30 @@ function build(): { m: SkillManifest; excluded: ExcludedFile[] } | null {
   return { m: manifest, excluded };
 }
 
+/** tmp + fsync + rename + fsync(dir): a crash leaves the old manifest or the new one, never a torn file. */
+export function writeFileDurable(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  const fd = openSync(tmp, "w", 0o644);
+  try {
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
+  const dfd = openSync(dirname(path), "r");
+  try {
+    fsyncSync(dfd);
+  } finally {
+    closeSync(dfd);
+  }
+}
+
 function runGenerate(): number {
   const b = build();
   if (!b) return 1;
   const { m } = b;
-  const tmp = `${MANIFEST_FILE}.tmp-${process.pid}`;
-  writeFileSync(tmp, serialiseManifest(m));
-  renameSync(tmp, MANIFEST_FILE);
+  writeFileDurable(MANIFEST_FILE, serialiseManifest(m));
   report(m, b.excluded);
   return 0;
 }
