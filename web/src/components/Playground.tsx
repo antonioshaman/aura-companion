@@ -48,6 +48,9 @@ import {
 } from "./council/index.js";
 import type { ConvergenceNotCountedReason, GroupRecord, ObserverFinding } from "../types.js";
 import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
+import { UiuxToolkitSettings } from "./UiuxToolkitSettings.js";
+import { ToolkitStatusPill } from "./ToolkitStatusPill.js";
+import type { ToolkitView } from "../api.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -3681,6 +3684,18 @@ function CouncilModeSection() {
         <Card label="SecondReviewerSettings — Council second opinion picker (W15)">
           <SecondReviewerPlaygroundDemo />
         </Card>
+        <Card label="UiuxToolkitSettings — Settings row: skills per CLI, user override, Codex 'Requires Claude Code' (Task 8)">
+          <UiuxToolkitPlaygroundDemo />
+        </Card>
+        <Card label="UiuxToolkitSettings — not installed on this server">
+          <UiuxToolkitSettings enabled onEnabledChange={() => {}} view={{ installed: false, error: "no valid current.json", rows: [] }} />
+        </Card>
+        <Card label="ToolkitStatusPill — TopBar label when a session could not get the toolkit (Task 7)">
+          <div className="flex items-center gap-2 p-2">
+            <ToolkitStatusPill exposure={{ status: "unavailable", reason: "the installed Claude Code CLI does not support --plugin-dir" }} />
+            <ToolkitStatusPill exposure={{ status: "on", deliveryError: "version 0123456789abcdef: polish/SKILL.md differs" }} />
+          </div>
+        </Card>
         <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">
           <FindingsLog
             // Arrival order mimics the pre-fix readdir-ordered bootstrap:
@@ -5119,6 +5134,23 @@ function PlaygroundAiValidationToggle({ enabled }: { enabled: boolean }) {
       <span className="text-xs text-cc-muted">Click to toggle</span>
     </div>
   );
+}
+
+const PLAYGROUND_TOOLKIT_VIEW: ToolkitView = {
+  installed: true,
+  version: "0123456789abcdef",
+  rows: [
+    { name: "taste-skill", kind: "skill", claude: { name: "taste-skill", outcome: "provide", reasons: [] }, codex: { name: "taste-skill", outcome: "provide", reasons: [] } },
+    { name: "council-review-aura", kind: "skill", claude: { name: "council-review-aura", outcome: "skip-user-owns", reasons: ["the user's skill \"council-review-aura\" has this name"] }, codex: { name: "council-review-aura", outcome: "requires-claude", reasons: ["Dispatches experts through Claude Code's Task tool; not verified under Codex."] } },
+    { name: "_council-experts", kind: "catalog", claude: { name: "_council-experts", outcome: "disabled", reasons: ["reference data, not an invocable skill"] }, codex: { name: "_council-experts", outcome: "provide", reasons: [] } },
+    { name: "ui-ux-pro-max", kind: "skill", claude: { name: "ui-ux-pro-max", outcome: "blocked-by-gate", reasons: ["knownIssues: CLAUDE_PLUGIN_ROOT"] }, codex: { name: "ui-ux-pro-max", outcome: "blocked-by-gate", reasons: ["knownIssues: CLAUDE_PLUGIN_ROOT"] } },
+  ],
+};
+
+/** Task 8: the UI/UX toolkit row (controlled, local state only). */
+function UiuxToolkitPlaygroundDemo() {
+  const [enabled, setEnabled] = useState(true);
+  return <UiuxToolkitSettings enabled={enabled} onEnabledChange={setEnabled} view={PLAYGROUND_TOOLKIT_VIEW} />;
 }
 
 /** W15: interactive second-opinion picker (controlled, local state only). */

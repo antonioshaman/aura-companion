@@ -439,6 +439,8 @@ export interface SdkSessionInfo {
   sandboxSlug?: string;
   /** Git worktree the session runs in (set when Aura created/tracks one). */
   worktree?: SessionWorktreeInfo;
+  /** UI/UX toolkit exposure decided at the first spawn (server `skill-exposure.ts`). */
+  skillExposure?: { status: "on" | "off" | "unavailable"; reason?: string; deliveryError?: string };
 }
 
 export interface SessionWorktreeInfo {

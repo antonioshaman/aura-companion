@@ -42,6 +42,9 @@ const mockExistsSync = vi.hoisted(() => vi.fn((..._args: any[]) => false));
 const mockReadFileSync = vi.hoisted(() => vi.fn((..._args: any[]) => ""));
 const mockWriteFileSync = vi.hoisted(() => vi.fn());
 const isMockedPath = vi.hoisted(() => (path: string): boolean => {
+  // The toolkit-exposure tests (Task 7) need real `.claude-plugin` / `.claude/skills`
+  // dirs under their own fixture roots.
+  if (/\/(skill-pack|uiux-proj|claude-config)(\/|$)/.test(path)) return false;
   return path.includes(".claude") || path.startsWith("/tmp/worktrees/") || path.startsWith("/tmp/main-repo");
 });
 
@@ -278,6 +281,9 @@ beforeEach(() => {
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
   launcher.setStore(store);
+  // Never read the box's real ~/.companion/skill-pack: an installed pack would
+  // change every Claude argv below (--plugin-dir). Empty → "unavailable".
+  launcher.skillPackRoot = join(tempDir, "skill-pack");
   // index.ts wires this to WsBridge.handleCLIStdioOpen; the launcher refuses
   // to spawn a stdio child it cannot hand to an adapter.
   launcher.setStdioCliOpener(() => createStubClaudeAdapter() as unknown as ClaudeAdapter);
@@ -4097,7 +4103,7 @@ describe("resumeTranscriptExists", () => {
 // directive, the flags persist on SdkSessionInfo and survive relaunch, and
 // Codex (no per-tool deny flag) receives the directive as thread instructions.
 describe("layer flags at spawn (P4/C3)", () => {
-  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true, uiux: true } as const;
 
   function argvOf(call: number): string[] {
     return mockSpawn.mock.calls[call][0] as string[];
@@ -4337,7 +4343,7 @@ describe("claudeTransportMode", () => {
 // pinned snapshot. A deliberate change to the appended directive updates the
 // snapshot (`vitest -u`) and is reviewed as a cache-prefix change.
 describe("prompt-cache prefix stability of the claude spawn argv", () => {
-  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true, uiux: true } as const;
 
   /** Replace prompt bodies with a short content hash so the snapshot stays readable. */
   async function render(argv: string[]): Promise<string[]> {
@@ -4545,5 +4551,202 @@ describe("W2 boot resume candidates", () => {
     next.setStore(store);
     next.restoreFromDisk();
     expect(next.takeBootResumeCandidates()).toEqual(["live", "crashed-keepalive-pending"]);
+  });
+});
+
+// PLAN Task 7 — spawn-time exposure of the shipped UI/UX toolkit. Claude gets a
+// session-only plugin (`--plugin-dir`), never a write into ~/.claude; Codex gets
+// marked copies in its Aura-managed CODEX_HOME. The decision is made at the first
+// spawn, persisted on the session and reused by relaunch (EC-33: a pack upgrade
+// never changes a running conversation).
+describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true, uiux: true } as const;
+
+  /** Install a two-skill pack (one Claude-only) into the launcher's pack root. */
+  async function installFixturePack(): Promise<string> {
+    const { hashTree, filesDigest } = await import("./skill-manifest.js");
+    const { installPack } = await import("./skill-pack.js");
+    const src = join(tempDir, "pack-src");
+    const entries = ["polish", "council-plan"].map((name) => {
+      const files = { "SKILL.md": `---\nname: ${name}\n---\nbody\n` };
+      mkdirSync(join(src, name), { recursive: true });
+      writeFileSync(join(src, name, "SKILL.md"), files["SKILL.md"]);
+      const hashes = hashTree(new Map(Object.entries(files).map(([k, v]) => [k, Buffer.from(v)])));
+      return {
+        name,
+        frontmatterName: null,
+        kind: "skill" as const,
+        source: { type: "first-party" as const, repo: "antonioshaman/aura-companion" },
+        licence: { spdx: "MIT", verdict: "shippable" as const },
+        compat: name === "council-plan" ? { claude: true, codex: false, note: "Task tool" } : { claude: true, codex: true },
+        ship: { status: "ship" as const, reasons: [] },
+        digest: filesDigest(hashes),
+        files: hashes,
+      };
+    });
+    return installPack({ sourceDir: src, manifest: { entries }, root: launcher.skillPackRoot }).version;
+  }
+  const argvOf = (call: number) => mockSpawn.mock.calls[call][0] as string[];
+  const envOf = (call: number) => (mockSpawn.mock.calls[call][1] as { env: Record<string, string | undefined> }).env;
+  const pluginDirOf = (argv: string[]) => (argv.includes("--plugin-dir") ? argv[argv.indexOf("--plugin-dir") + 1] : undefined);
+
+  // The box's real ~/.claude/skills holds same-named user skills; isolate it.
+  const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  beforeEach(() => {
+    process.env.CLAUDE_CONFIG_DIR = join(tempDir, "claude-config");
+  });
+  afterEach(() => {
+    if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    spawnSyncChmod(tempDir);
+  });
+  /** The pack tree is read-only on purpose; make it removable for the outer cleanup. */
+  function spawnSyncChmod(dir: string) {
+    require("node:child_process").spawnSync("chmod", ["-R", "u+w", dir]);
+  }
+
+  it("Claude: passes --plugin-dir with the provided skills, sets PYTHONDONTWRITEBYTECODE, persists the decision", async () => {
+    const version = await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    const info = launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    const dir = pluginDirOf(argvOf(0));
+    expect(dir).toBeDefined();
+    expect(readFileSync(join(dir!, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
+    expect(envOf(0).PYTHONDONTWRITEBYTECODE).toBe("1");
+    expect(info.skillExposure).toMatchObject({ backend: "claude", status: "on", version, pluginDir: dir });
+  });
+
+  it("Claude: no pack installed → no --plugin-dir, labelled unavailable, CLI never probed", () => {
+    const probe = vi.fn(() => true);
+    launcher.probeClaudePluginDir = probe;
+    const info = launcher.launch({ cwd: tempDir });
+    expect(argvOf(0)).not.toContain("--plugin-dir");
+    expect(envOf(0).PYTHONDONTWRITEBYTECODE).toBeUndefined();
+    expect(info.skillExposure).toMatchObject({ status: "unavailable" });
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("Claude: a CLI without --plugin-dir → unavailable with a reason, argv unchanged", async () => {
+    await installFixturePack();
+    launcher.probeClaudePluginDir = () => false;
+    const info = launcher.launch({ cwd: tempDir });
+    expect(argvOf(0)).not.toContain("--plugin-dir");
+    expect(info.skillExposure?.status).toBe("unavailable");
+    expect(info.skillExposure?.reason).toMatch(/--plugin-dir/);
+  });
+
+  it("Claude: uiux layer off → toolkit off, no --plugin-dir (AC2.5)", async () => {
+    await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    const info = launcher.launch({ cwd: tempDir, layers: { ...ALL_ON, uiux: false } });
+    expect(argvOf(0)).not.toContain("--plugin-dir");
+    expect(info.skillExposure?.status).toBe("off");
+  });
+
+  it("Claude: the user's ~/.claude skill and a project skill with the same name win, byte-identical (AC2.3)", async () => {
+    await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    const proj = join(tempDir, "uiux-proj");
+    mkdirSync(join(proj, ".claude", "skills", "polish"), { recursive: true });
+    writeFileSync(join(proj, ".claude", "skills", "polish", "SKILL.md"), "mine\n");
+    const info = launcher.launch({ cwd: proj });
+    const dir = pluginDirOf(argvOf(0))!;
+    expect(existsSync(join(dir, "skills", "polish"))).toBe(false);
+    expect(existsSync(join(dir, "skills", "council-plan"))).toBe(true);
+    expect(info.skillExposure?.items.find((i) => i.name === "polish")?.outcome).toBe("skip-user-owns");
+    expect(readFileSync(join(proj, ".claude", "skills", "polish", "SKILL.md"), "utf8")).toBe("mine\n");
+    // The user-level skills dir (CLAUDE_CONFIG_DIR/skills) wins the same way.
+    mkdirSync(join(tempDir, "claude-config", "skills", "council-plan"), { recursive: true });
+    mockSpawn.mockReturnValueOnce(createMockProc(12347));
+    const second = launcher.launch({ cwd: join(tempDir, "claude-config") });
+    expect(second.skillExposure?.items.find((i) => i.name === "council-plan")?.outcome).toBe("skip-user-owns");
+    expect(second.skillExposure?.items.find((i) => i.name === "polish")?.outcome).toBe("provide");
+  });
+
+  it("relaunch reuses the persisted decision (no re-probe) and re-passes the same --plugin-dir", async () => {
+    await installFixturePack();
+    const probe = vi.fn(() => true);
+    launcher.probeClaudePluginDir = probe;
+    const info = launcher.launch({ cwd: tempDir });
+    const first = pluginDirOf(argvOf(0));
+    expect(first).toBeDefined();
+    const decidedAt = info.skillExposure?.decidedAt;
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    await launcher.relaunch(info.sessionId);
+    const last = mockSpawn.mock.calls.length - 1;
+    expect(pluginDirOf(argvOf(last))).toBe(first);
+    expect(info.skillExposure?.decidedAt).toBe(decidedAt);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  // Observer STOP (checkpoint council-implement-180-272c26fd): a delivery failure
+  // after the decision must reach the UI state — the session spawned without the
+  // toolkit, so it must not keep reading as "on" with no label.
+  it("Claude: a plugin dir that cannot be built marks the session's delivery as failed; a later success clears it", async () => {
+    const version = await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    const info = launcher.launch({ cwd: tempDir });
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+    // The decided version is damaged before the relaunch: verifyVersionDir fails.
+    const vdir = join(launcher.skillPackRoot, "versions", version);
+    spawnSyncChmod(vdir);
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "tampered\n");
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    await launcher.relaunch(info.sessionId);
+    expect(pluginDirOf(argvOf(mockSpawn.mock.calls.length - 1))).toBeUndefined();
+    expect(info.skillExposure?.status).toBe("on");
+    expect(info.skillExposure?.deliveryError).toMatch(/version/);
+    // Repaired → the next spawn delivers again and the failure is cleared.
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "---\nname: polish\n---\nbody\n");
+    mockSpawn.mockReturnValueOnce(createMockProc(12347));
+    await launcher.relaunch(info.sessionId);
+    expect(pluginDirOf(argvOf(mockSpawn.mock.calls.length - 1))).toBeDefined();
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+  });
+
+  it("Codex: a decided version that no longer verifies marks the delivery as failed", async () => {
+    const version = await installFixturePack();
+    const home = join(tempDir, "codex-home");
+    mkdirSync(home);
+    const info = { sessionId: "codex-sid", cwd: tempDir } as unknown as SdkSessionInfo;
+    const apply = (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): object;
+    }).applyCodexSkillExposure.bind(launcher);
+    apply("codex-sid", info, { layers: ALL_ON }, home, false);
+    expect(info.skillExposure?.deliveryError).toBeUndefined();
+    const vdir = join(launcher.skillPackRoot, "versions", version);
+    spawnSyncChmod(vdir);
+    writeFileSync(join(vdir, "polish", "SKILL.md"), "tampered\n");
+    apply("codex-sid", info, { layers: ALL_ON }, home, false);
+    expect(info.skillExposure?.deliveryError).toMatch(/version/);
+  });
+
+  it("Codex: places marked copies of Codex-compatible skills; Claude-only ones are labelled, not copied", async () => {
+    await installFixturePack();
+    const home = join(tempDir, "codex-home");
+    mkdirSync(home);
+    const info = { sessionId: "codex-sid", cwd: tempDir } as unknown as SdkSessionInfo;
+    const out = (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): { env?: Record<string, string> };
+    }).applyCodexSkillExposure("codex-sid", info, { layers: ALL_ON }, home, false);
+    expect(existsSync(join(home, "skills", "polish", ".aura-owned.json"))).toBe(true);
+    expect(existsSync(join(home, "skills", "council-plan"))).toBe(false);
+    expect(info.skillExposure?.items.find((i) => i.name === "council-plan")?.outcome).toBe("requires-claude");
+    expect(out.env?.PYTHONDONTWRITEBYTECODE).toBe("1");
+  });
+
+  it("Codex: toolkit off removes Aura's copies and leaves the user's skill untouched", async () => {
+    await installFixturePack();
+    const home = join(tempDir, "codex-home");
+    mkdirSync(join(home, "skills", "mine"), { recursive: true });
+    writeFileSync(join(home, "skills", "mine", "SKILL.md"), "user\n");
+    const apply = (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): object;
+    }).applyCodexSkillExposure.bind(launcher);
+    apply("a", { sessionId: "a", cwd: tempDir } as unknown as SdkSessionInfo, { layers: ALL_ON }, home, false);
+    expect(existsSync(join(home, "skills", "polish"))).toBe(true);
+    apply("b", { sessionId: "b", cwd: tempDir } as unknown as SdkSessionInfo, { layers: { ...ALL_ON, uiux: false } }, home, false);
+    expect(existsSync(join(home, "skills", "polish"))).toBe(false);
+    expect(readFileSync(join(home, "skills", "mine", "SKILL.md"), "utf8")).toBe("user\n");
   });
 });

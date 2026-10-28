@@ -51,6 +51,7 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      uiuxToolkit: true,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
@@ -69,6 +70,18 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ autoResumeAfterLimit: "no" }));
     _resetForTest(settingsPath);
     expect(getSettings().autoResumeAfterLimit).toBe(true);
+  });
+
+  // PLAN Task 8: the UI/UX toolkit is on by default (it ships to every install);
+  // an opt-out persists, and a non-boolean on disk falls back to the default.
+  it("uiuxToolkit defaults on, persists an opt-out, and rejects garbage", () => {
+    expect(getSettings().uiuxToolkit).toBe(true);
+    updateSettings({ uiuxToolkit: false });
+    _resetForTest(settingsPath);
+    expect(getSettings().uiuxToolkit).toBe(false);
+    writeFileSync(settingsPath, JSON.stringify({ uiuxToolkit: "off" }));
+    _resetForTest(settingsPath);
+    expect(getSettings().uiuxToolkit).toBe(true);
   });
 
   // W15 multi-model review: the Council second-opinion default is OFF (cost
@@ -154,6 +167,7 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      uiuxToolkit: true,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
@@ -240,6 +254,7 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      uiuxToolkit: true,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },

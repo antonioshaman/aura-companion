@@ -6,6 +6,8 @@ import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "..
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import type { SdkSessionInfo } from "../types.js";
 import { SessionDefaultsSettings, type DefaultSessionMode } from "./SessionDefaultsSettings.js";
+import { UiuxToolkitSettings } from "./UiuxToolkitSettings.js";
+import type { ToolkitView } from "../api.js";
 import { KnowledgeAnalysisSettings, type KbAnalysisThresholds } from "./KnowledgeAnalysisSettings.js";
 import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 
@@ -59,6 +61,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // aura-diet defaults: solo sessions, KB consulted on demand.
   const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
   const [kbAutoPrime, setKbAutoPrime] = useState(false);
+  const [uiuxToolkit, setUiuxToolkit] = useState(true);
+  const [toolkitView, setToolkitView] = useState<ToolkitView | null | { loadError: string }>(null);
   const [kbAnalysis, setKbAnalysis] = useState<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
   const [diagnosticsMemoryReport, setDiagnosticsMemoryReport] = useState(false);
   const kbSaveSeq = useRef(0);
@@ -206,6 +210,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
         if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
+        if (typeof s.uiuxToolkit === "boolean") setUiuxToolkit(s.uiuxToolkit);
         if (s.kbAnalysis) {
           setKbAnalysis(s.kbAnalysis);
           kbConfirmed.current = s.kbAnalysis;
@@ -244,6 +249,13 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   useEffect(() => {
     void loadDiagnostics();
   }, [loadDiagnostics]);
+
+  useEffect(() => {
+    Promise.resolve()
+      .then(() => api.getSkillPack())
+      .then(setToolkitView)
+      .catch((e: unknown) => setToolkitView({ loadError: e instanceof Error ? e.message : String(e) }));
+  }, []);
 
   async function onRefreshModels() {
     setRefreshing(true);
@@ -550,6 +562,22 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   }
                 }}
               />
+              <div className="mt-4" id="uiux-toolkit">
+                <UiuxToolkitSettings
+                  enabled={uiuxToolkit}
+                  view={toolkitView}
+                  disabled={loading}
+                  onEnabledChange={async (next) => {
+                    setUiuxToolkit(next);
+                    try {
+                      await api.updateSettings({ uiuxToolkit: next });
+                    } catch (e: unknown) {
+                      setUiuxToolkit(!next);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                />
+              </div>
               <div className="mt-4" id="knowledge-analysis">
                 <KnowledgeAnalysisSettings
                   thresholds={kbAnalysis}

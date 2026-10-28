@@ -11,6 +11,10 @@ import { companionBus } from "../event-bus.js";
 import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
 import { parseKbAnalysisSettings, type KbAnalysisSettings } from "../diagnostics/kb-analysis-settings.js";
 import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "../second-reviewer-config.js";
+import { listExistingSkills, readCurrentPack } from "../skill-pack.js";
+import { claudeSupportsPluginDir, describeToolkit } from "../skill-exposure.js";
+import { getLegacyCodexHome } from "../codex-home.js";
+import { resolveBinary } from "../path-resolver.js";
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
 function codexModelsCachePath(): string {
@@ -45,6 +49,7 @@ export function registerSettingsRoutes(api: Hono): void {
       telemetryEnabled: settings.telemetryEnabled,
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
+      uiuxToolkit: settings.uiuxToolkit,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
       councilSecondReviewer: settings.councilSecondReviewer,
       kbAnalysis: settings.kbAnalysis,
@@ -132,6 +137,9 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.kbAutoPrime !== undefined && typeof body.kbAutoPrime !== "boolean") {
       return c.json({ error: "kbAutoPrime must be a boolean" }, 400);
     }
+    if (body.uiuxToolkit !== undefined && typeof body.uiuxToolkit !== "boolean") {
+      return c.json({ error: "uiuxToolkit must be a boolean" }, 400);
+    }
     if (body.autoResumeAfterLimit !== undefined && typeof body.autoResumeAfterLimit !== "boolean") {
       return c.json({ error: "autoResumeAfterLimit must be a boolean" }, 400);
     }
@@ -176,6 +184,7 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.telemetryEnabled !== undefined
       || body.defaultSessionMode !== undefined
       || body.kbAutoPrime !== undefined
+      || body.uiuxToolkit !== undefined
       || body.autoResumeAfterLimit !== undefined
       || councilSecondReviewer !== undefined
       || kbAnalysis !== undefined
@@ -285,6 +294,7 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.kbAutoPrime === "boolean"
           ? body.kbAutoPrime
           : undefined,
+      uiuxToolkit: typeof body.uiuxToolkit === "boolean" ? body.uiuxToolkit : undefined,
       autoResumeAfterLimit:
         typeof body.autoResumeAfterLimit === "boolean"
           ? body.autoResumeAfterLimit
@@ -327,6 +337,7 @@ export function registerSettingsRoutes(api: Hono): void {
       telemetryEnabled: settings.telemetryEnabled,
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
+      uiuxToolkit: settings.uiuxToolkit,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
       councilSecondReviewer: settings.councilSecondReviewer,
       kbAnalysis: settings.kbAnalysis,
@@ -395,6 +406,21 @@ export function registerSettingsRoutes(api: Hono): void {
   // caches. This is an authenticated operator-only response body — the raw
   // home path is the feature's whole point here, not a log-line leak (EC-23
   // governs logs, not this response).
+  // UI/UX toolkit (PLAN Task 8): what a new session would get, per CLI. The
+  // user's own skills (~/.claude/skills, ~/.codex/skills) override by name.
+  api.get("/settings/skill-pack", (c) => {
+    const pack = readCurrentPack();
+    const manifest = "error" in pack ? { entries: [] } : pack.manifest;
+    const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    const claudeBin = "error" in pack ? null : resolveBinary("claude");
+    return c.json(describeToolkit({
+      pack,
+      claudeExisting: listExistingSkills(join(claudeDir, "skills"), manifest),
+      codexExisting: listExistingSkills(join(getLegacyCodexHome(), "skills"), manifest),
+      claudeSupportsPluginDir: !!claudeBin && claudeSupportsPluginDir(claudeBin),
+    }));
+  });
+
   api.get("/settings/diagnostics", (c) => {
     const settings = getSettings();
     const anthropicMeta = readAnthropicCacheFileMeta();

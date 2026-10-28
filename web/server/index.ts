@@ -32,6 +32,8 @@ import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
 import { IdleTimerManager } from "./idle-timer-manager.js";
 import { initServerLayerFlags, isDefaultLayerFlags } from "./layer-flags.js";
+import { maintainSkillPack } from "./skill-exposure.js";
+import { resolveCompanionCodexSessionHome } from "./codex-home.js";
 import { SystemClock } from "./clock-source.js";
 import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
 import { log as appLog } from "./logger.js";
@@ -254,6 +256,15 @@ launcher.setRecorder(recorder);
 launcher.setStdioCliOpener((sessionId, transport, opts) => wsBridge.handleCLIStdioOpen(sessionId, transport, opts));
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
+// UI/UX toolkit (PLAN Task 7): sweep + install the shipped skill pack before any
+// spawn. Versions decided by persisted sessions are kept for their resume.
+maintainSkillPack({
+  keepVersions: launcher.listSessions().map((s) => s.skillExposure?.version),
+  codexSkillDirs: launcher
+    .listSessions()
+    .filter((s) => s.backendType === "codex" && !s.containerId)
+    .map((s) => join(resolveCompanionCodexSessionHome(s.sessionId), "skills")),
+});
 containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // W2 crash-loop guard: boot resume relaunches every session alive before the

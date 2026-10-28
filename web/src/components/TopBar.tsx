@@ -3,6 +3,7 @@ import { useStore } from "../store.js";
 import { parseHash } from "../utils/routing.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ProviderBadges } from "./council/index.js";
+import { ToolkitStatusPill } from "./ToolkitStatusPill.js";
 
 type WorkspaceTab = "chat" | "diff";
 
@@ -156,6 +157,9 @@ export function TopBar() {
             <span className="hidden md:inline-flex items-center rounded-full border border-cc-border bg-cc-card px-2.5 py-1 text-[11px] text-cc-muted">
               {statePill}
             </span>
+          )}
+          {showWorkspaceControls && (
+            <ToolkitStatusPill exposure={sdkSessions.find((s) => s.sessionId === currentSessionId)?.skillExposure} />
           )}
           {showWorkspaceControls && groupPairing && (
             <ProviderBadges pairing={groupPairing} size="compact" />

@@ -28,7 +28,7 @@ interface MockStoreState {
   setActiveTab: ReturnType<typeof vi.fn>;
   markChatTabReentry: ReturnType<typeof vi.fn>;
   sessions: Map<string, { cwd?: string; is_containerized?: boolean; permissionMode?: string }>;
-  sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string }[];
+  sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string; skillExposure?: { status: "on" | "off" | "unavailable"; reason?: string } }[];
   gitChangedFilesCount: Map<string, number>;
   // Council Mode slice: TopBar reads `groupBySessionId` + `groups` to
   // render ProviderBadges when the active session is in a group.
@@ -102,6 +102,18 @@ describe("TopBar", () => {
     expect(badge.className).toContain("bg-amber-100");
     expect(badge.className).toContain("dark:bg-amber-900/60");
     expect(badge.className).not.toContain("bg-cc-warning");
+  });
+
+  // PLAN Task 7: a session that wanted the UI/UX toolkit but could not get it
+  // is labelled in the TopBar; a session that has it (or turned it off) is not.
+  it("labels the current session 'Toolkit unavailable' only when its exposure says so", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1", skillExposure: { status: "unavailable", reason: "container sessions do not receive the toolkit yet" } }] });
+    const { unmount } = render(<TopBar />);
+    expect(screen.getByTestId("toolkit-status-pill")).toHaveTextContent("Toolkit unavailable");
+    unmount();
+    resetStore({ sdkSessions: [{ sessionId: "s1", skillExposure: { status: "on" } }] });
+    render(<TopBar />);
+    expect(screen.queryByTestId("toolkit-status-pill")).toBeNull();
   });
 
   it("hides diff badge when no changed files", () => {

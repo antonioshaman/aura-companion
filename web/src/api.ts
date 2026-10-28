@@ -1,4 +1,6 @@
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
+import type { ToolkitView } from "../server/skill-exposure.js";
+export type { ToolkitView, ToolkitRow } from "../server/skill-exposure.js";
 import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap, BrowserCouncilBudget } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
@@ -531,6 +533,8 @@ export interface AppSettings {
   defaultSessionMode?: "solo" | "council";
   /** Opt-in: ask new sessions to load the knowledge base at start. Default off. */
   kbAutoPrime?: boolean;
+  /** Expose the shipped UI/UX toolkit to new sessions. Default on. */
+  uiuxToolkit?: boolean;
   /** Auto-continue a session after its usage limit resets. Default on. */
   autoResumeAfterLimit?: boolean;
   /** W15: global default for the Council second-opinion reviewer. */
@@ -1270,6 +1274,7 @@ export const api = {
 
   // Settings
   getSettings: () => get<AppSettings>("/settings"),
+  getSkillPack: () => get<ToolkitView>("/settings/skill-pack"),
   updateSettings: (data: {
     anthropicApiKey?: string;
     anthropicModel?: string;
@@ -1292,6 +1297,7 @@ export const api = {
     telemetryEnabled?: boolean;
     defaultSessionMode?: "solo" | "council";
     kbAutoPrime?: boolean;
+    uiuxToolkit?: boolean;
     autoResumeAfterLimit?: boolean;
     councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
     kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
