@@ -4563,11 +4563,11 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
   const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true, uiux: true } as const;
 
   /** Install a two-skill pack (one Claude-only) into the launcher's pack root. */
-  async function installFixturePack(): Promise<string> {
+  async function installFixturePack(names: string[] = ["polish", "council-plan"]): Promise<string> {
     const { hashTree, filesDigest } = await import("./skill-manifest.js");
     const { installPack } = await import("./skill-pack.js");
     const src = join(tempDir, "pack-src");
-    const entries = ["polish", "council-plan"].map((name) => {
+    const entries = names.map((name) => {
       const files = { "SKILL.md": `---\nname: ${name}\n---\nbody\n` };
       mkdirSync(join(src, name), { recursive: true });
       writeFileSync(join(src, name, "SKILL.md"), files["SKILL.md"]);
@@ -4575,7 +4575,7 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
       return {
         name,
         frontmatterName: null,
-        kind: "skill" as const,
+        kind: name === "_council-experts" ? ("catalog" as const) : ("skill" as const),
         source: { type: "first-party" as const, repo: "antonioshaman/aura-companion" },
         licence: { spdx: "MIT", verdict: "shippable" as const },
         compat: name === "council-plan" ? { claude: true, codex: false, note: "Task tool" } : { claude: true, codex: true },
@@ -4614,6 +4614,40 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(readFileSync(join(dir!, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
     expect(envOf(0).PYTHONDONTWRITEBYTECODE).toBe("1");
     expect(info.skillExposure).toMatchObject({ backend: "claude", status: "on", version, pluginDir: dir });
+  });
+
+  // B5 / owner answer 4: the council-* dispatchers read the expert catalog from
+  // AURA_COUNCIL_CATALOG_DIR when set — the verified, read-only version tree — so a
+  // session no longer depends on a hand-installed ~/.claude/skills/_council-experts.
+  it("Claude: exports AURA_COUNCIL_CATALOG_DIR pointing at the shipped catalog of the decided version", async () => {
+    const version = await installFixturePack(["polish", "council-plan", "_council-experts"]);
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    const dir = envOf(0).AURA_COUNCIL_CATALOG_DIR;
+    expect(dir).toBe(join(launcher.skillPackRoot, "versions", version, "_council-experts"));
+    expect(readFileSync(join(dir!, "SKILL.md"), "utf8")).toContain("name: _council-experts");
+    // The catalog is data, not a skill: it is never linked into the plugin.
+    expect(existsSync(join(pluginDirOf(argvOf(0))!, "skills", "_council-experts"))).toBe(false);
+  });
+
+  // The user's own catalog wins: Aura leaves the variable unset so the dispatchers
+  // fall back to ~/.claude/skills/_council-experts (the user's copy).
+  it("Claude: user owns _council-experts → AURA_COUNCIL_CATALOG_DIR not exported", async () => {
+    await installFixturePack(["polish", "_council-experts"]);
+    const userCatalog = join(tempDir, "claude-config", "skills", "_council-experts");
+    mkdirSync(userCatalog, { recursive: true });
+    writeFileSync(join(userCatalog, "SKILL.md"), "---\nname: _council-experts\n---\nmine\n");
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    expect(pluginDirOf(argvOf(0))).toBeDefined();
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBeUndefined();
+  });
+
+  it("Claude: a pack without a catalog → AURA_COUNCIL_CATALOG_DIR not exported", async () => {
+    await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBeUndefined();
   });
 
   it("Claude: no pack installed → no --plugin-dir, labelled unavailable, CLI never probed", () => {

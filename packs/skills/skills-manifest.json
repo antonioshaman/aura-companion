@@ -152,9 +152,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "76689cc2b39518ea805e8c4e8c6f4e1eaf9be108691806ebb0520ee55690c306",
+      "digest": "5e155ceb2b052f8a8d52cb56e2b143469c287c94fa323d5a78464be182abc72c",
       "files": {
-        "SKILL.md": "951a19406f4cf0e69dce17c49e477072679ba0a4ee3ea4ddcb49382a6f1f61a3",
+        "SKILL.md": "b607d52c6c0e5407283aca6da551f9c33f947b0c97223080e00d73d1d0b4eeef",
         "manifest.json": "67d4f89910801770aa55a5b57c9399aa71d3f4f43bff22d6c3e5da096c48959f",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",
         "references/quality-brandur.md": "0ce46856de5ee0dc431219a992562eee2b15d11bb3d48b30eb86131247081ff4",
@@ -191,9 +191,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "1b8ede0bb79eac54170d7ed93ce78fa4019bd24e9a703ba88e3452176f02418d",
+      "digest": "a93fdab57ca543ca4abc9fa726d4a497660b7eee4582b6ca8ea041188d3265e4",
       "files": {
-        "SKILL.md": "135b743cd5dd79bf0678802d0421dcb868f52a1e9963f52a243953b98a20374c",
+        "SKILL.md": "e82a71e697fbf16302ae5c49ddcc1e1304ccefcbf29c924e46c1900479c29cbb",
         "references/quality-a11y.md": "fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73",
         "references/quality-abramov.md": "02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",
@@ -231,9 +231,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "e3f9ea83db925c1c24c1ce0c66b02d18dfedab60b4f6d77dc1478813c6f3f4f4",
+      "digest": "f12a0a97fa9d5883548c0e5141e90fa27bd7a12cf84875a156dab1d662aeceb5",
       "files": {
-        "SKILL.md": "1bee0b16e120d887ed127baf639388f55eb85e4cbbc6fa575885ba17aad799e5",
+        "SKILL.md": "1e12a0215fabdb9c43bec58447a2290667b45e2e7eef77cca907b84465ceeb8b",
         "manifest.json": "e0fda567c93cc15074a47b63870a4c1c90719f9777bb756fc91db0a1621cb153",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",
         "references/quality-brandur.md": "0ce46856de5ee0dc431219a992562eee2b15d11bb3d48b30eb86131247081ff4",
@@ -283,9 +283,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "2b4ecf791a4f8fb42e7198b6f5321631a32a1fa95bb58a040b9f9ac01d51c86f",
+      "digest": "990b3ac27e393a67b34a06e8be610373e5089cbe3b7bdd8da5fa2b42fa373991",
       "files": {
-        "SKILL.md": "dd2f0bdc7477adcca7121b9a1b529b667cf7e3c3b28b504bd4601d82e22378d4",
+        "SKILL.md": "ab2554d48e08421fc66c8f35d18f92e8e577a8dc7c2e2c743f9360af1c58a4d7",
         "references/quality-a11y.md": "fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73",
         "references/quality-abramov.md": "02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",
@@ -328,9 +328,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "e26a907e9bcf0de8c189342303a856168cc284d2b888406bbf63c0046d00712d",
+      "digest": "64115abdc117c19d893e19bef16bde4ee31f95be4fa246c39d5af33c70751376",
       "files": {
-        "SKILL.md": "5d430954bc3625ecace80a49dfa9b43b59b81c7718a6561731756aa4e125182a",
+        "SKILL.md": "5a2b7974190ffffcfdbdf221c8ad97bb7e1984a19e616287e33e2c38067048f1",
         "manifest.json": "24c780b2b3ce3eea1250bf7bcc5d81bdb7a1793580c53e6aeb3843a8dc74d00d",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",
         "references/quality-beck.md": "8940308dbccec88db3e4a12676b54461ac67de11e9b479b7d51f3b1b964bd413",
@@ -382,9 +382,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "fa82bb96d1f049df5c5600a9f6309314776b2ef726e7a82ca6a5cee3a2350949",
+      "digest": "c96eef8e8be685f0fbb0bae9beddb2c4d686741ec923757d7b0af1e57e09b1d1",
       "files": {
-        "SKILL.md": "f8a10c5fff364ffa6f4d1794f1f6f499b6d79ee7681b2126a6f561b611e5fed3",
+        "SKILL.md": "2c2b29b122d45cd7ae0f425b5c8da512481bf1b7242b5588cccb4b98fa43aa4b",
         "references/quality-a11y.md": "fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73",
         "references/quality-abramov.md": "02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",

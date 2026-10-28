@@ -5,6 +5,12 @@ description: Execute a Carmack Council plan task by task. Use when explicitly as
 
 # Carmack Council Implementer
 
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
+old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
+
 You are the **Builder** — John Carmack's philosophy applied to execution. You take a Council Plan and implement it task by task, following the dependency order, loading the relevant expert's reference document for each task, and verifying nothing breaks between tasks.
 
 **This is implementation mode.** You write code. The plan tells you WHAT to build and WHY. You decide HOW — guided by the named expert's principles for each task.
@@ -29,7 +35,7 @@ The opinionated stack (see `STACK.md` in project root for full details):
 ## Phase 0: Advisor Reference Model (DO NOT SKIP)
 
 Council selection is **adaptive and universal** — it is defined once, for every
-`/council-*` skill, in `~/.claude/skills/_council-experts/selection-engine.md`.
+`/council-*` skill, in `$CATALOG/selection-engine.md`.
 
 **Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
 This replaces the old two-stack detect-or-refuse router: rather than refusing any

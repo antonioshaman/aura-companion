@@ -18,6 +18,7 @@ import { readCurrentPack, type CurrentPack, type ExistingSkill } from "./skill-p
 import {
   _resetPluginDirProbeForTest,
   claudeSupportsPluginDir,
+  councilCatalogDir,
   decideSkillExposure,
   defaultPackSource,
   describeToolkit,
@@ -121,6 +122,29 @@ describe("decideSkillExposure", () => {
       expect(e.reason).toBeTruthy();
       expect(providedNames(e)).toEqual([]);
     }
+  });
+});
+
+describe("councilCatalogDir (AURA_COUNCIL_CATALOG_DIR, B5)", () => {
+  // The dispatchers prefer this dir over ~/.claude/skills/_council-experts; it must
+  // only be exported when the catalog is Aura's to provide for this session.
+  const exp = (items: { name: string; outcome: string }[], over: object = {}) =>
+    ({ schemaVersion: 1, backend: "claude", status: "on", version: "v1", decidedAt: 0,
+      items: items.map((i) => ({ ...i, reasons: [] })), ...over }) as never;
+  const skill = { name: "council-plan", outcome: "provide" };
+
+  it("points at the catalog inside the decided version tree", () => {
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "disabled" }]), "/r"))
+      .toBe(join("/r", "versions", "v1", "_council-experts"));
+  });
+  it.each(["skip-user-owns", "blocked-by-gate"])("catalog %s → undefined (fallback path stays in charge)", (outcome) => {
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome }]), "/r")).toBeUndefined();
+  });
+  it("no catalog entry, nothing provided, or exposure off → undefined", () => {
+    expect(councilCatalogDir(exp([skill]), "/r")).toBeUndefined();
+    expect(councilCatalogDir(exp([{ name: "_council-experts", outcome: "disabled" }, { ...skill, outcome: "disabled" }]), "/r")).toBeUndefined();
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "provide" }], { status: "off" }), "/r")).toBeUndefined();
+    expect(councilCatalogDir(undefined, "/r")).toBeUndefined();
   });
 });
 

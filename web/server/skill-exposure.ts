@@ -109,6 +109,23 @@ export function providedNames(exposure: Pick<SkillExposure, "status" | "items"> 
   return exposure.items.filter((i) => i.outcome === "provide").map((i) => i.name);
 }
 
+/** Env var the `council-*` dispatchers read for the expert catalog (fallback: `~/.claude/skills/_council-experts`). */
+export const COUNCIL_CATALOG_ENV = "AURA_COUNCIL_CATALOG_DIR";
+export const COUNCIL_CATALOG_NAME = "_council-experts";
+
+/**
+ * The shipped catalog dir to export for this session, or undefined. Only when the
+ * exposure is on, at least one skill is provided, and the catalog itself was not
+ * left to the user (`skip-user-owns`: their own `_council-experts` stays the
+ * dispatchers' fallback) or blocked by the gate.
+ */
+export function councilCatalogDir(exposure: SkillExposure | undefined, packRoot: string): string | undefined {
+  if (!exposure?.version || providedNames(exposure).length === 0) return undefined;
+  const item = exposure.items.find((i) => i.name === COUNCIL_CATALOG_NAME);
+  if (!item || item.outcome === "skip-user-owns" || item.outcome === "blocked-by-gate") return undefined;
+  return join(packRoot, "versions", exposure.version, COUNCIL_CATALOG_NAME);
+}
+
 /** Strict parse of a persisted exposure; anything malformed is dropped (re-decided on next fresh launch). */
 export function parseSkillExposure(raw: unknown): SkillExposure | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;

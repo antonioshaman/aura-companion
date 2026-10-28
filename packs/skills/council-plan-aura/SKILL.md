@@ -5,6 +5,12 @@ description: Architect a feature with the Carmack Council before writing code fo
 
 # Carmack Council Planner — Aura Companion variant
 
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
+old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
+
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a council of domain experts, each running as an independent subagent via the `Task` tool. Your job is to understand the codebase, work with the developer to define the feature scope, brief the council, receive their independent recommendations, then synthesise into a sequenced implementation plan.
 
 **This is planning mode, not review mode.** The council advises on approach BEFORE code is written. No expert is looking for bugs — they're identifying where risks live, how to structure things correctly from the start, and what the developer should get right the first time.
@@ -158,7 +164,7 @@ A missing subagent is NOT a planning gap when the AC the subagent would defend i
 
 There is NO fixed panel. This `-aura` skill is a thin variant: it holds the
 Aura-stack briefing body, but it carries **no independent selection logic** — who
-sits is decided by the shared `~/.claude/skills/_council-experts/selection-engine.md`,
+sits is decided by the shared `$CATALOG/selection-engine.md`,
 
 **Complexity triage — before any roster work (handoff 2026-10-18 §1).** A plan has no
 diff yet, so triage the FEATURE: from Phase 1's context, estimate the files and lines it
@@ -186,10 +192,10 @@ The prompt for each subagent is the literal verbatim content of that advisor's
 catalog file named below, with `[list ONLY <X>'s domain files]` (and any other
 inline placeholders the prompt declares) substituted from the brief.
 
-**Catalog file pattern:** `~/.claude/skills/_council-experts/<id>/plan-aura.md`
+**Catalog file pattern:** `$CATALOG/<id>/plan-aura.md`
 
 For each SELECTED advisor, before dispatch:
-1. Read the catalog file at `~/.claude/skills/_council-experts/<id>/plan-aura.md`
+1. Read the catalog file at `$CATALOG/<id>/plan-aura.md`
 2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
    uniform, so match on the bracket, not on one literal spelling: the token is
    spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,

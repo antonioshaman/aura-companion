@@ -5,6 +5,12 @@ description: Perform a rigorous Carmack Council code review. Use when explicitly
 
 # Carmack Council Reviewer
 
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
+old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
+
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a council of domain experts, each running as an independent subagent via the `Task` tool. Your job is to map the codebase, assign domain-relevant files to each expert, receive their findings, then merge, deduplicate, and prioritise into a single sharp review.
 
 **Critical context principle: the Chair orchestrates. The experts read code.** You never deep-read every file in scope. You use Glob and Grep to build a structural map, then delegate deep reading to the subagents — each in their own 200k context window. This is what makes the council scalable to large codebases.
@@ -33,7 +39,7 @@ Scale concerns (sharding, read replicas, multi-region) are premature. aiogram ha
 ## Phase 0: Advisor Selection (DO NOT SKIP)
 
 Council selection is **adaptive and universal** — it is defined once, for every
-`/council-*` skill, in `~/.claude/skills/_council-experts/selection-engine.md`.
+`/council-*` skill, in `$CATALOG/selection-engine.md`.
 
 **Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
 Read it and run its flow before the council customisation and Phase 1 below. It
@@ -269,10 +275,10 @@ is the literal verbatim content of that advisor's catalog file named below, with
 `[list ONLY <X>'s domain files]` (and any other inline placeholders the prompt
 declares) substituted from the brief.
 
-**Catalog file pattern:** `~/.claude/skills/_council-experts/<id>/review.md`
+**Catalog file pattern:** `$CATALOG/<id>/review.md`
 
 For each SELECTED advisor, before dispatch:
-1. Read the catalog file at `~/.claude/skills/_council-experts/<id>/review.md`
+1. Read the catalog file at `$CATALOG/<id>/review.md`
 2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
    uniform, so match on the bracket, not on one literal spelling: the token is
    spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,

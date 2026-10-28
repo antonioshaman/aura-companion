@@ -5,6 +5,12 @@ description: Execute a Carmack Council plan task by task for the Aura Companion 
 
 # Carmack Council Implementer — Aura Companion variant
 
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog it ships; outside Aura the
+old `~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
+
 You are the **Builder** — John Carmack's philosophy applied to execution. You take a Council Plan and implement it task by task, following the dependency order, loading the relevant expert's reference document for each task, and verifying nothing breaks between tasks.
 
 **This is implementation mode.** You write code. The plan tells you WHAT to build and WHY. You decide HOW — guided by the named expert's principles for each task.
@@ -56,7 +62,7 @@ Read the reference doc named in the task's `Ref` row before writing any code. No
 Every advisor `/council-plan-aura` can dispatch appears here — i.e. every
 seatable advisor (a `capabilities` profile in `meta.yaml`) that carries a
 `plan-aura.md` phase doc, since the plan selects its roster adaptively from that
-universe (see `~/.claude/skills/_council-experts/selection-engine.md` for how the
+universe (see `$CATALOG/selection-engine.md` for how the
 
 **Complexity triage — before any roster work (handoff 2026-10-18 §1).** Run
 `bun web/scripts/council-triage.ts recommend --root <workspace> [--base <ref>] [--full]`

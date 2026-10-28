@@ -72,6 +72,8 @@ import {
 } from "./skill-pack.js";
 import {
   claudeSupportsPluginDir,
+  COUNCIL_CATALOG_ENV,
+  councilCatalogDir,
   decideSkillExposure,
   parseSkillExposure,
   providedNames,
@@ -2276,7 +2278,7 @@ export class CliLauncher {
         ...options,
         skillPluginDir: built.dir,
         // A skill script must not drop __pycache__ next to itself (B1 observer STOP).
-        env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" },
+        env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure) },
       };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -2286,6 +2288,12 @@ export class CliLauncher {
       if (info.skillExposure) this.setDeliveryError(info.skillExposure, error);
       return options;
     }
+  }
+
+  /** `AURA_COUNCIL_CATALOG_DIR` → the shipped catalog of the decided version, when it is Aura's to provide. */
+  private catalogEnv(exposure: SkillExposure): Record<string, string> {
+    const dir = councilCatalogDir(exposure, this.skillPackRoot);
+    return dir ? { [COUNCIL_CATALOG_ENV]: dir } : {};
   }
 
   /** Record (or clear) a delivery failure on the persisted decision; persist only on change. */
@@ -2350,7 +2358,7 @@ export class CliLauncher {
         plan: exposure.items.map((i) => ({ name: i.name, outcome: i.outcome === "provide" ? "provide" : "disabled", reasons: i.reasons })),
       });
       this.setDeliveryError(exposure, undefined);
-      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1" } };
+      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure) } };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       log.warn("skill-exposure", "Codex toolkit sync failed; spawning without changes", {
