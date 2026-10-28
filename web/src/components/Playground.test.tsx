@@ -47,8 +47,28 @@ describe("Playground accessible names", () => {
   it("every switch and text field has an accessible name", () => {
     render(<Playground />);
     const unnamed = [...screen.getAllByRole("switch"), ...screen.getAllByRole("textbox")]
-      .filter((el) => !(el.getAttribute("aria-label") || el.getAttribute("aria-labelledby") || el.getAttribute("title") || (el.id && document.querySelector(`label[for="${el.id}"]`)) || el.closest("label")))
+      .filter((el) => {
+        // aria-labelledby counts only when every referenced element exists and has text.
+        const by = el.getAttribute("aria-labelledby");
+        const byOk = !!by && by.split(/\s+/).every((id) => (document.getElementById(id)?.textContent ?? "").trim() !== "");
+        return !(el.getAttribute("aria-label")?.trim() || byOk || el.getAttribute("title")?.trim()
+          || (el.id && document.querySelector(`label[for="${el.id}"]`)) || el.closest("label"));
+      })
       .map((el) => el.outerHTML.slice(0, 80));
     expect(unnamed).toEqual([]);
   });
+
+  // Observer WARN (checkpoint council-implement-191): a modified component needs
+  // an axe scan, not only a name check (CLAUDE.md triad). jsdom has no layout,
+  // so layout rules (contrast, scrollable regions) are covered by the rendered
+  // scan (web/scripts/a11y-scan.ts), not here.
+  it("passes axe", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<Playground />);
+    // landmark-unique is off because the Playground shows several states of the
+    // same component side by side (ObserverPanel, checkpoint coverage, budget
+    // notice), so their landmarks repeat; in the app each renders once. It is a
+    // best-practice rule, not a WCAG criterion.
+    expect(await axe(container, { rules: { "landmark-unique": { enabled: false } } })).toHaveNoViolations();
+  }, 60_000);
 });

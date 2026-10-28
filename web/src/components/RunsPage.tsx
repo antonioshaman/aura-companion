@@ -200,6 +200,8 @@ export function RunsPage() {
                     onClick={() => setSelectedExec(isSelected ? null : exec)}
                     tabIndex={0}
                     onKeyDown={(e) => {
+                      // Only the row itself: Enter on the nested Open link must follow the link.
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         setSelectedExec(isSelected ? null : exec);

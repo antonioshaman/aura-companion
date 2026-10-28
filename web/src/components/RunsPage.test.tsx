@@ -338,3 +338,19 @@ describe("RunsPage keyboard selection", () => {
     await waitFor(() => expect(screen.queryByText("Execution Details")).not.toBeInTheDocument());
   });
 });
+
+// Observer STOP (checkpoint council-implement-191): Enter on the row's nested
+// "Open" link bubbled to the <tr>, whose handler called preventDefault() and
+// toggled the details instead of following the link.
+describe("RunsPage row keys do not hijack nested controls", () => {
+  it("Enter on the Open link is not prevented and does not toggle the details", async () => {
+    mockApi.listExecutions.mockResolvedValue({ executions: [makeExecution({ sessionId: "nested" })], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+    render(<RunsPage />);
+    const link = await screen.findByRole("link", { name: "Open" });
+    const notPrevented = fireEvent.keyDown(link, { key: "Enter" });
+    expect(notPrevented).toBe(true);
+    expect(screen.queryByText("Execution Details")).not.toBeInTheDocument();
+  });
+});
+
