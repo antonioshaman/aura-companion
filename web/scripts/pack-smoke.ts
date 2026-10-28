@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { readTree, sha256, type SkillManifest } from "../server/skill-manifest.js";
+import { pluginRootSkills, runPluginRootCanary, type CanaryResult } from "./plugin-root-canary.js";
 
 export type RunKind = "plain" | "seeded" | "off";
 
@@ -39,6 +40,11 @@ export interface RunObservation {
   exposed: string[] | null;
   /** The seeded user skill's tree digest before and after the run (seeded only). */
   seeded?: { name: string; before: string; after: string | null };
+  /**
+   * ${CLAUDE_PLUGIN_ROOT} canary per exposed skill that uses it (B5): the documented
+   * commands, run from the INSTALLED exposure. Undefined: not run (no exposure).
+   */
+  canary?: Pick<CanaryResult, "skill" | "ok" | "errors">[];
 }
 
 export const SEEDED_SKILL = "taste-skill";
@@ -64,6 +70,8 @@ export function judgeRun(o: RunObservation): string[] {
   if (o.kind === "seeded") want = want.filter((n) => n !== o.seeded?.name);
   const got = [...(o.exposed ?? [])].sort();
   if (JSON.stringify(got) !== JSON.stringify(want)) errs.push(`exposure links ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);
+  if (!o.canary) errs.push("the ${CLAUDE_PLUGIN_ROOT} canary did not run");
+  for (const c of o.canary ?? []) if (!c.ok) errs.push(`${c.skill} canary: ${c.errors.slice(0, 2).join("; ")}`);
   if (o.kind === "seeded") {
     if (!o.seeded) errs.push("seeded run without a seeded skill");
     else if (o.seeded.after !== o.seeded.before) errs.push(`the user's ${o.seeded.name} changed (before ${o.seeded.before.slice(0, 12)}, after ${String(o.seeded.after).slice(0, 12)})`);
@@ -188,6 +196,9 @@ async function runOnce(kind: RunKind, pkgDir: string, work: string): Promise<{ o
       packInstalled: existsSync(join(pack, "current.json")),
       argv,
       exposed: expo && existsSync(expo) ? readdirSync(expo) : null,
+      ...(expo && existsSync(expo)
+        ? { canary: pluginRootSkills(argv![i + 1]).map((n) => runPluginRootCanary(argv![i + 1], n)) }
+        : {}),
       ...(seeded ? { seeded } : {}),
     };
     return { obs, log: logPath };
@@ -218,7 +229,10 @@ async function main(tarball: string): Promise<number> {
       if (errs.length) {
         failed++;
         console.error(`✗ ${kind}\n  - ${errs.join("\n  - ")}\n  server log: ${log}`);
-      } else console.log(`✓ ${kind}${obs.exposed ? ` (exposed: ${obs.exposed.length} skills)` : " (no --plugin-dir)"}`);
+      } else {
+        const canary = obs.canary?.length ? `; canary OK: ${obs.canary.map((c) => c.skill).join(", ")}` : "";
+        console.log(`✓ ${kind}${obs.exposed ? ` (exposed: ${obs.exposed.length} skills${canary})` : " (no --plugin-dir)"}`);
+      }
     } catch (err) {
       failed++;
       console.error(`✗ ${kind}: ${(err as Error).message}`);

@@ -25,15 +25,13 @@
           "writes-user-project"
         ]
       },
-      "knownIssues": [
-        "SKILL.md invokes scripts via ${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/... (11 places), which only resolves when installed as a Claude Code plugin with the upstream layout; as a plain skill or under Codex the path does not exist and the skill silently falls back to generic advice. Phase B must add a hashed path overlay or a canary that runs the documented command from the installed location (review 2026-10-27-2139 #6)."
-      ],
+      "knownIssues": [],
       "humanReview": {
         "status": "approved",
         "basis": "ai-prereview",
         "reviewer": "Anton Shmonin (owner)",
         "date": "2026-10-27",
-        "notes": "AI pre-review 2026-10-27, accepted by the owner as the basis for approval (decision 1A). Runtime scripts (core.py, search.py, design_system.py, validate_data.py) read local CSV data only; the hosts in validate_data.py are URL-validation patterns, not calls. design_system.py can write design-system/<slug>/*.md into the user's project (--persist); SKILL.md forbids --force without user authorisation. The upstream's own scripts/tests make network 'freshness' calls and subprocess runs; they are dev-only and not invoked by SKILL.md.",
+        "notes": "AI pre-review 2026-10-27, accepted by the owner as the basis for approval (decision 1A). Runtime scripts (core.py, search.py, design_system.py, validate_data.py) read local CSV data only; the hosts in validate_data.py are URL-validation patterns, not calls. design_system.py can write design-system/<slug>/*.md into the user's project (--persist); SKILL.md forbids --force without user authorisation. The upstream's own scripts/tests make network 'freshness' calls and subprocess runs; they are dev-only and not invoked by SKILL.md. B5 (2026-10-28): the ${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/... knownIssue is resolved by the Claude exposure's .claude/skills link layer (skill-pack.ts LINK_LAYERS); web/scripts/plugin-root-canary.ts runs every concrete documented command from an installed exposure (unit test + pack-smoke). Codex still gets no copy (compat.codex false).",
         "reviewedCommit": "477bcb28c9812b385cb51a4605ddf30d7b2266e2",
         "reviewedDigest": "eecce3cf6c8b8206d8b9ffecf9af5bde67f7e8546947d9c8b6f44c8aa4f8522e"
       },
@@ -231,6 +229,655 @@
         "scripts/lib/rules.mjs": "5de058543b3bd6f3dd2f85ff1c1e5e1f91918ba9f4454e7ee0b8934c607982f9",
         "scripts/lint.mjs": "05f2fae2f56fc051b539cdbacb43a6f78fbbfb9644bb74aa11be472ff12dcaf5",
         "scripts/scenes.mjs": "234ec582e2b841457c33033feeeba8535f9ac285495a74d08dc533a1566c90d5"
+      }
+    },
+    {
+      "name": "adapt",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/adapt",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "8f483e8695f807a0c4a47ca0ce3a13d4e531d674e7b93a0653aee462e94cc481"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "f4f88ca97b5b7fb2aa8827615bdcab79a4e4af33d18a9a80ba36fd35708d1951"
+      }
+    },
+    {
+      "name": "animate",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/animate",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "7a7377c1f0a31f5f90597caeff93a25cb8f0172d6f9b78202e0b843cb2b9264a"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "7a523bffd0321dccc9ab7fe65cc53ef6a66022f67cf372581364c5c3914a99c3"
+      }
+    },
+    {
+      "name": "audit",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/audit",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "16a8e55af768b581e97fb822cb1bb9946eb9679abbe8f3d2a64124ef9879f8c1"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "1670baa962df4d5e94f373a2fa6bf3efd523dd4792676a5e5acb57628cc585e1"
+      }
+    },
+    {
+      "name": "bolder",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/bolder",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "15fd4bfaccbe469db4ef4a52a0340d2b134ccbe74c5b39b290b9519be890536b"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "8c98bb46e92baddb8597476e13f0d9892a516910a45a5ffecf8d693cd790686e"
+      }
+    },
+    {
+      "name": "clarify",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/clarify",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "50aa8542d4a3dddc4f7e5a7b93d520cc2ec71a7d093c791654faed746e76fc6b"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "128925d3b4b0c070ba641fe54aad6f7a7b3929fdc1c11599f9ec03f466184e00"
+      }
+    },
+    {
+      "name": "colorize",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/colorize",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "7b6ae7ec4051a5845c9cc4f4491ec8c7bf8058f6421da73ff6435340edcd0190"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "3243c4db2620488a5b38e23998f52f5b3e262db13c327193610ee56d298cbd23"
+      }
+    },
+    {
+      "name": "critique",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/critique",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "35323a020c5584f1948ea598bf59468202638ffed2382ce13f83a19e73f9893e"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "97ef421b04e17d95f2f6293c8811756eec5454302e94f3115316c984f860f11b"
+      }
+    },
+    {
+      "name": "delight",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/delight",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "93ca8ceff183a08731c68e3a4dbf2163aaeef3685780da7ca3d12aa8a698a0d0"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "00513f6f0db47ca95c93b815a02e1d44543cbc20d984e93c55558f6301fdf20a"
+      }
+    },
+    {
+      "name": "distill",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/distill",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "5d81fc37cb37a261953b114c84639e6e3db06a481e01a220c83c047c0217538f"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "c81175148eb979a2b914c9e323b8c2693633693d50ce362f0fd0b81cad1ea800"
+      }
+    },
+    {
+      "name": "extract",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/extract",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "0442ea1467ea726bc97c3b583e35845918906c5a838abb9dc8b7e1903b7c57a3"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "b1678b4ab40defc6a777c911aa4208a8aa7e783b46fe1600f6cf910dc7bdb943"
+      }
+    },
+    {
+      "name": "frontend-design",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/frontend-design",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ],
+        "reference/color-and-contrast.md": [
+          "polypane.app",
+          "webaim.org"
+        ],
+        "reference/typography.md": [
+          "github.com",
+          "wakamaifondue.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "750b70ef605d2b587f092d2e3c129c7f0d5ad7039106058a53d47c390fb5eec9"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "637dc704b5c93562930fedf19d0d97ec4b636ed776438628da7fc7f38eac3aec",
+        "reference/color-and-contrast.md": "be502ad08270cd60cabb6769a6e1ed517ecaeeb7d40f6e610f1802689ee78ddc",
+        "reference/interaction-design.md": "997d5e66ae54fcf8e59a0fcf0a2db49982ffe7b9b6cc091bcf64a3b3e0828ed7",
+        "reference/motion-design.md": "c35a59b5f795721c914cfccf9b470e89a5010c563cd85ab46a67031531678f3f",
+        "reference/responsive-design.md": "5add44195a42cf7fa82aecadaad79b8875446b930e06d087d73f3722533fd95a",
+        "reference/spatial-design.md": "10c743ee8245fc1be9e8af2b79dd08b0dae19fcde33d46c9730c000d7e13b7cd",
+        "reference/typography.md": "71c2e62adf8dff3e3a6f57c37c72e5ca6c1e2902b906915c74d3cc04ab72c3c1",
+        "reference/ux-writing.md": "0cd5e958d92be6e2331cb199d6ed5d98597aa20ec4922d4c3df56e7753cfc00c"
+      }
+    },
+    {
+      "name": "harden",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/harden",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "6841f190e85ff536e4d4152be74ed29bd795f6d9ad885ac7d8d456a33d65114c"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "6114cdc92bd913a64b05b51305b58ca6d8d6b6efb440d4ca6e65129f33cf28f9"
+      }
+    },
+    {
+      "name": "normalize",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/normalize",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "2ecba36e82c9341ff2e1b751bdd4443743995e95932a8d00280bdbfd3dda1440"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "190526c3049b33b281b5e990ebcd8b923aac8bdde11d667950751a3bb6b51c26"
+      }
+    },
+    {
+      "name": "onboard",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/onboard",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "b26ea80fb61963714df4d1532af5dab8a15ea62a050d84ace3e41d34710ffa3f"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "d3590b654e5315fede9a63f218f608aef575354966e1c51a5c9bbdfbfef8f2ad"
+      }
+    },
+    {
+      "name": "optimize",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/optimize",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "2acc2e5476aca5018314d8cc2a29944515da34e966fd1985f35a7d649f241660"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "0e7df93123d465dacbcd91fe48e0288b9083f34784200e2db8868dc8c08f1fb5"
+      }
+    },
+    {
+      "name": "polish",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/polish",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "61b618ead877bbbb3e6a8dd003f1612d8867430233af69679f86c0a8004656e9"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "d2047bfd8259df8947f8df2e2a90a61a0987f05659c1dda178435e466e629a31"
+      }
+    },
+    {
+      "name": "quieter",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/quieter",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {},
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands.",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "baf49883e474575b57301fbe661d52027038c4595de4418ecdffe623799624ad"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "92fb00bc35e1defd8c615d5d011ac02d0ec80b84c57f6f0d94362dbe4901f527"
+      }
+    },
+    {
+      "name": "teach-impeccable",
+      "upstream": {
+        "repo": "pbakaus/impeccable",
+        "path": ".claude/skills/teach-impeccable",
+        "commit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0"
+      },
+      "licence": {
+        "spdx": "Apache-2.0",
+        "copyright": "Copyright 2025 Paul Bakaus",
+        "file": "LICENSE"
+      },
+      "network": {},
+      "instructionHosts": {
+        "NOTICE.md": [
+          "github.com"
+        ]
+      },
+      "runtimeCapabilities": {
+        "SKILL.md": [
+          "writes-user-project"
+        ]
+      },
+      "knownIssues": [],
+      "humanReview": {
+        "status": "approved",
+        "basis": "ai-prereview",
+        "reviewer": "Anton Shmonin (owner)",
+        "date": "2026-10-28",
+        "notes": "AI pre-review 2026-10-28 (B5), accepted under the owner's standing B5 answer «можно по умолчанию все применять». Markdown only, no scripts. Hosts are reference links (NOTICE attribution, polypane.app / webaim.org / wakamaifondue.com in frontend-design references), not calls. No instructions that override the user, touch credentials, or run destructive commands. teach-impeccable writes a Design Context section into the project CLAUDE.md (writes-user-project).",
+        "reviewedCommit": "87106b52718b5fb8eb08cc2e5212ad7495e70da0",
+        "reviewedDigest": "48375d6eb35c3459d9c2f229f917d0eb0b1f96a93fc5db7f16eef4f808095e1f"
+      },
+      "files": {
+        "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+        "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
+        "SKILL.md": "78754de0176335fb2d4fe373310e1acc2953b408bc6a524bac5a8c3199cff056"
       }
     }
   ]

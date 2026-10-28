@@ -15,7 +15,11 @@
 //   Codex   marked, read-only copies in the Aura-managed per-session CODEX_HOME
 //           (`syncCopies`), never the user's `~/.codex`. Claude-only skills
 //           (`compat.codex === false`) are not copied: `requires-claude`.
-//   Container sessions are not wired yet → "toolkit unavailable".
+//   Containers  new containers get `<pack root>` bind-mounted read-only at the same
+//           path (container-manager), so a Claude session inside one gets the same
+//           `--plugin-dir`; Codex gets add-only copies in the container's own
+//           CODEX_HOME (skill-pack.containerCopyScript). Containers created before
+//           that stay "toolkit unavailable".
 //
 // Delivery itself (trees, copies, ownership) stays in skill-pack.ts.
 
@@ -69,7 +73,12 @@ export interface ExposureInput {
   /** The `uiux` layer flag for this session. */
   enabled: boolean;
   containerized: boolean;
-  /** Claude only: whether the installed CLI supports `--plugin-dir`. */
+  /**
+   * Containerized only: the container was created with the read-only skill-pack
+   * bind mount (same path as on the host). Older containers lack it.
+   */
+  containerPackMounted?: boolean;
+  /** Claude only: whether the installed CLI (inside the container, if any) supports `--plugin-dir`. */
   cliSupportsPluginDir?: boolean;
   pack: CurrentPack;
   /** Skill dirs that already answer to a name for this CLI (the user's win). */
@@ -82,7 +91,9 @@ export function decideSkillExposure(input: ExposureInput): SkillExposure {
   const base = { schemaVersion: SKILL_EXPOSURE_SCHEMA_VERSION, backend: input.backend, decidedAt: input.now ?? Date.now() } as const;
   if (!input.enabled) return { ...base, status: "off", items: [] };
   const unavailable = (reason: string): SkillExposure => ({ ...base, status: "unavailable", reason, items: [] });
-  if (input.containerized) return unavailable("container sessions do not receive the toolkit yet");
+  if (input.containerized && input.containerPackMounted !== true) {
+    return unavailable("this container was created without the toolkit mount; new container sessions get it");
+  }
   if (input.backend === "claude" && input.cliSupportsPluginDir !== true) {
     return unavailable("the installed Claude Code CLI does not support --plugin-dir");
   }
@@ -107,6 +118,32 @@ export function decideSkillExposure(input: ExposureInput): SkillExposure {
 export function providedNames(exposure: Pick<SkillExposure, "status" | "items"> | undefined): string[] {
   if (!exposure || exposure.status !== "on") return [];
   return exposure.items.filter((i) => i.outcome === "provide").map((i) => i.name);
+}
+
+/** Env var the `council-*` dispatchers read for the expert catalog (fallback: `~/.claude/skills/_council-experts`). */
+export const COUNCIL_CATALOG_ENV = "AURA_COUNCIL_CATALOG_DIR";
+export const COUNCIL_CATALOG_NAME = "_council-experts";
+
+/**
+ * The catalog dir to export for this session, or undefined. Only when the exposure is
+ * on and provides at least one skill:
+ *   - Aura's catalog → the shipped one in the decided version tree;
+ *   - the user's (`skip-user-owns`) → the first of `userCandidates` that exists, in the
+ *     CLI's own precedence order. The dispatchers' fallback is only
+ *     `$HOME/.claude/skills`, so a user catalog under CLAUDE_CONFIG_DIR or the project's
+ *     `.claude/skills` must be passed explicitly (observer STOP, B5 checkpoint 183);
+ *   - blocked by the gate, or absent → undefined (the fallback path stays in charge).
+ */
+export function councilCatalogDir(
+  exposure: SkillExposure | undefined,
+  packRoot: string,
+  userCandidates: string[] = [],
+): string | undefined {
+  if (!exposure?.version || providedNames(exposure).length === 0) return undefined;
+  const item = exposure.items.find((i) => i.name === COUNCIL_CATALOG_NAME);
+  if (!item || item.outcome === "blocked-by-gate") return undefined;
+  if (item.outcome === "skip-user-owns") return userCandidates.find((d) => existsSync(d));
+  return join(packRoot, "versions", exposure.version, COUNCIL_CATALOG_NAME);
 }
 
 /** Strict parse of a persisted exposure; anything malformed is dropped (re-decided on next fresh launch). */

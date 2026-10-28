@@ -166,8 +166,11 @@ describe("the real pack and package.json", () => {
     if ("error" in fresh) throw new Error(fresh.error);
     const listing: PackListing = { size: 4_000_000, files: [...shippedPaths(fresh.manifest).keys()].map((r) => ({ path: `${P}/${r}` })) };
     expect(gatePackage(listing, fresh.manifest).errors).toEqual([]);
-    // ui-ux-pro-max stays out until the CLAUDE_PLUGIN_ROOT canary (owner decision 3, HANDOFF-B3).
-    expect([...shippedPaths(fresh.manifest).keys()].some((p) => p.startsWith("ui-ux-pro-max/"))).toBe(false);
+    // B5: ui-ux-pro-max ships now that its CLAUDE_PLUGIN_ROOT canary is green — but
+    // never its upstream test suite (dev-only, excluded before hashing).
+    const uiux = [...shippedPaths(fresh.manifest).keys()].filter((p) => p.startsWith("ui-ux-pro-max/"));
+    expect(uiux).toContain("ui-ux-pro-max/scripts/search.py");
+    expect(uiux.some((p) => p.includes("/tests/"))).toBe(false);
   });
 
   it("package.json ships packs/ and stages / cleans it around every pack", () => {

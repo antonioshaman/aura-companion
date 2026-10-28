@@ -1,9 +1,17 @@
 ---
 name: council-implement-aura
+origin: aura
 description: Execute a Carmack Council plan task by task for the Aura Companion stack (Bun + Hono + TS / React 19 + Zustand + Tailwind / WebSocket NDJSON bridge / filesystem JSON persistence / Vitest + vitest-axe). Use when explicitly asked to "council implement aura", "carmack implement aura", or invoke /council-implement-aura. Reads the output of /council-plan-aura and builds each task sequentially, loading the relevant expert's reference document per task. Verifies via `bun run typecheck` + `bun run test` + a11y after each task. Produces an implementation log for /council-review-aura. Also applies /council-review-aura findings in fix-pass mode (cite finding, confirm diff matches the recommendation, failing test first, re-run checks, one review round max). Stack: Bun + Hono + TypeScript / React 19 + Zustand + Tailwind / WebSocket NDJSON + JSON-RPC / FS-JSON persistence / Vitest + vitest-axe.
 ---
 
 # Carmack Council Implementer — Aura Companion variant
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Builder** — John Carmack's philosophy applied to execution. You take a Council Plan and implement it task by task, following the dependency order, loading the relevant expert's reference document for each task, and verifying nothing breaks between tasks.
 
@@ -56,7 +64,7 @@ Read the reference doc named in the task's `Ref` row before writing any code. No
 Every advisor `/council-plan-aura` can dispatch appears here — i.e. every
 seatable advisor (a `capabilities` profile in `meta.yaml`) that carries a
 `plan-aura.md` phase doc, since the plan selects its roster adaptively from that
-universe (see `~/.claude/skills/_council-experts/selection-engine.md` for how the
+universe (see `$CATALOG/selection-engine.md` for how the
 
 **Complexity triage — before any roster work (handoff 2026-10-18 §1).** Run
 `bun web/scripts/council-triage.ts recommend --root <workspace> [--base <ref>] [--full]`

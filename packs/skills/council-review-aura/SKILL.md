@@ -1,9 +1,17 @@
 ---
 name: council-review-aura
+origin: aura
 description: Perform a rigorous Carmack Council code review for the Aura Companion stack (Bun + Hono + TS / React 19 + Zustand + Tailwind / WebSocket NDJSON bridge / filesystem JSON persistence / Vitest + vitest-axe). Use when explicitly asked to "council review aura", "carmack review aura", or invoke /council-review-aura. The council seats Troy Hunt (security), Martin Fowler (refactoring), Simon Willison (LLM pipelines), Karri Saarinen (UI quality), Vitaly Friedman (UX quality), Kent Beck (test quality) plus three stack-targeted experts (React/Web UI, Bun + NDJSON/WS Protocol [dahl], hashimoto [DevOps cross-stack — Docker + GHA + VPS systemd]) and two Aura-specific experts (a11y Auditor, ritchie [Unix-discipline two-axes: process lifecycle + filesystem persistence]). Uses parallel subagents for deep, independent review. Produces prioritised P1/P2/P3 findings after a mandatory deterministic Phase 0 (typecheck/tests/a11y + smoke of the changed surface). Risk-based: worth running for payments, auth, migrations/persistence-format changes, irreversible operations, and plan review before implementation; not worth it for routine UI tweaks or refactors. Stack: Bun + Hono + TypeScript / React 19 + Zustand + Tailwind / WebSocket NDJSON + JSON-RPC / FS-JSON persistence / Vitest + vitest-axe.
 ---
 
 # Carmack Council Reviewer — Aura Companion variant
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a panel of domain experts, each running as an independent subagent via the `Task` tool. Your job is to map the codebase, assign domain-relevant files to each expert, receive their findings, then merge, deduplicate, and prioritise into one sharp review.
 
@@ -221,7 +229,7 @@ re-runs. Fresh-dispatched seats are written back to the cache in Phase 9.
 
 There is NO fixed panel. This `-aura` skill is a thin variant: it holds the
 Aura-stack review body, but it carries **no independent selection logic** — who
-sits is decided by the shared `~/.claude/skills/_council-experts/selection-engine.md`,
+sits is decided by the shared `$CATALOG/selection-engine.md`,
 
 **Complexity triage — before any roster work (handoff 2026-10-18 §1).** Run
 `bun web/scripts/council-triage.ts recommend --root <workspace> [--base <ref>] [--full]`
@@ -263,10 +271,10 @@ The prompt for each subagent is the literal verbatim content of that advisor's
 catalog file named below, with `[list ONLY <X>'s domain files]` substituted from
 the brief's Domain File Assignments section.
 
-**Catalog file pattern:** `~/.claude/skills/_council-experts/<id>/review-aura.md`
+**Catalog file pattern:** `$CATALOG/<id>/review-aura.md`
 
 For each SELECTED advisor, before dispatch:
-1. Read the catalog file at `~/.claude/skills/_council-experts/<id>/review-aura.md`
+1. Read the catalog file at `$CATALOG/<id>/review-aura.md`
 2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
    uniform, so match on the bracket, not on one literal spelling: the token is
    spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,

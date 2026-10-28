@@ -215,7 +215,49 @@ describe("artifact gates (uiux Task 9)", () => {
     expect(df).not.toMatch(/:latest\b/);
     // python3 + node for skill scripts; the image is built from the npm tarball.
     expect(df).toMatch(/apt-get install[^\n]*python3/);
+    // B5: ui-ux-pro-max's SKILL.md runs `python ...`; Debian has no `python` without the alias.
+    expect(df).toMatch(/apt-get install[^\n]*python-is-python3/);
     expect(df).toMatch(/bun pm pack/);
     expect(df).toMatch(/test -f packs\/skills\/skills-manifest\.json/);
+  });
+});
+
+// B5 / owner answer 3: release tags push the server image to GHCR. Pinned so a
+// casual edit cannot (a) float an action to a mutable tag, (b) widen the token,
+// (c) push an image that never passed the smoke, or (d) push outside a release.
+describe("GHCR image publish on release tags (uiux B5)", () => {
+  const raw = readFileSync(join(repoRoot, ".github", "workflows", "publish.yml"), "utf-8");
+  const wf = loadWorkflow("publish.yml") as Workflow & { jobs: Record<string, Job & { needs?: string; steps: (Step & { uses?: string })[] }> };
+
+  it("pins every action by a full commit SHA", () => {
+    const uses = [...raw.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1]);
+    expect(uses.length).toBeGreaterThanOrEqual(2);
+    for (const u of uses) expect(u, u).toMatch(/@[0-9a-f]{40}$/);
+  });
+
+  it("grants no token permissions by default; only the image job may write packages", () => {
+    expect(wf.permissions).toEqual({});
+    expect(wf.jobs["release-please"].permissions).toEqual({ contents: "write", "pull-requests": "write" });
+    expect(wf.jobs.image.permissions).toEqual({ contents: "read", packages: "write" });
+  });
+
+  it("runs only when release-please cut a release, and builds the tag, not main", () => {
+    expect(wf.jobs.image.needs).toBe("release-please");
+    expect(wf.jobs.image.if).toBe("needs.release-please.outputs.release_created == 'true'");
+    const checkout = wf.jobs.image.steps.find((s) => s.uses?.startsWith("actions/checkout@")) as { with?: Record<string, unknown> };
+    expect(checkout.with?.ref).toBe("${{ needs.release-please.outputs.tag_name }}");
+    expect(checkout.with?.["persist-credentials"]).toBe(false);
+  });
+
+  it("smokes the image before pushing it, unmasked", () => {
+    const runs = wf.jobs.image.steps.map((s) => s.run ?? "");
+    const smoke = runs.findIndex((r) => r.includes("scripts/docker-smoke.sh aura-companion:release"));
+    const push = runs.findIndex((r) => r.includes("docker push"));
+    expect(smoke).toBeGreaterThan(-1);
+    expect(push).toBeGreaterThan(smoke);
+    // The job-level `if:` is the release condition pinned above; nothing else may mask.
+    expect(gateMaskingErrors(wf, ["docker-smoke.sh", "docker push"]).filter((e) => !e.includes("job image has an if:"))).toEqual([]);
+    expect(runs[push]).toContain("--password-stdin");
+    expect(runs[push]).toContain("ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aura-companion");
   });
 });

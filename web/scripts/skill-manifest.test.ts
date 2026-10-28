@@ -7,7 +7,9 @@
 // The last block checks the REAL packs/skills tree against the committed manifest.
 
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { filesDigest, hashTree, OWNER_MARKER_FILE } from "../server/skill-manifest.js";
 import {
@@ -17,6 +19,7 @@ import {
   MANIFEST_FILE,
   readInput,
   serialiseManifest,
+  writeFileDurable,
   type ManifestInput,
   type PackDecl,
 } from "./skill-manifest.js";
@@ -67,6 +70,7 @@ function input(over: { pack?: Partial<PackDecl>; lockSkill?: VendoredSkill | nul
     rootFiles: over.rootFiles ?? ["pack.json", "vendor-lock.json"],
     trees: over.trees ?? new Map([["mine", files({ "SKILL.md": "---\nname: mine\n---\n" })], ["vend", vt]]),
     repoLicenceText: over.repoLicenceText === undefined ? LICENSE : over.repoLicenceText,
+    skipped: over.skipped,
   };
 }
 
@@ -226,11 +230,51 @@ describe("buildManifest — structural errors (nothing ships unaccounted)", () =
     expect(buildManifest(i).errors).toContain("mine: kind skill but no SKILL.md");
   });
 
+  // Cleanup after the #431 review (P2): pack.json was trusted as typed. An origin
+  // typo ("vendor") made a third-party dir first-party — skipping the vendor-lock
+  // licence/hash/approval checks — and a string "false" compat flag is truthy.
+  it.each([
+    ["an unknown origin", { origin: "vendor" }, /mine: origin must be "first-party" or "vendored"/],
+    ["an unknown kind", { kind: "plugin" }, /mine: kind must be "skill" or "catalog"/],
+    ["a non-boolean compat flag", { compat: { claude: true, codex: "false", note: "x" } }, /mine: compat\.codex must be a boolean/],
+    ["an unknown entry key", { ship: true }, /mine: unknown key "ship"/],
+    ["an unknown compat key", { compat: { claude: true, codex: true, cursor: true } }, /mine: unknown compat key "cursor"/],
+    ["a non-string compat note", { compat: { claude: true, codex: false, note: 3 } }, /mine: compat\.note must be a string/],
+  ])("pack.json with %s is a structural error", (_label, over, re) => {
+    const i = input();
+    i.pack.entries[0] = { ...i.pack.entries[0], ...(over as object) } as never;
+    expect(buildManifest(i).errors.join("\n")).toMatch(re);
+  });
+
+  it("pack.json with a bad top level (schemaVersion, firstParty, entries) is a structural error", () => {
+    expect(buildManifest(input({ pack: { schemaVersion: 2 as never } })).errors.join()).toMatch(/schemaVersion must be 1/);
+    expect(buildManifest(input({ pack: { firstParty: { repo: "o/a", licence: "MIT" } as never } })).errors.join()).toMatch(/firstParty\.licenceFile must be a string/);
+    expect(buildManifest(input({ pack: { extra: 1 } as never })).errors.join()).toMatch(/pack\.json: unknown key "extra"/);
+  });
+
+  // Cleanup (#431 review P2): a cache dir inside packs/skills is never hashed, so a
+  // copy built from the tree would hold unhashed bytes and read as the user's forever.
+  it("a generated cache dir inside an entry is a structural error, not a warning", () => {
+    const i = input({ skipped: ["mine/scripts/__pycache__"] });
+    expect(buildManifest(i).errors).toContain("mine/scripts/__pycache__: generated cache dir inside packs/skills — delete it (it would never be hashed)");
+  });
+
   it("a frontmatter name that clashes case-insensitively with another entry's dir", () => {
     // Why: Codex invokes by the frontmatter name, so two entries answering to the
     // same name (after case folding) would shadow each other.
     const i = input({ trees: new Map([["mine", files({ "SKILL.md": "---\nname: Vend\n---\n" })], ["vend", vendoredTree()]]) });
     expect(buildManifest(i).errors).toContain('"vend" collides with "Vend" (case-insensitive)');
+  });
+});
+
+describe("writeFileDurable (manifest write, #431 review P3)", () => {
+  it("replaces the file atomically and leaves no tmp sibling behind", () => {
+    const d = mkdtempSync(join(tmpdir(), "durable-"));
+    const p = join(d, "m.json");
+    writeFileDurable(p, "one\n");
+    writeFileDurable(p, "two\n");
+    expect(readFileSync(p, "utf8")).toBe("two\n");
+    expect(readdirSync(d)).toEqual(["m.json"]);
   });
 });
 
@@ -258,7 +302,18 @@ describe("the real packs/skills tree", () => {
       const e = manifest.entries.find((x) => x.name === s.name)!;
       if (s.humanReview.status !== "approved" || s.knownIssues.length) expect(e.ship.status, s.name).toBe("blocked");
     }
-    expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("blocked");
+    // B5 (owner answer 2): ui-ux-pro-max's knownIssue was cleared once the
+    // ${CLAUDE_PLUGIN_ROOT} canary went green (plugin-root-canary.test.ts), so it ships.
+    expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("ship");
+  });
+
+  // Owner answer 4 (B5): a Codex compat flag flips only after a real run under Codex.
+  // Every vendored impeccable entry marked codex:true must say which run verified it.
+  it("vendored entries flipped to codex:true cite the Codex run that verified them", () => {
+    const { input: inp } = readInput();
+    const flipped = inp.pack.entries.filter((e) => e.origin === "vendored" && e.compat.codex && e.name !== "taste-skill");
+    expect(flipped.length).toBe(18);
+    for (const e of flipped) expect(e.compat.note, e.name).toMatch(/Verified under Codex \d+\.\d+\.\d+ .* on \d{4}-\d{2}-\d{2}/);
   });
 
   it("the committed manifest lists no excluded file, and the catalog keeps its runtime vocabulary", () => {

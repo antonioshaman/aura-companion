@@ -249,6 +249,37 @@ describe("readOwnership — on-disk copies", () => {
     expect(r.owner === "user" && r.reason).toMatch(/unsupported file type in skill tree: pipe/);
   });
 
+  it("a NESTED skipped cache dir with a user file → user (#431 review P3)", () => {
+    // Why: the STOP fix test covered only a top-level cache dir; readTree skips at
+    // every depth, so pin that a nested one also makes ownership unproven.
+    const root = mkdtempSync(join(tmpdir(), "skill-own-"));
+    const t = tree();
+    const e = entryFor("polish", t);
+    mkdirSync(join(root, "polish", "references"), { recursive: true });
+    for (const [p, b] of installed(e, t)) writeFileSync(join(root, "polish", p), b);
+    mkdirSync(join(root, "polish", "references", "__pycache__"));
+    writeFileSync(join(root, "polish", "references", "__pycache__", "notes.md"), "mine");
+    expect(readOwnership(join(root, "polish"), "polish", { entries: [e] })).toEqual({
+      owner: "user",
+      reason: "cannot prove ownership: unread dir references/__pycache__",
+    });
+  });
+
+  it("an empty dir the user created inside the copy → user (#431 review P3)", () => {
+    // Why: readTree only listed files, so `mkdir mywork/` left the copy "aura". Aura
+    // never writes an empty dir, so any dir with no marker-listed file under it was added.
+    const root = mkdtempSync(join(tmpdir(), "skill-own-"));
+    const t = tree();
+    const e = entryFor("polish", t);
+    mkdirSync(join(root, "polish", "references"), { recursive: true });
+    for (const [p, b] of installed(e, t)) writeFileSync(join(root, "polish", p), b);
+    mkdirSync(join(root, "polish", "mywork", "deep"), { recursive: true });
+    expect(readOwnership(join(root, "polish"), "polish", { entries: [e] })).toEqual({
+      owner: "user",
+      reason: "mywork/ was added since Aura wrote this copy",
+    });
+  });
+
   it("a missing dir → user, never a throw", () => {
     expect(readOwnership("/nonexistent/aura/x", "x", { entries: [] }).owner).toBe("user");
   });

@@ -107,3 +107,13 @@ These guarantees hold only if CI blocks merges: `main` requires the `council-ski
   has python3 and node. `scripts/docker-smoke.sh` probes it.
 
 CI job `package` runs the gate and pack-smoke; CI job `docker` builds and smokes the image.
+On a release tag, `publish.yml` job `image` builds the image from the tag, smokes it and
+pushes `ghcr.io/<owner>/aura-companion:<version>` and `:latest` (actions pinned by SHA,
+no token permissions by default, `packages: write` only for that job).
+
+pack-smoke also runs the `${CLAUDE_PLUGIN_ROOT}` canary (`web/scripts/plugin-root-canary.ts`)
+from the installed exposure: every concrete command documented in an exposed SKILL.md
+that uses `${CLAUDE_PLUGIN_ROOT}` (ui-ux-pro-max) must exit 0, print output and write
+nothing to its cwd. The exposure mirrors `skills/<name>` under `.claude/skills/<name>`
+for those paths. New container sessions see the pack through a read-only bind mount
+at the same path; containers created earlier stay "toolkit unavailable".

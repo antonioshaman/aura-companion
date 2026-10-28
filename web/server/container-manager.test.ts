@@ -1036,6 +1036,66 @@ describe("ContainerManager createContainer", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Skill-pack mount (B5 / owner answer 1): new containers get the Aura skill pack
+// read-only at the SAME absolute path, so the Claude exposure dir (relative links
+// into versions/) and AURA_COUNCIL_CATALOG_DIR resolve inside the container unchanged.
+// ---------------------------------------------------------------------------
+
+describe("ContainerManager skill-pack mount", () => {
+  beforeEach(() => {
+    mockExecSync.mockReset();
+    mockExistsSync.mockReset();
+    mockExistsSync.mockReturnValue(false);
+  });
+
+  function createWith(packExists: boolean, root = "/h/.companion/skill-pack"): string {
+    let createCmd = "";
+    mockExistsSync.mockImplementation((...args: unknown[]) => packExists && String(args[0]) === root);
+    mockExecSync.mockImplementation((...args: unknown[]) => {
+      const cmd = String(args[0] ?? "");
+      if (cmd.includes("docker create")) { createCmd = cmd; return "cid123"; }
+      if (cmd.includes("gh auth token")) throw new Error("no");
+      return "";
+    });
+    const manager = new ContainerManager();
+    manager.skillPackRoot = root;
+    manager.createContainer("sess-1", "/tmp", { image: "node:22", ports: [] });
+    return createCmd;
+  }
+
+  it("bind-mounts an existing pack root read-only at the same path", () => {
+    expect(createWith(true)).toMatch(/-v '?\/h\/.companion\/skill-pack:\/h\/.companion\/skill-pack:ro'?/);
+  });
+
+  it("adds no mount when the host has no pack root", () => {
+    expect(createWith(false)).not.toContain("skill-pack");
+  });
+
+  it("refuses a pack root that would break the -v syntax (contains ':')", () => {
+    expect(createWith(true, "/h/a:b/skill-pack")).not.toContain("skill-pack");
+  });
+
+  it("hasSkillPackMount: only a read-only same-path bind of the pack root counts", () => {
+    const root = "/h/.companion/skill-pack";
+    const inspect = (mounts: unknown) => mockExecSync.mockImplementation(() => JSON.stringify(mounts));
+    const manager = new ContainerManager();
+    manager.skillPackRoot = root;
+    inspect([{ Type: "bind", Source: root, Destination: root, RW: false }]);
+    expect(manager.hasSkillPackMount("abc123")).toBe(true);
+    // Why each is false: a writable mount would let the session alter Aura's verified
+    // tree; a different path breaks the exposure's links; an old container has none.
+    inspect([{ Type: "bind", Source: root, Destination: root, RW: true }]);
+    expect(manager.hasSkillPackMount("abc123")).toBe(false);
+    inspect([{ Type: "bind", Source: root, Destination: "/pack", RW: false }]);
+    expect(manager.hasSkillPackMount("abc123")).toBe(false);
+    inspect([]);
+    expect(manager.hasSkillPackMount("abc123")).toBe(false);
+    mockExecSync.mockImplementation(() => { throw new Error("no such container"); });
+    expect(manager.hasSkillPackMount("abc123")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // seedAuthFiles (private, tested via startContainer which calls it)
 // ---------------------------------------------------------------------------
 

@@ -4563,11 +4563,11 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
   const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true, uiux: true } as const;
 
   /** Install a two-skill pack (one Claude-only) into the launcher's pack root. */
-  async function installFixturePack(): Promise<string> {
+  async function installFixturePack(names: string[] = ["polish", "council-plan"]): Promise<string> {
     const { hashTree, filesDigest } = await import("./skill-manifest.js");
     const { installPack } = await import("./skill-pack.js");
     const src = join(tempDir, "pack-src");
-    const entries = ["polish", "council-plan"].map((name) => {
+    const entries = names.map((name) => {
       const files = { "SKILL.md": `---\nname: ${name}\n---\nbody\n` };
       mkdirSync(join(src, name), { recursive: true });
       writeFileSync(join(src, name, "SKILL.md"), files["SKILL.md"]);
@@ -4575,7 +4575,7 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
       return {
         name,
         frontmatterName: null,
-        kind: "skill" as const,
+        kind: name === "_council-experts" ? ("catalog" as const) : ("skill" as const),
         source: { type: "first-party" as const, repo: "antonioshaman/aura-companion" },
         licence: { spdx: "MIT", verdict: "shippable" as const },
         compat: name === "council-plan" ? { claude: true, codex: false, note: "Task tool" } : { claude: true, codex: true },
@@ -4614,6 +4614,86 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(readFileSync(join(dir!, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
     expect(envOf(0).PYTHONDONTWRITEBYTECODE).toBe("1");
     expect(info.skillExposure).toMatchObject({ backend: "claude", status: "on", version, pluginDir: dir });
+  });
+
+  // B5 / owner answer 4: the council-* dispatchers read the expert catalog from
+  // AURA_COUNCIL_CATALOG_DIR when set — the verified, read-only version tree — so a
+  // session no longer depends on a hand-installed ~/.claude/skills/_council-experts.
+  it("Claude: exports AURA_COUNCIL_CATALOG_DIR pointing at the shipped catalog of the decided version", async () => {
+    const version = await installFixturePack(["polish", "council-plan", "_council-experts"]);
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    const dir = envOf(0).AURA_COUNCIL_CATALOG_DIR;
+    expect(dir).toBe(join(launcher.skillPackRoot, "versions", version, "_council-experts"));
+    expect(readFileSync(join(dir!, "SKILL.md"), "utf8")).toContain("name: _council-experts");
+    // The catalog is data, not a skill: it is never linked into the plugin.
+    expect(existsSync(join(pluginDirOf(argvOf(0))!, "skills", "_council-experts"))).toBe(false);
+  });
+
+  // The user's own catalog wins — and the variable must point AT it: the dispatchers'
+  // fallback is only $HOME/.claude/skills, so a catalog under CLAUDE_CONFIG_DIR or the
+  // project's .claude/skills would otherwise be skipped (observer STOP, B5 checkpoint 183).
+  it("Claude: user owns _council-experts → AURA_COUNCIL_CATALOG_DIR points at the user's catalog", async () => {
+    await installFixturePack(["polish", "_council-experts"]);
+    const userCatalog = join(tempDir, "claude-config", "skills", "_council-experts");
+    mkdirSync(userCatalog, { recursive: true });
+    writeFileSync(join(userCatalog, "SKILL.md"), "---\nname: _council-experts\n---\nmine\n");
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    expect(pluginDirOf(argvOf(0))).toBeDefined();
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBe(userCatalog);
+  });
+
+  it("Claude: a project-level user catalog (<cwd>/.claude/skills) is the one exported", async () => {
+    await installFixturePack(["polish", "_council-experts"]);
+    // `uiux-proj`: the fs mock passes real .claude paths through only under fixture roots.
+    const project = join(tempDir, "uiux-proj");
+    const projectCatalog = join(project, ".claude", "skills", "_council-experts");
+    mkdirSync(projectCatalog, { recursive: true });
+    writeFileSync(join(projectCatalog, "SKILL.md"), "---\nname: _council-experts\n---\nproject\n");
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: project, layers: ALL_ON });
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBe(projectCatalog);
+  });
+
+  it("Claude: a pack without a catalog → AURA_COUNCIL_CATALOG_DIR not exported", async () => {
+    await installFixturePack();
+    launcher.probeClaudePluginDir = () => true;
+    launcher.launch({ cwd: tempDir, layers: ALL_ON });
+    expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBeUndefined();
+  });
+
+  // B5 / owner answer 1: a container created with the read-only pack mount (same path)
+  // gets the same exposure via --plugin-dir inside it, probed against the container's
+  // own CLI; a container without the mount (created before B5) stays unavailable.
+  it("Claude in a container with the pack mount: --plugin-dir inside the docker exec, container CLI probed", async () => {
+    const version = await installFixturePack();
+    const hostProbe = vi.fn(() => true);
+    const containerProbe = vi.fn(() => true);
+    launcher.probeClaudePluginDir = hostProbe;
+    launcher.containerHasPack = () => true;
+    launcher.probeContainerPluginDir = containerProbe;
+    const info = launcher.launch({ cwd: tempDir, layers: ALL_ON, containerId: "abc123def456", containerName: "companion-test" });
+    const argv = argvOf(0);
+    expect(argv.slice(0, 2)).toEqual(["docker", "exec"]);
+    const inner = argv[argv.length - 1];
+    expect(inner).toContain(`'--plugin-dir' '${join(launcher.skillPackRoot, "exposures")}`);
+    expect(argv).toContain("PYTHONDONTWRITEBYTECODE=1");
+    expect(containerProbe).toHaveBeenCalledWith("abc123def456", expect.any(String));
+    expect(hostProbe).not.toHaveBeenCalled();
+    expect(info.skillExposure).toMatchObject({ status: "on", version });
+  });
+
+  it("Claude in a container WITHOUT the pack mount (pre-B5): unavailable, no --plugin-dir, CLI never probed", async () => {
+    await installFixturePack();
+    const containerProbe = vi.fn(() => true);
+    launcher.containerHasPack = () => false;
+    launcher.probeContainerPluginDir = containerProbe;
+    const info = launcher.launch({ cwd: tempDir, layers: ALL_ON, containerId: "abc123def456", containerName: "companion-test" });
+    expect(argvOf(0)[argvOf(0).length - 1]).not.toContain("--plugin-dir");
+    expect(info.skillExposure).toMatchObject({ status: "unavailable" });
+    expect(info.skillExposure?.reason).toMatch(/created without the toolkit mount/);
+    expect(containerProbe).not.toHaveBeenCalled();
   });
 
   it("Claude: no pack installed → no --plugin-dir, labelled unavailable, CLI never probed", () => {
@@ -4733,6 +4813,51 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(existsSync(join(home, "skills", "council-plan"))).toBe(false);
     expect(info.skillExposure?.items.find((i) => i.name === "council-plan")?.outcome).toBe("requires-claude");
     expect(out.env?.PYTHONDONTWRITEBYTECODE).toBe("1");
+  });
+
+  // B5 cleanup: Codex in a container with the pack mount gets add-only copies in the
+  // container's CODEX_HOME (via `docker exec sh -c <script>`); names already there
+  // (seeded user skills) are labelled the user's and never touched.
+  it("Codex in a container with the pack mount: add-only copy script runs in the container", async () => {
+    await installFixturePack();
+    const listing = { out: "" };
+    const exec = vi.fn((_id: string, cmd: string[]) => (cmd.join(" ").includes("ls -A") ? listing.out : ""));
+    launcher.containerHasPack = () => true;
+    launcher.containerExec = exec;
+    const apply = (sid: string) => {
+      const info = { sessionId: sid, cwd: tempDir } as unknown as SdkSessionInfo;
+      const out = (launcher as unknown as {
+        applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): { env?: Record<string, string> };
+      }).applyCodexSkillExposure(sid, info, { layers: ALL_ON, containerId: "abc123def456" }, join(tempDir, "unused"), true);
+      return { info, out };
+    };
+    const first = apply("codex-a");
+    expect(first.info.skillExposure?.status).toBe("on");
+    const script = exec.mock.calls.map(([, c]) => c.join(" ")).find((c) => c.includes("cp -R")) ?? "";
+    expect(script).toContain("/root/.codex/skills/polish");
+    // Claude-only skills are labelled, never copied.
+    expect(script).not.toContain("council-plan");
+    expect(first.out.env?.PYTHONDONTWRITEBYTECODE).toBe("1");
+
+    // polish already in the container (a seeded user skill) → the user's; nothing copied.
+    exec.mockClear();
+    listing.out = "polish\n";
+    const second = apply("codex-b");
+    expect(second.info.skillExposure?.items.find((i) => i.name === "polish")?.outcome).toBe("skip-user-owns");
+    expect(exec.mock.calls.some(([, c]) => c.join(" ").includes("cp -R"))).toBe(false);
+  });
+
+  it("Codex in a container WITHOUT the pack mount: unavailable, nothing executed in the container", async () => {
+    await installFixturePack();
+    const exec = vi.fn(() => "");
+    launcher.containerHasPack = () => false;
+    launcher.containerExec = exec;
+    const info = { sessionId: "codex-sid", cwd: tempDir } as unknown as SdkSessionInfo;
+    (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): unknown;
+    }).applyCodexSkillExposure("codex-sid", info, { layers: ALL_ON, containerId: "abc123def456" }, join(tempDir, "unused"), true);
+    expect(info.skillExposure?.status).toBe("unavailable");
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it("Codex: toolkit off removes Aura's copies and leaves the user's skill untouched", async () => {

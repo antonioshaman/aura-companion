@@ -59,7 +59,115 @@
       "name": "ui-ux-pro-max",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which Codex does not set (see vendor-lock knownIssues)." }
+      "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which only Claude substitutes (Aura's exposure mirrors .claude/skills for it); Codex does not set it." }
+    },
+    {
+      "name": "adapt",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "animate",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "audit",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "bolder",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "clarify",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "colorize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "critique",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "delight",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "distill",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "extract",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "frontend-design",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "harden",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "normalize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "onboard",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "optimize",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "polish",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "quieter",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
+    },
+    {
+      "name": "teach-impeccable",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true, "note": "Verified under Codex 0.162.1 (gpt-6.1-sol) on 2026-10-28: all 18 load as skills; clarify was followed and frontend-design read its reference files." }
     }
   ]
 }

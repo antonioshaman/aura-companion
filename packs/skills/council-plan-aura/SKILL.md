@@ -1,9 +1,17 @@
 ---
 name: council-plan-aura
+origin: aura
 description: Architect a feature with the Carmack Council before writing code for the Aura Companion stack (Bun + Hono + TS / React 19 + Zustand + Tailwind / WebSocket NDJSON bridge / filesystem JSON persistence / Vitest + vitest-axe). Use when explicitly asked to "council plan aura", "carmack plan aura", or invoke /council-plan-aura. The council seats Troy Hunt (security), Martin Fowler (refactoring), Simon Willison (LLM pipelines), Karri Saarinen (UI quality), Vitaly Friedman (UX quality) plus three stack-targeted experts (React/Web UI, Bun + NDJSON/WS Protocol [dahl], hashimoto [DevOps cross-stack — Docker + GHA + VPS systemd]) and two Aura-specific experts (a11y Auditor, ritchie [Unix-discipline two-axes: process lifecycle + filesystem persistence]). Interactive feature discovery followed by parallel subagent dispatch. Produces a sequenced, attributed implementation plan with no code. Stack: Bun + Hono + TypeScript / React 19 + Zustand + Tailwind / WebSocket NDJSON + JSON-RPC / FS-JSON persistence / Vitest + vitest-axe.
 ---
 
 # Carmack Council Planner — Aura Companion variant
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a council of domain experts, each running as an independent subagent via the `Task` tool. Your job is to understand the codebase, work with the developer to define the feature scope, brief the council, receive their independent recommendations, then synthesise into a sequenced implementation plan.
 
@@ -158,7 +166,7 @@ A missing subagent is NOT a planning gap when the AC the subagent would defend i
 
 There is NO fixed panel. This `-aura` skill is a thin variant: it holds the
 Aura-stack briefing body, but it carries **no independent selection logic** — who
-sits is decided by the shared `~/.claude/skills/_council-experts/selection-engine.md`,
+sits is decided by the shared `$CATALOG/selection-engine.md`,
 
 **Complexity triage — before any roster work (handoff 2026-10-18 §1).** A plan has no
 diff yet, so triage the FEATURE: from Phase 1's context, estimate the files and lines it
@@ -186,10 +194,10 @@ The prompt for each subagent is the literal verbatim content of that advisor's
 catalog file named below, with `[list ONLY <X>'s domain files]` (and any other
 inline placeholders the prompt declares) substituted from the brief.
 
-**Catalog file pattern:** `~/.claude/skills/_council-experts/<id>/plan-aura.md`
+**Catalog file pattern:** `$CATALOG/<id>/plan-aura.md`
 
 For each SELECTED advisor, before dispatch:
-1. Read the catalog file at `~/.claude/skills/_council-experts/<id>/plan-aura.md`
+1. Read the catalog file at `$CATALOG/<id>/plan-aura.md`
 2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
    uniform, so match on the bracket, not on one literal spelling: the token is
    spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,

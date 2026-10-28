@@ -39,6 +39,7 @@ import {
   type SkillManifest,
 } from "./skill-manifest.js";
 import {
+  containerCopyScript,
   ensurePluginExposure,
   installPack,
   isSafeRelPath,
@@ -304,7 +305,8 @@ describe("installPack / readCurrentPack", () => {
 
   it("ships exactly the gate-passing entries of the real packs/skills manifest", () => {
     // AC2.1 / AC2.4 against the real tree: everything with ship.status "ship" lands,
-    // ui-ux-pro-max (blocked until B3/B4) does not.
+    // anything blocked does not (fixture "blocked-one" pins that when the real tree has
+    // none). ui-ux-pro-max ships since B5 (its CLAUDE_PLUGIN_ROOT canary is green).
     const manifest = JSON.parse(readFileSync(join(REPO_PACKS, "skills-manifest.json"), "utf8")) as SkillManifest;
     const root = tmp();
     const r = installPack({ sourceDir: REPO_PACKS, manifest, root });
@@ -312,8 +314,9 @@ describe("installPack / readCurrentPack", () => {
     if ("error" in cur) throw new Error(cur.error);
     const shipped = manifest.entries.filter((e) => e.ship.status === "ship").map((e) => e.name);
     expect(cur.manifest.entries.map((e) => e.name)).toEqual(shipped);
-    expect(shipped).not.toContain("ui-ux-pro-max");
-    expect(existsSync(join(r.dir, "ui-ux-pro-max"))).toBe(false);
+    for (const e of manifest.entries.filter((x) => x.ship.status !== "ship")) expect(existsSync(join(r.dir, e.name)), e.name).toBe(false);
+    expect(shipped).toContain("ui-ux-pro-max");
+    expect(existsSync(join(r.dir, "ui-ux-pro-max", "scripts", "search.py"))).toBe(true);
     expect(existsSync(join(r.dir, PACK_MANIFEST_FILE))).toBe(true);
   });
 });
@@ -537,13 +540,42 @@ describe("ensurePluginExposure (Claude --plugin-dir)", () => {
     const { root, version } = installed();
     const r = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
     if ("error" in r) throw new Error(r.error);
-    expect(readdirSync(r.dir).sort()).toEqual([".claude-plugin", "skills"]);
+    expect(readdirSync(r.dir).sort()).toEqual([".claude", ".claude-plugin", "skills"]);
     expect(JSON.parse(readFileSync(join(r.dir, ".claude-plugin", "plugin.json"), "utf8")).name).toBe(PLUGIN_NAME);
     expect(readdirSync(join(r.dir, "skills")).sort()).toEqual(["audit", "polish"]);
     expect(readlinkSync(join(r.dir, "skills", "polish"))).toBe(`../../../versions/${version}/polish`);
     // The link resolves to the verified tree: the CLI reads the real SKILL.md through it.
     expect(readFileSync(join(r.dir, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
     expect(statSync(r.dir).mode & 0o222).toBe(0);
+  });
+
+  // B5 / owner answer 2: a vendored SKILL.md that runs
+  // ${CLAUDE_PLUGIN_ROOT}/.claude/skills/<name>/scripts/... (ui-ux-pro-max) must resolve.
+  // Claude substitutes CLAUDE_PLUGIN_ROOT with the exposure dir, so the exposure
+  // carries a second link layer with the upstream plugin layout.
+  it("mirrors every linked skill under .claude/skills (upstream plugin layout)", () => {
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
+    if ("error" in r) throw new Error(r.error);
+    expect(readdirSync(join(r.dir, ".claude"))).toEqual(["skills"]);
+    expect(readdirSync(join(r.dir, ".claude", "skills")).sort()).toEqual(["audit", "polish"]);
+    expect(readlinkSync(join(r.dir, ".claude", "skills", "polish"))).toBe(`../../../../versions/${version}/polish`);
+    expect(readFileSync(join(r.dir, ".claude", "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
+  });
+
+  it("rebuilds a pre-B5 exposure that lacks the .claude link layer", () => {
+    // Why: exposures built by B3/B4 have only skills/; reusing one would leave the
+    // ${CLAUDE_PLUGIN_ROOT}/.claude/skills paths dangling.
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish"] });
+    if ("error" in r) throw new Error(r.error);
+    chmodSync(r.dir, 0o755);
+    chmodSync(join(r.dir, ".claude"), 0o755);
+    chmodSync(join(r.dir, ".claude", "skills"), 0o755);
+    rmSync(join(r.dir, ".claude"), { recursive: true, force: true });
+    const again = ensurePluginExposure({ root, version, names: ["polish"] });
+    expect(again).toEqual(r);
+    expect(readlinkSync(join(r.dir, ".claude", "skills", "polish"))).toBe(`../../../../versions/${version}/polish`);
   });
 
   it("is content-addressed and idempotent: same version + names → same dir", () => {
@@ -597,3 +629,93 @@ describe("ensurePluginExposure (Claude --plugin-dir)", () => {
     expect(existsSync(e1.dir)).toBe(false);
   });
 });
+
+// B5 cleanup: Codex inside a container. Its CODEX_HOME (/root/.codex) is a tmpfs the
+// host cannot read, so Aura cannot prove ownership there; the script only ADDS copies
+// from the read-only same-path pack mount and never deletes or replaces anything —
+// a seeded user skill (or an earlier copy) with the same name is left exactly as is.
+// Run here with the local `sh` against a temp dir standing in for the container.
+describe("containerCopyScript (Codex in a container)", () => {
+  function installed() {
+    const src = source();
+    const root = tmp();
+    const { version } = installPack({ sourceDir: src.dir, manifest: src.manifest, root });
+    const cur = readCurrentPack(root);
+    if ("error" in cur) throw new Error(cur.error);
+    return { packDir: join(root, "versions", version), manifest: cur.manifest };
+  }
+  const run = (script: string) => spawnSync("sh", ["-c", script], { encoding: "utf8" });
+
+  it("adds marked copies that read as Aura's, current", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "codex home", "skills");
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] }));
+    expect(r.status, r.stderr).toBe(0);
+    expect(readdirSync(parent).sort()).toEqual(["audit", "polish"]);
+    for (const n of ["polish", "audit"]) {
+      expect(readOwnership(join(parent, n), n, manifest)).toMatchObject({ owner: "aura", current: true });
+    }
+  });
+
+  it("never touches an existing dir with the same name (user's or earlier), adds the rest", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    mkdirSync(join(parent, "polish"), { recursive: true });
+    writeFileSync(join(parent, "polish", "SKILL.md"), "mine\n");
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] }));
+    expect(r.status, r.stderr).toBe(0);
+    expect(readdirSync(join(parent, "polish"))).toEqual(["SKILL.md"]);
+    expect(readFileSync(join(parent, "polish", "SKILL.md"), "utf8")).toBe("mine\n");
+    expect(readOwnership(join(parent, "audit"), "audit", manifest).owner).toBe("aura");
+    // A second run is a no-op.
+    expect(run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] })).status).toBe(0);
+  });
+
+  // Observer STOP 1 (checkpoint 185): the script rm -rf'd a predictable staging path,
+  // so a user dir named like it was deleted. Nothing but the claimed dest may be written.
+  it("never deletes a user dir that happens to have a staging-like name", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    for (const odd of [".aura-staging-polish", ".staging-polish"]) {
+      mkdirSync(join(parent, odd), { recursive: true });
+      writeFileSync(join(parent, odd, "keep.md"), "mine\n");
+    }
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish"] }));
+    expect(r.status, r.stderr).toBe(0);
+    for (const odd of [".aura-staging-polish", ".staging-polish"]) {
+      expect(readFileSync(join(parent, odd, "keep.md"), "utf8")).toBe("mine\n");
+    }
+    expect(readOwnership(join(parent, "polish"), "polish", manifest).owner).toBe("aura");
+  });
+
+  // Observer STOP 2 (checkpoint 185): check-then-mv raced — a dest created after the
+  // check got the staging dir moved INTO it. A `cp` shim creates the user's dest
+  // mid-run; nothing of Aura's may end up nested in it, and the user's file survives.
+  it("a dest that appears mid-run is never written into by a nested publish", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    const bin = join(tmp(), "bin");
+    mkdirSync(bin);
+    const dest = join(parent, "polish");
+    const realCp = spawnSync("sh", ["-c", "command -v cp"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(bin, "cp"), `#!/bin/sh\nmkdir -p '${dest}' 2>/dev/null; [ -f '${dest}/user.txt' ] || echo mine > '${dest}/user.txt'\nexec ${realCp} "$@"\n`, { mode: 0o755 });
+    const script = containerCopyScript({ packDir, parent, manifest, names: ["polish"] });
+    const r = spawnSync("sh", ["-c", script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    expect(r.status === 0 || r.status === 1).toBe(true);
+    expect(readFileSync(join(dest, "user.txt"), "utf8")).toBe("mine\n");
+    expect(readdirSync(dest).filter((n) => n.includes("staging"))).toEqual([]);
+    // As non-root the nested mv happens to fail on permissions (in a container it runs
+    // as root and would succeed); either way no staging dir may be left behind.
+    expect(readdirSync(parent).filter((n) => n.includes("staging"))).toEqual([]);
+    // Whatever landed, the copy is not provably Aura's (it holds the user's file).
+    expect(readOwnership(dest, "polish", manifest).owner).toBe("user");
+  });
+
+  it("refuses names that are not shipped entries of the manifest, or unsafe", () => {
+    const { packDir, manifest } = installed();
+    for (const names of [["nope"], ["../polish"], ["blocked-one"]]) {
+      expect(() => containerCopyScript({ packDir, parent: "/root/.codex/skills", manifest, names })).toThrow();
+    }
+  });
+});
+

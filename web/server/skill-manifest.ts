@@ -180,7 +180,12 @@ export function parseMarker(raw: string): OwnerMarker | null {
  * and the current manifest. `aura` only when the bytes are exactly what the marker
  * says Aura wrote; `current` when that is also this manifest's version of the entry.
  */
-export function ownership(dirName: string, files: Map<string, Buffer>, manifest: Pick<SkillManifest, "entries">): Ownership {
+export function ownership(
+  dirName: string,
+  files: Map<string, Buffer>,
+  manifest: Pick<SkillManifest, "entries">,
+  dirs: string[] = [],
+): Ownership {
   const raw = files.get(OWNER_MARKER_FILE);
   if (!raw) return { owner: "user", reason: "no ownership marker" };
   const marker = parseMarker(raw.toString("utf8"));
@@ -196,6 +201,11 @@ export function ownership(dirName: string, files: Map<string, Buffer>, manifest:
     // Object.hasOwn, not `in`: inherited names (constructor, toString…) are not listed files.
     if (p !== OWNER_MARKER_FILE && !Object.hasOwn(marker.files, p)) return { owner: "user", reason: `${p} was added since Aura wrote this copy` };
   }
+  // Aura never writes an empty dir: a dir with no listed file under it was added.
+  const listed = Object.keys(marker.files);
+  for (const d of dirs) {
+    if (!listed.some((p) => p.startsWith(`${d}/`))) return { owner: "user", reason: `${d}/ was added since Aura wrote this copy` };
+  }
   const entry = manifest.entries.find((e) => e.name === dirName);
   return { owner: "aura", inManifest: !!entry, current: entry?.digest === marker.digest };
 }
@@ -207,7 +217,7 @@ export function ownership(dirName: string, files: Map<string, Buffer>, manifest:
  * root (a link could point anywhere). Generated cache dirs are not read; their
  * paths are pushed to `skipped` so a caller can report them rather than hide them.
  */
-export function readTree(root: string, skipped: string[] = []): Map<string, Buffer> {
+export function readTree(root: string, skipped: string[] = [], dirs: string[] = []): Map<string, Buffer> {
   if (lstatSync(root).isSymbolicLink()) throw new Error(`skill root is a symlink: ${root}`);
   const out = new Map<string, Buffer>();
   const walk = (dir: string) => {
@@ -220,6 +230,7 @@ export function readTree(root: string, skipped: string[] = []): Map<string, Buff
           skipped.push(relative(root, abs).split(sep).join("/"));
           continue;
         }
+        dirs.push(relative(root, abs).split(sep).join("/"));
         walk(abs);
       } else if (st.isFile()) out.set(relative(root, abs).split(sep).join("/"), readFileSync(abs));
       // A FIFO/socket/device is neither hashed nor ignorable: fail closed.
@@ -238,11 +249,12 @@ export function readTree(root: string, skipped: string[] = []): Map<string, Buff
 export function readOwnership(dir: string, dirName: string, manifest: Pick<SkillManifest, "entries">): Ownership {
   let files: Map<string, Buffer>;
   const skipped: string[] = [];
+  const dirs: string[] = [];
   try {
-    files = readTree(dir, skipped);
+    files = readTree(dir, skipped, dirs);
   } catch (err) {
     return { owner: "user", reason: `cannot prove ownership: ${(err as Error).message}` };
   }
   if (skipped.length) return { owner: "user", reason: `cannot prove ownership: unread dir ${skipped[0]}` };
-  return ownership(dirName, files, manifest);
+  return ownership(dirName, files, manifest, dirs.sort());
 }

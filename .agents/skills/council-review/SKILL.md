@@ -1,20 +1,31 @@
 ---
 name: council-review
 origin: aura
-description: Perform a rigorous Carmack Council code review. Use when explicitly asked to review code, do a "council review", "carmack review", or invoke /council-review. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipelines), Karri Saarinen (UI quality), Vitaly Friedman (UX quality), Kent Beck (test quality). Uses parallel subagents for deep, independent review. Produces prioritised P1/P2/P3 findings. Stack: Python 3.11+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
+description: Perform a rigorous Carmack Council code review. Use when explicitly asked to review code, do a "council review", "carmack review", or invoke /council-review. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipelines), Karri Saarinen (UI quality), Vitaly Friedman (UX quality), Kent Beck (test quality). Uses parallel subagents for deep, independent review. Produces prioritised P1/P2/P3 findings after a mandatory deterministic Phase 0 (typecheck/lint/tests + E2E/smoke). Risk-based: worth running for payments, auth, migrations/schema, irreversible operations, and plan review before implementation; not worth it for routine UI tweaks or refactors. Stack: Python 3.10+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 
 # Carmack Council Reviewer
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Chair** — John Carmack's philosophy made operational. You coordinate a council of domain experts, each running as an independent subagent via the `Task` tool. Your job is to map the codebase, assign domain-relevant files to each expert, receive their findings, then merge, deduplicate, and prioritise into a single sharp review.
 
 **Critical context principle: the Chair orchestrates. The experts read code.** You never deep-read every file in scope. You use Glob and Grep to build a structural map, then delegate deep reading to the subagents — each in their own 200k context window. This is what makes the council scalable to large codebases.
 
+## When to run (risk-based)
+
+Worth the cost: payments / money movement, auth & access control, migrations / schema changes, irreversible operations (deletes, sends, deploys, ledger writes), and plan review before implementation. Not worth it for routine UI tweaks, copy changes, or refactors — run the project's checks and a normal review instead. Evidence (19-project corpus, 2026-10): real defects were 8–20% of council findings, concentrated in money/security; applying review findings without a deterministic gate caused ≥20 prod regressions in 7 projects. If the request is low-risk, say so and suggest the cheaper path before dispatching anyone.
+
 ## Stack Context
 
-The opinionated stack:
-- **Python 3.11+** — async/await, type hints
-- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers
+The opinionated stack (see `STACK.md` in project root for full details):
+- **Python 3.10** (production) / **3.12** (CI) — async/await, type hints
+- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers. **NOT python-telegram-bot** — different APIs entirely.
 - **No HTTP server** — polling bot only, no FastAPI/Flask
 - **SQLAlchemy 2.x sync** — `scoped_session` + `psycopg2`; NOT async SQLAlchemy
 - **PostgreSQL 15** — primary database; Alembic for migrations
@@ -27,13 +38,53 @@ Scale concerns (sharding, read replicas, multi-region) are premature. aiogram ha
 
 ---
 
+## Phase 0: Advisor Selection (DO NOT SKIP)
+
+Council selection is **adaptive and universal** — it is defined once, for every
+`/council-*` skill, in `$CATALOG/selection-engine.md`.
+
+**Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
+Read it and run its flow before the council customisation and Phase 1 below. It
+replaces the old two-stack detect-or-refuse router: rather than refusing any
+workspace that is not one of two hardcoded stacks, the engine fingerprints the
+workspace, scores every advisor in the catalog against that fingerprint plus the
+review's domains, and proposes an adaptive roster (min 3 / max 11).
+
+- **No fixed panel.** The catalog IS the panel — any advisor whose `meta.yaml`
+  declares a `capabilities` profile is seatable. Who sits is chosen per workspace.
+- **No refusal path.** An unrecognised stack becomes a recoverable *confirm-stack*
+  prompt (engine "Confirm-stack" section), never a dead-end "unsupported stack".
+  A recognised stack the catalog does not cover hits the **Stack gate** below.
+- **Same engine, either entry point.** This suffixless skill carries the
+  Python-stack review body below; `/council-review-aura` carries the Aura-stack
+  review body. The engine selects the roster identically from either; the variant
+  only changes the default stack context and the automated-check toolchain, and
+  the engine's Phase 3 briefs each seat on the *detected* stack regardless.
+
+Carry the engine's outputs — the selected roster and each seat's matched-signal
+WHY — into the dispatch phase below.
+
+**Stack gate (before any dispatch).** If the fingerprint's languages/frameworks are
+not covered by any stack-specific advisor in the catalog — only the cross-stack
+`any` lenses scored, or every seated specialist carries the engine's MISMATCH flag
+(e.g. a python-telegram-bot or Next.js repo against the aiogram-tuned seats) — say so
+in one line ("Stack not covered by the expert catalog: <detected tokens>") and stop
+early, offering two forward actions: (a) run only the generic minimal panel — the
+domain-relevant cross-stack lenses (hunt / fowler / willison / beck), no framework
+specialists — or (b) skip the council and rely on Phase 0 + a normal review. Never
+dispatch MISMATCH-flagged specialists into a stack they were not written for; that
+produced zero useful findings on unsupported stacks in the 2026-10 corpus. This is a
+recoverable prompt, not a dead-end refusal.
+
+---
+
 ## Customising the Council
 
 Every expert is modular. To remove an expert you don't need, delete their subagent section from Phase 3, remove their file from the Phase 4 output file list, remove their row from the Findings Breakdown table in Phase 5, and remove their output file from the expert output files list. Update the subagent count in Phase 3 and Phase 4 to match.
 
 To add a new expert, copy an existing subagent section, point it at a new reference document, add a domain assignment row in Phase 2, and add entries in Phase 4 and Phase 5.
 
-The Docker/Deploy Quality expert focuses on Dockerfile best practices, Cloud Run optimization, and environment variable management.
+The hashimoto (DevOps cross-stack) expert focuses on Dockerfile best practices, GitHub Actions supply-chain hardening, Cloud Run optimization, environment variable management, AND VPS systemd unit discipline (service-user vs config-user, supervisor-before-kill, port-reuse via `ss -tlnp`, secrets-at-rest mode 600).
 
 ---
 
@@ -42,7 +93,7 @@ The Docker/Deploy Quality expert focuses on Dockerfile best practices, Cloud Run
 When compacting during a council review session, preserve:
 - The timestamp value (YYYY-MM-DD-HHMM format)
 - The Context Brief (or its file path: `.council/review-output/$TIMESTAMP/context-brief.md`)
-- Phase 0 automated check results (ruff, pyright, pytest pass/fail summary)
+- Phase 0 automated check results (ruff, pyright, pytest, E2E/smoke pass/fail/could-not-run summary)
 - The domain file assignments from Phase 2
 - Which council subagents have been dispatched and their output file paths
 - The current phase number and what has been completed
@@ -51,9 +102,9 @@ When compacting during a council review session, preserve:
 
 ---
 
-## Phase 0: Automated Quality Checks
+## Phase 0: Automated Quality Checks (MANDATORY — before any expert dispatch)
 
-Before any human-style review, run the automated toolchain. These results feed into the context brief and are shared with all council members.
+Before any human-style review, run the project's deterministic checks. No expert is dispatched until this phase has produced a result. These results feed into the context brief, are shared with all council members, and lead the final report.
 
 **First, create timestamped output directory:**
 ```bash
@@ -63,20 +114,23 @@ mkdir -p .council/review-output/$TIMESTAMP
 
 Store `TIMESTAMP` for use throughout the review. All output files will use this timestamp.
 
-Run all three checks **in parallel** (they are independent):
+**Discover the commands — do not assume them.** Read `pyproject.toml`, `Makefile`, `package.json`, `CLAUDE.md` / `AGENTS.md`, `STACK.md`, CI workflow files, and `deploy/` / runbook docs for the project's own typecheck, lint, test, and E2E/smoke commands. The defaults below are only a fallback for the reference Python stack.
 
-1. **Lint + Format** — `uv run ruff check src/ tests/` and `uv run ruff format --check src/ tests/` — captures lint and format violations
-2. **Type check** — `uv run pyright src/` — captures type errors across the full codebase
-3. **Tests** — `uv run pytest` — captures test failures
+Run these checks **in parallel** where independent:
+
+1. **Lint + Format** — project command, else `uv run ruff check src/ tests/` and `uv run ruff format --check src/ tests/`
+2. **Type check** — project command, else `uv run pyright src/`
+3. **Tests** — project command, else `uv run pytest`
+4. **E2E / smoke of the changed surface** — if the project has one (an e2e suite, a smoke script, a staging bot/command, a dry-run entry point, a health endpoint on a throwaway instance), run it against the surface the diff touches. If it has none, exercise the changed entry point minimally (import + one call path, or start the process against a test config and hit the changed handler). Never against prod data or prod processes.
 
 **Rules:**
 - Run all checks against the current working tree (not just staged changes).
 - Do NOT fix anything. This phase is observation only.
-- Record the results — pass/fail counts, specific error messages, failing test names.
-- If a check cannot run, note the reason and continue — these are recoverable.
+- Record the results — pass/fail counts, specific error messages, failing test names; separate failures in the changed scope from pre-existing ones.
+- **If a check cannot run, do not pretend.** Record exactly which check and why. If the E2E/smoke run or the test suite cannot run, the report MUST open with a `⚠ UNVERIFIED — <which checks could not run and why>` line, the confidence line is set to **Low**, and no finding may be labelled P1 on the strength of static reading alone unless it carries a concrete reproduction (see Phase 4 severity calibration). Never write "skipped" and carry on as if verified.
 - Include a summary in the context brief under a **"## Automated Check Results"** section so all council members have visibility.
 
-**Failures become findings:** Every pyright error, lint error, or test failure from Phase 0 MUST appear as a numbered finding in the final Phase 5 synthesis output. Use the exact error message and file location. Severity: pyright errors → P1, test failures → P1, lint errors → P2, lint warnings → P3. These are not background context — they are actionable items in the fix list so a downstream fixing agent can address them alongside the council's findings.
+**Deterministic failures come first.** Every type error, test failure, or E2E/smoke failure in the changed scope is reported in the **Deterministic Check Failures** section at the top of the Phase 5 output — above all council findings — with the exact error message and file location. They are the top priority of the fix list: a red build outranks any expert opinion. Lint errors go in the same section as lower-priority items. Pre-existing failures outside the scope are listed once, briefly, as context — not as findings. Unparseable volume (hundreds of lint errors on a repo with no lint baseline) is summarised as a count, not itemised.
 
 ---
 
@@ -84,25 +138,31 @@ Run all three checks **in parallel** (they are independent):
 
 Before briefing anyone, build a structural map of the codebase. **You are mapping, not reading.** Your goal is to understand architecture, boundaries, and data flow well enough to write an accurate brief and assign files to the right experts. The experts do the deep reading.
 
-1. **Identify the scope** — Ask the user what files/modules to review if not specified. Confirm before proceeding.
-2. **Glob the structure** — Get the full directory tree of source files. Understand module boundaries, where code lives, what's config vs source vs test.
-3. **Grep for architectural patterns** — Search for structural markers, not bugs:
-   - `APIRouter`, `FastAPI`, `@app.`, `@router.` → FastAPI router structure
+### Scope-first approach (IMPORTANT)
+
+**Default scope = changed files only.** Unless the user explicitly requests a full-repo review, scope the review to files from `git diff`:
+
+```bash
+# Get changed files as the default review scope
+git diff --name-only HEAD~5  # or git diff main..HEAD, adjust as needed
+```
+
+If the user specifies particular files/modules, use those. Only fall back to full-repo Glob if the user explicitly says "review the entire project" or "full review".
+
+### Steps
+
+1. **Identify the scope** — Use `git diff --name-only` to get changed files. Ask the user to confirm scope if ambiguous. Do NOT default to full repo.
+2. **Glob selectively** — Only Glob directories that contain changed files, NOT the entire tree. For example, if changes are in `script/antispam/`, Glob `script/antispam/**/*.py`, not `**/*.py`.
+3. **Grep for architectural patterns** — Search only within the scope, not repo-wide:
    - `SQLAlchemy`, `Session`, `Base`, `Column` → database access patterns
-   - `Application`, `CommandHandler`, `MessageHandler`, `CallbackQueryHandler` → Telegram bot handlers
-   - `Depends(`, `dependency` → FastAPI dependency injection
+   - `@router.` → handler patterns
    - `import` patterns → dependency graph between modules
-   - `BaseModel`, `Field(` → Pydantic models
-   - `def test_`, `pytest`, `@pytest` → test file locations and patterns
-4. **Read only architectural files** — Read a small number of key files to understand the skeleton:
-   - `pyproject.toml`, `Dockerfile`, `.env.example` — build/config
-   - Main app entry point (`main.py`, `app.py`) — application setup
-   - FastAPI router files — API shape
-   - Telegram bot handler registration — command/message routing
-   - Any `__init__.py` files that reveal module structure
-   - **Cap: ~8–10 files max.** If you're reading more, you're doing the experts' job.
-5. **Read conventions.md** — If it exists at the project root (`conventions.md`), read it completely. These are accepted patterns from prior council reviews. Share relevant conventions in the context brief so subagents don't flag accepted patterns as findings.
-6. **Check history** — `git log --oneline -15` for trajectory. Don't read diffs.
+   - `def test_` → test file locations
+4. **Read only architectural files if needed** — Only if the changed code touches unfamiliar modules:
+   - Main entry point, config files
+   - **Cap: ~5 files max for scoped reviews.** For full-repo reviews: ~8-10 files max.
+5. **Read conventions.md** — If it exists at the project root (`conventions.md`), read it completely. Share relevant conventions in the context brief so subagents don't flag accepted patterns as findings.
+6. **Check history** — `git log --oneline -10` for trajectory. Don't read diffs.
 
 **What NOT to do in Phase 1:**
 - Do NOT read every source file. That's the subagents' job.
@@ -136,8 +196,8 @@ List what's present and what's absent so subagents can calibrate.]
 recent commit trajectory. Things the experts should pay attention to.]
 
 ### Automated check results
-[Summary from Phase 0: tsc pass/fail + error count, lint pass/fail + error count,
-pytest pass/fail + failure names.
+[Summary from Phase 0: typecheck pass/fail + error count, lint pass/fail + error count,
+pytest pass/fail + failure names, E2E/smoke pass/fail/COULD NOT RUN (+ why).
 "All green" if everything passes. Pre-existing failures listed so reviewers
 don't re-report them as findings.]
 ```
@@ -150,10 +210,10 @@ Using the Grep results from Phase 1, categorise every file in scope into one or 
 ### Domain File Assignments
 
 **Hunt (Security):** [auth middleware, env config, API routes, webhook handlers, Telegram bot command handlers with user access checks]
-**Telegram UX Expert:** [Telegram bot handlers, inline keyboard builders, callback query handlers, conversation flow modules, message formatting utilities]
-**Backend/Python Expert:** [FastAPI routers, Pydantic models, dependency injection, asyncio patterns, error handling, background tasks]
-**Leach (Database):** [SQLAlchemy models, migrations, any file importing db session, Firestore client config]
-**Docker/Deploy Expert:** [Dockerfile, docker-compose.yml, entrypoint scripts, health check endpoints, env var management]
+**durov (Telegram UX):** [Telegram bot handlers, inline keyboard builders, callback query handlers, conversation flow modules, message formatting utilities]
+**vanrossum (Backend/Python):** [aiogram handlers, callback routers, asyncio patterns, error handling, background tasks]
+**brandur (Database):** [SQLAlchemy models, migrations, any file importing db session, database session management]
+**hashimoto (DevOps cross-stack — Docker + GHA + VPS systemd):** [Dockerfile, docker-compose.yml, entrypoint scripts, health check endpoints, env var management, GHA workflow files, systemd unit files if present]
 **Saarinen (UI Quality):** [Telegram message templates, inline keyboard layouts, any file with user-facing message output]
 **Friedman (UX Quality):** [conversation flows, error messages, multi-step wizards, empty state messages, user feedback patterns]
 **Fowler (Refactoring):** [module boundary files, __init__.py exports, shared utilities, files with complex abstractions, dependency-heavy files]
@@ -178,395 +238,134 @@ After writing the context brief to disk, the Phase 1 exploration work (Glob resu
 
 ### Dispatch rules
 
-Spawn **one subagent per council member** using the `Task` tool. All ten run in parallel. Each subagent receives:
+Spawn **one subagent per seated council member** using the `Task` tool. Subagents run in parallel. Each subagent receives:
 - A pointer to the context brief file (they read it themselves)
 - Their domain-specific file list (NOT the full file list)
 - A pointer to their reference document (they read it themselves)
 - An instruction to write findings to their output file
 - An instruction to return ONLY a one-line summary to the parent
 
-**You MUST spawn all ten.** If a council member's domain has no files (e.g., no SQLAlchemy files, no test files, no LLM code), spawn them anyway — they will confirm "No findings in my domain" which proves coverage.
+**Reduced council by default.** For scoped reviews (changed files only), spawn only the 4 core experts: Backend/Python, Hunt (Security), Leach (Database), Beck (Testing). Add other experts ONLY if changed files touch their domain (e.g., add Willison only if LLM code changed, add Telegram UX only if handler/keyboard code changed, add Deploy only if systemd/deploy scripts changed). For full-repo reviews explicitly requested by the user, spawn all relevant experts. **Never spawn an expert whose domain has zero files in scope** — skip them instead of having them confirm "no findings".
+
+**Skip-if-unchanged cache (PRO economy — spec `specs/council-pro-economy.md` Story 2).**
+Reuse a seat's cached findings when its assigned files are unchanged, via the
+workspace-agnostic server endpoints (work from any repo, unlike the aura-only CLI):
+1. Discover `ORCH_SID` (same probe as Phase 8 step 2: `curl -fsS localhost:3456/api/sessions`,
+   filter your cwd + `sessionGroupRole=="orchestrator"`). None → skip caching, dispatch all.
+2. Hash the seat's files: `curl -fsS -X POST localhost:3456/api/council/economy/cache/hash
+   -H 'Content-Type: application/json' -d '{"sessionId":"'"$ORCH_SID"'","paths":[<workspace-relative paths>]}'`
+   → `{"hash":"…"}`.
+3. Look up: `curl -fsS -X POST localhost:3456/api/council/economy/cache/get
+   -d '{"skill":"council-review","seatId":"<id>","filesHash":"<hash>","engineVersion":"rc2"}'`.
+4. `{"hit":true,…}` → do NOT dispatch that seat; fold its cached findings into synthesis
+   marked **"(from cache)"**. `{"hit":false,…}` → dispatch normally (the reason says why).
+Skip silently on any curl error (not inside the Aura UI / endpoints unavailable). Keep each
+seat's `filesHash` — Phase 9 writes fresh results back under it.
 
 **CRITICAL — NO CODE IN ANY SUBAGENT OUTPUT.** Every subagent prompt includes "No code" in the finding format. Subagents must not return code snippets, schema blocks, type definitions, config examples, or inline code. If a subagent writes code in their output file, strip it during synthesis.
 
 **CRITICAL — MINIMAL RETURN VALUES.** Each subagent must write detailed findings to their output file, then return ONLY a one-line summary to the parent context. Example: `"Findings written to .council/review-output/hunt.md — 3 findings (1 P1, 2 P2)"`. This prevents eight verbose Task outputs from flooding the Chair's context window.
 
-### Subagent 1: Troy Hunt (Security)
+### Council roster (engine-selected, catalog-resolved)
 
-**Task prompt:**
+There is NO fixed panel. The roster is the adaptive set the selection engine
+produced in Phase 0 (`selection-engine.md`): the catalog dirs whose `capabilities`
+profile the fingerprint + review-domains scored in, within the min-3 / max-11
+guardrail, after your fail-closed arbitration. The Chair MUST dispatch one
+subagent per SELECTED advisor using the `Task` tool. The prompt for each subagent
+is the literal verbatim content of that advisor's catalog file named below, with
+`[list ONLY <X>'s domain files]` (and any other inline placeholders the prompt
+declares) substituted from the brief.
+
+**Catalog file pattern:** `$CATALOG/<id>/review.md`
+
+For each SELECTED advisor, before dispatch:
+1. Read the catalog file at `$CATALOG/<id>/review.md`
+2. Substitute EVERY square-bracket placeholder in its body. The catalog is NOT
+   uniform, so match on the bracket, not on one literal spelling: the token is
+   spelled at least four ways across seats — `[list ONLY <X>'s domain files]`,
+   the same with " from the assignment" appended, a role name in place of `<X>`
+   (Telegram UX, Backend/Python, a11y, React/Web UI, …), and `[paste full brief]`
+   in the plan phases. Fill each from the brief's "### Domain File Assignments"
+   section (review skills) or the domain assignments from Phase 2 (plan skills);
+   `[paste full brief]` takes the whole brief.
+3. Substitute `$TIMESTAMP` with the value captured in Phase 0 (review skills only)
+4. **Pre-dispatch assertion — MUST, do not skip.** Scan the substituted body for
+   a surviving *substitution target*: any `[`…`]` token whose text contains
+   `domain files` or `paste full brief`, and any unresolved `$` variable. If one
+   survives, DO NOT dispatch: emit the refusal below and stop. An expert handed an
+   unsubstituted file list reads the brief or improvises and still returns a
+   well-formed report, so this failure has NO downstream signal — the pre-synthesis
+   gate checks only that the output file exists and is non-empty, which makes
+   "expert was handed nothing" indistinguishable from "expert found nothing". This
+   assertion is the only place it is observable.
+
+   **Scope it to substitution targets — do NOT widen it to every bracket.** The
+   prompt body also carries the expert's *output template* — `[short descriptive
+   title]`, `[path:line-range]`, `[P1/P2/P3 …]` — which the EXPERT fills when
+   writing findings, not the Chair. Those are supposed to survive substitution: 49
+   of the 59 phase files carry at least one, so a blanket "no bracket may survive"
+   check refuses almost every dispatch. That is the same defect as a gate that can
+   only pass, just inverted — a gate that can only fail teaches its operator to
+   ignore it. The two semantic substrings above match all four known spellings of
+   the file-list token, including the role-named ones, so scoping the check does
+   not reintroduce dependence on a single literal.
+5. Dispatch via `Task` with `subagent_type=general-purpose` and the substituted
+   body as the prompt.
+
+   **Per-seat model tier (PRO economy — spec `specs/council-pro-economy.md`).**
+   Choose each seat's `Task` `model` fail-closed:
+   - a **guaranteed** cross-stack lens (security `hunt`, LLM `willison`, refactor
+     `fowler`, test `beck`) ALWAYS runs the **top** model — never cheap (Boundary 🚫);
+   - every other seat also defaults to **top** UNTIL the run-stats dataset proves a
+     `(seat, complexity-band)` safe to run cheap (never hand-guess a threshold);
+   - `top` → omit `model`; `cheap` → `model: "haiku"`.
+   Decision logic + data-derived policy live in the aura-companion engine
+   (`web/scripts/tier-policy.ts` / `stats-derive.ts`) when it is checked out. Today
+   every seat runs top — cheap-tiering switches on only once data + the guardrail exist.
+
+Refusal template for a surviving placeholder:
+
 ```
-You are Troy Hunt reviewing code for security vulnerabilities. You are part of a Carmack Council code review.
+Dispatch refused: unsubstituted placeholder in <id>/review.md
 
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/security.md
+Surviving token(s):
+  - <the bracketed text, verbatim>
 
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Hunt's domain files from the assignment]
+Substitution source checked:
+  - <brief section name, or "Phase 2 domain assignments">
 
-Review for security issues using the principles in your reference document. For each finding, write in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from security.md]
-- Severity: [P1/P2/P3 using these criteria: P1=bugs, vulns, data loss, correctness failures; P2=maintainability landmines, silent failures, compounding debt; P3=clarity, naming, style]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. What breaks concretely.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no security findings exist, write: "No security findings. [1 sentence explaining why the code is clean in this domain.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag security issues.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/hunt.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/hunt.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 2: Telegram UX Expert
-
-**Task prompt:**
-```
-You are a Telegram Bot UX Expert reviewing code for Telegram bot conversation quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-frontend.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Telegram UX domain files from the assignment]
-
-Review for Telegram bot UX quality issues using the principles in your reference document. This stack uses python-telegram-bot with async handlers. Focus on: conversation flow design, inline keyboard layouts, callback data management, error messages to users, multi-step wizards (ConversationHandler patterns), proper use of edit_message vs send_message, message formatting (MarkdownV2, HTML), user feedback and loading states.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-frontend.md]
-- Severity: [P1/P2/P3]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. Concrete cost.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no Telegram UX findings exist, write: "No Telegram UX findings. [1 sentence explaining why.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag Telegram bot conversation flow, inline keyboard, and message UX issues. Do not flag visual design (Saarinen's domain) or general UX patterns (Friedman's domain).
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/telegram-ux.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/telegram-ux.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 3: Backend/Python Expert
-
-**Task prompt:**
-```
-You are a Backend/Python Expert reviewing code for backend quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-backend.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Backend/Python domain files from the assignment]
-
-Review for backend quality issues using the principles in your reference document. This stack uses FastAPI, Pydantic v2, python-telegram-bot, and asyncio. Focus on: async correctness, error handling discipline with HTTPException, FastAPI dependency injection, Pydantic model design, python-telegram-bot handler patterns, background task management.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-backend.md]
-- Severity: [P1/P2/P3]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. Concrete cost.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no backend quality findings exist, write: "No backend findings. [1 sentence explaining why.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag backend/async/error-handling/FastAPI/python-telegram-bot issues.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/backend-python.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/backend-python.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
+Fix the catalog file or the brief, then re-dispatch. Do not dispatch this
+expert with the placeholder intact.
 ```
 
-### Subagent 4: Brandur Leach (Postgres Quality)
-
-**Task prompt:**
-```
-You are Brandur Leach reviewing code for Postgres quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-postgres.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Leach's domain files from the assignment]
-
-Review for database quality issues using the principles in your reference document. This stack uses SQLite (via SQLAlchemy async) or Firestore for persistence. Focus on: schema design, migration safety, transaction correctness, query patterns, connection management, SQLAlchemy defaults that need attention.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-postgres.md]
-- Severity: [P1/P2/P3]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. Concrete cost.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no Postgres findings exist, write: "No Postgres findings. [1 sentence explaining why.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag SQLite/Firestore/SQLAlchemy/schema/migration/query issues.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/leach.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/leach.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 5: Docker/Deploy Quality Expert
-
-**Task prompt:**
-```
-You are a Docker and deployment quality expert reviewing code for containerization and deployment issues. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Docker/Deploy domain files from the assignment]
-
-Review for deployment quality issues. Focus on: Dockerfile best practices (multi-stage builds, layer caching, minimal base images), Cloud Run optimization (cold starts, concurrency, memory limits), environment variable management (secrets vs config), health check endpoints, graceful shutdown handling, container security (non-root users), entrypoint scripts, docker-compose configuration.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [Docker/Cloud Run best practice area]
-- Severity: [P1/P2/P3]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. Concrete deployment cost.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no deployment findings exist, write: "No deployment findings. [1 sentence explaining why.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag deployment and containerization issues.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/docker-deploy.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/docker-deploy.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 6: Karri Saarinen (UI Quality)
-
-**Task prompt:**
-```
-You are Karri Saarinen reviewing code for UI quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-ui.md
-Optionally read the full UI Architect skill at: skills/ui-architect/SKILL.md for additional methodology context.
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Saarinen's domain files from the assignment]
-
-Review for UI quality issues using the principles in your reference document. This stack uses Telegram Bot API — the UI is inline keyboards, message text (MarkdownV2/HTML), and conversation flows. Focus on: message formatting, information density in bot messages, inline keyboard visual layout, use of emoji for visual hierarchy, consistent message structure across bot responses.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-ui.md]
-- Severity: [P1/P2/P3 using these criteria: P1=visual noise that obscures primary data or breaks hierarchy; P2=inconsistency with design system, spacing/typography violations; P3=polish, alignment drift, minor visual improvements]
-- What's wrong: [1-2 sentences. Describe the concrete visual consequence — not just "doesn't follow the system."]
-- Consequence: [1 sentence. What the user sees or feels.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no UI quality findings exist, write: "No UI findings. [1 sentence explaining why the visual design is clean.]"
-
-Do not include code snippets, CSS blocks, or design token examples. Describe everything in plain English. Stay in your lane — only flag visual design quality issues. Do not flag UX patterns (Friedman's domain), conversation flow architecture (Telegram UX Expert's domain), or accessibility compliance.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/saarinen.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/saarinen.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 7: Vitaly Friedman (UX Quality)
-
-**Task prompt:**
-```
-You are Vitaly Friedman reviewing code for UX quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-ux.md
-Optionally read the full UX Architect skill at: skills/ux-architect/SKILL.md for additional methodology context.
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Friedman's domain files from the assignment]
-
-Review for UX quality issues using the principles in your reference document. Focus on: screen state completeness (blank, loading, partial, error, ideal), information architecture, navigation patterns, progressive disclosure, form design, error recovery flows, empty states, interaction feedback, cognitive load management.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-ux.md]
-- Severity: [P1/P2/P3 using these criteria: P1=user cannot complete core task, missing screen states on primary views, destructive actions without confirmation; P2=excessive friction, missing feedback, poor error recovery, missing empty states on secondary views; P3=density improvements, navigation refinements, interaction polish]
-- What's wrong: [1-2 sentences. Describe the concrete UX consequence — not just "could be better."]
-- Consequence: [1 sentence. What the user experiences.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no UX quality findings exist, write: "No UX findings. [1 sentence explaining why the interaction design is clean.]"
-
-Do not include code snippets, wireframes, or component examples. Describe everything in plain English. Stay in your lane — only flag UX and interaction design issues. Do not flag visual design (Saarinen's domain), conversation flow architecture (Telegram UX Expert's domain), or accessibility compliance.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/friedman.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/friedman.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 8: Kent Beck (Test Quality)
-
-**Task prompt:**
-```
-You are Kent Beck reviewing code for test quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-testing.md
-Optionally read the full Test Architect skill at: skills/test-architect/SKILL.md for additional audit methodology context.
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list Beck's domain files — test files AND the source files they test]
-
-Review existing tests for quality using the principles in your reference document. You are auditing, not writing tests. Focus on: tests that never failed (red step proof), behavioral vs structure-coupled tests, mock discipline (count and type), happy path coverage, assertion quality, AI-generated test failure modes (mock theatre, weakened assertions, error-only coverage, tautological expected values), Test Desiderata balance (Behavioral, Structure-insensitive, Specific, Predictive).
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-testing.md]
-- Severity: [P1/P2/P3 using these criteria: P1=tests providing false confidence, critical behavior untested, agent cheating detected (deleted/weakened assertions, expected values copied from implementation), no happy-path tests; P2=coverage gaps, mock count above 3, structure-coupled assertions, always-green suite despite known issues; P3=redundant tests, naming, organisation, test economics]
-- What's wrong: [1-2 sentences. Describe the concrete testing consequence — not just "this test is bad."]
-- Consequence: [1 sentence. What false confidence this creates or what regression this misses.]
-- Fix: [1-2 sentences. What the test should do instead. NO code snippets.]
-
-If no test quality findings exist, write: "No test quality findings. [1 sentence explaining why the test suite is healthy.]"
-
-Do not include code snippets, test code examples, or fixture data. Describe everything in plain English. Stay in your lane — only flag test quality issues. Do not flag the implementation code itself (other experts handle that) — only flag how well the tests verify that code.
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/beck.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/beck.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 9: Martin Fowler (Refactoring / Structure)
-
-**Task prompt:**
-```
-You are Martin Fowler reviewing code for structural quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/refactoring.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Fowler's domain files from the assignment]
-
-Review for structural issues using the principles in your reference document. Focus on: module boundaries and cohesion, unnecessary abstraction layers, premature generality, duplicated knowledge (not just duplicated code), coupling between modules that should be independent, barrel export sprawl, files doing too many things, naming that obscures intent, and structural debt that will compound as the codebase grows. Apply the economic test: only flag structural issues that will cost real time in the next few months, not theoretical purity concerns.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from refactoring.md]
-- Severity: [P1/P2/P3 using these criteria: P1=structural issue causing bugs or blocking feature work; P2=structural debt that compounds — will cost significantly more to fix later than now; P3=clarity and organisation improvements that reduce cognitive load]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. What concrete cost this creates.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no structural findings exist, write: "No structural findings. [1 sentence explaining why the code structure is clean.]"
-
-Do not include code snippets, type definitions, or config examples. Describe everything in plain English. Stay in your lane — only flag structural and design quality issues. Do not flag security (Hunt's domain), deployment (Docker/Deploy Expert's domain), or visual/UX concerns (Saarinen/Friedman's domain).
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/fowler.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/fowler.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
-
-### Subagent 10: Simon Willison (LLM Pipeline Quality)
-
-**Task prompt:**
-```
-You are Simon Willison reviewing code for LLM pipeline quality. You are part of a Carmack Council code review.
-
-SETUP: Read the context brief at .council/review-output/$TIMESTAMP/context-brief.md
-Then read your reference document at: references/quality-llm.md
-
-YOUR FILES TO REVIEW (read ALL of these):
-[list ONLY Willison's domain files from the assignment]
-
-Review for LLM pipeline quality issues using the principles in your reference document. Focus on: prompt construction and injection risks, model call error handling, streaming correctness, token budget management, tool/function definition quality, response validation, hallucination guardrails, cost awareness, evaluation strategy, structured output parsing, retry and fallback patterns.
-
-Report findings in this exact format:
-
-FINDING:
-- Title: [short descriptive title]
-- File: [path:line-range]
-- Principle: [principle name and number from quality-llm.md]
-- Severity: [P1/P2/P3 using these criteria: P1=prompt injection vulnerability, silent hallucination propagation, missing error handling on model calls, unbounded token spend; P2=missing evaluation coverage, poor prompt structure, no fallback strategy, response not validated; P3=prompt clarity, cost optimisation, logging improvements]
-- What's wrong: [1-2 sentences. Specific to THIS codebase.]
-- Consequence: [1 sentence. Concrete cost.]
-- Fix: [1-2 sentences. What to change and where. NO code snippets.]
-
-If no LLM pipeline findings exist, write: "No LLM pipeline findings. [1 sentence explaining why.]"
-
-Do not include code snippets, prompt text, or config examples. Describe everything in plain English. Stay in your lane — only flag LLM pipeline quality issues. Do not flag general backend concerns (Backend/Python Expert's domain) or security issues beyond prompt injection (Hunt's domain).
-
-IMPORTANT — OUTPUT INSTRUCTIONS:
-1. Write your complete findings to .council/review-output/$TIMESTAMP/willison.md
-2. Return ONLY this single line to the parent: "Findings written to .council/review-output/$TIMESTAMP/willison.md — N findings (breakdown by severity)"
-Do NOT return your full findings to the parent. The file is your deliverable.
-```
+The expert ID MUST match `^[a-z][a-z0-9-]{1,31}$` (security canary).
+Unknown IDs MUST refuse with a structured error naming the catalog path checked
+(AC-6.1 contract from `specs/council-experts-catalog.md`).
 
 ---
 
 ## Phase 4: Merge and Deduplicate
 
-### Pre-synthesis gate: confirm all ten output files exist
+### Pre-synthesis gate: confirm every seated advisor's output file exists
 
-Before synthesising, read ALL ten output files:
+Before synthesising, read one output file per SEATED advisor — the roster the
+engine selected and you dispatched in Phase 3, no more and no fewer:
 
-1. `.council/review-output/$TIMESTAMP/hunt.md`
-2. `.council/review-output/$TIMESTAMP/telegram-ux.md`
-3. `.council/review-output/$TIMESTAMP/backend-python.md`
-4. `.council/review-output/$TIMESTAMP/leach.md`
-5. `.council/review-output/$TIMESTAMP/docker-deploy.md`
-6. `.council/review-output/$TIMESTAMP/saarinen.md`
-7. `.council/review-output/$TIMESTAMP/friedman.md`
-8. `.council/review-output/$TIMESTAMP/beck.md`
-9. `.council/review-output/$TIMESTAMP/fowler.md`
-10. `.council/review-output/$TIMESTAMP/willison.md`
+`.council/review-output/$TIMESTAMP/<id>.md` for each `<id>` you dispatched.
 
-**Count them.** If any file is missing or empty — whether due to a subagent failure, context compaction, or any other reason — **re-dispatch that subagent before proceeding.** Do not synthesise with partial results. Do not say "sufficient for synthesis" with 5 out of 10. Every subagent was dispatched for a reason. Wait for all ten, re-dispatch if needed, then synthesise once.
+**Count them against the seated roster.** If any dispatched advisor's file is
+missing or empty — whether due to a subagent failure, context compaction, or any
+other reason — **re-dispatch that subagent before proceeding.** Do not synthesise
+with partial results. Do not say "sufficient for synthesis" with a subset. Every
+subagent was seated for a reason. Wait for the whole roster, re-dispatch if
+needed, then synthesise once.
 
 ### Synthesis
 
-Once all ten output files are confirmed present and complete:
+Once every seated advisor's output file is confirmed present and complete:
 
-1. **Collect all findings** from all ten files.
+1. **Collect all findings** from every seated advisor's file.
 2. **Deduplicate** — If two experts flag the same issue, keep the PRIMARY domain's finding and note the cross-reference. The primary domain is whichever reference doc has the more specific fix. Specific overlap rules:
    - **Saarinen vs Telegram UX Expert:** Saarinen takes priority for message visual design (formatting, information density). Telegram UX Expert takes priority for conversation flow architecture and inline keyboard design.
    - **Friedman vs Telegram UX Expert:** Friedman takes priority for interaction patterns and screen state design. Telegram UX Expert takes priority for bot-specific conversation structure and callback handling.
@@ -580,8 +379,13 @@ Once all ten output files are confirmed present and complete:
    - "Is this actually a problem in THIS codebase, or is the subagent pattern-matching?"
    - "What's the concrete consequence if this isn't fixed?"
    - "Would Carmack care about this, or is it bikeshedding?"
-5. **Cut weak findings** — If total exceeds 15, cut the weakest P3s. A focused review with 10 sharp findings beats 25 nitpicks.
-6. **Number findings sequentially** across all severity levels (1, 2, 3... not restarting per section).
+5. **Calibrate severity (re-grade every expert's label — do not inherit it):**
+   - **P1** only for a defect with a concrete reproduction or exploit path in the CURRENT code — `file:line` plus a step-by-step scenario (input/state → wrong outcome) — that causes money loss, a security breach, data loss/corruption, or a user-visible break. No reproduction → not P1.
+   - **Never P1:** missing or weak tests, missing docs, style, naming, conventions, "consider refactoring", hypothetical future scale. These are P2 at most (usually P3).
+   - **P2** — a real defect with a plausible but not demonstrated trigger, or a correctness risk outside the P1 impact classes.
+   - **P3** — improvements worth knowing; no defect.
+6. **No quota, no padding.** Report only defects you can substantiate from the code. There is no target count and no cap to fill — zero findings is a valid, reportable outcome ("No substantiated defects found"). Drop any finding you cannot tie to specific code and a concrete consequence, however many that leaves.
+7. **Number findings sequentially** across all severity levels (1, 2, 3... not restarting per section).
 
 ---
 
@@ -597,10 +401,22 @@ Use this exact format. Structure and attribution are non-negotiable — every fi
 **Scope:** [what was reviewed — files, module, full codebase]
 **Context:** [2-3 sentences: what this code does, how it fits in, what matters most]
 **Council dispatched:** [list which subagents ran and which returned findings vs "no findings"]
+**Deterministic checks:** [typecheck / lint / tests / E2E-smoke — pass / fail / COULD NOT RUN (why)]
+**Confidence:** [High — all checks ran | Medium — some ran | Low — tests or E2E/smoke could not run]
+
+[If any check could not run, the FIRST line of the report above the title is: ⚠ UNVERIFIED — <which checks, why>]
+
+---
+
+## Deterministic Check Failures (fix first)
+
+[Type errors, test failures, E2E/smoke failures in the changed scope — exact message + file:line. Then lint errors. "None" if green. Pre-existing out-of-scope failures: one line of context, not findings.]
 
 ---
 
 ## P1 — Fix Now
+
+[Only defects with a concrete reproduction/exploit path affecting money, security, data loss, or a user-visible break. "None" is a valid section body.]
 
 ### 1. [Title]
 
@@ -612,9 +428,11 @@ Use this exact format. Structure and attribution are non-negotiable — every fi
 
 **Finding:** [1-2 sentences. What's wrong — specific to THIS codebase.]
 
+**Reproduction:** [Concrete scenario in current code: input/state → steps → wrong outcome. Required for P1.]
+
 **Consequence:** [1 sentence. What breaks, leaks, or corrupts.]
 
-**Fix:** [1-2 sentences. What to change and where. No code snippets.]
+**Fix:** [1-2 sentences. The intended behaviour after the fix, then what to change and where — stated so the applier can check the diff does THIS and not its opposite. Name the test that should fail before the fix. No code snippets.]
 
 ---
 
@@ -630,7 +448,7 @@ Use this exact format. Structure and attribution are non-negotiable — every fi
 
 **Finding:** [1-2 sentences. What's wrong.]
 
-**Fix:** [1-2 sentences. What to change and where. No code snippets.]
+**Fix:** [1-2 sentences. Intended behaviour after the fix, then what to change and where. No code snippets.]
 
 ---
 
@@ -666,10 +484,10 @@ Use this exact format. Structure and attribution are non-negotiable — every fi
 | Expert | P1 | P2 | P3 | Total | Key Areas |
 |--------|----|----|----|----|-----------|
 | Hunt (Security) | [N] | [N] | [N] | [N] | [1-2 words per main area, comma-separated] |
-| Telegram UX Expert | [N] | [N] | [N] | [N] | [1-2 words per main area] |
-| Backend/Python Expert | [N] | [N] | [N] | [N] | [1-2 words per main area] |
-| Leach (Database) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
-| Docker/Deploy Expert | [N] | [N] | [N] | [N] | [1-2 words per main area] |
+| durov (Telegram UX) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
+| vanrossum (Backend/Python) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
+| brandur (Database) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
+| hashimoto (DevOps cross-stack) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
 | Saarinen (UI Quality) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
 | Friedman (UX Quality) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
 | Fowler (Refactoring) | [N] | [N] | [N] | [N] | [1-2 words per main area] |
@@ -681,10 +499,10 @@ Use this exact format. Structure and attribution are non-negotiable — every fi
 
 **Expert output files:**
 - Hunt: `.council/review-output/$TIMESTAMP/hunt.md`
-- Telegram UX: `.council/review-output/$TIMESTAMP/telegram-ux.md`
-- Backend/Python: `.council/review-output/$TIMESTAMP/backend-python.md`
-- Leach: `.council/review-output/$TIMESTAMP/leach.md`
-- Docker/Deploy: `.council/review-output/$TIMESTAMP/docker-deploy.md`
+- durov (Telegram UX): `.council/review-output/$TIMESTAMP/durov.md`
+- vanrossum (Backend/Python): `.council/review-output/$TIMESTAMP/vanrossum.md`
+- brandur (Postgres): `.council/review-output/$TIMESTAMP/brandur.md`
+- hashimoto (DevOps cross-stack): `.council/review-output/$TIMESTAMP/hashimoto.md`
 - Saarinen: `.council/review-output/$TIMESTAMP/saarinen.md`
 - Friedman: `.council/review-output/$TIMESTAMP/friedman.md`
 - Beck: `.council/review-output/$TIMESTAMP/beck.md`
@@ -728,6 +546,9 @@ After writing FINAL-REVIEW.md, you MUST present a summary table to the user in t
 ```
 ## Council Review Complete — [N] Findings
 
+[⚠ UNVERIFIED — <checks that could not run> (only if any) · Confidence: High/Medium/Low]
+**Deterministic checks:** [pass / N failures — listed first in the report]
+
 | # | Finding | Severity | Expert | Fix Effort |
 |---|---------|----------|--------|------------|
 | 1 | [Short title] | P1 | [Expert] | [estimate] |
@@ -741,7 +562,18 @@ After writing FINAL-REVIEW.md, you MUST present a summary table to the user in t
 **Full review:** `.council/review-output/$TIMESTAMP/FINAL-REVIEW.md`
 ```
 
-This table is NON-NEGOTIABLE. Every council review session ends with this table presented to the user in conversation. The user should never have to ask "what did you find?" — the answer is always right there.
+This table is NON-NEGOTIABLE. Every council review session ends with this table presented to the user in conversation. The user should never have to ask "what did you find?" — the answer is always right there. With zero findings the table is replaced by "No substantiated defects found" plus the deterministic-check line — do not invent findings to fill it.
+
+### Applying findings (fix discipline — for whoever applies this review)
+
+This review fixes nothing itself. Whoever applies it (developer, `/council-implement`, a fixing agent) MUST follow this for every applied fix — fixes applied from reviews without it caused ≥20 prod regressions across 7 projects (2026-10 corpus), including fixes that did the opposite of the recommendation:
+1. **Cite the finding** — the finding number (or "Deterministic #") in the commit/log.
+2. **Restate and confirm** — restate the recommended behaviour in one sentence, then re-read the diff and confirm it implements THAT behaviour, not its inverse (check guard polarity, allow vs deny, include vs exclude, fail-open vs fail-closed).
+3. **Failing test first** — add a test that fails on the current code and passes after the fix. If no such test can be written, the fix is not applied as P1 work; record why.
+4. **Re-run Phase 0** — typecheck/lint/tests and the E2E/smoke run, after the fixes.
+5. **One fix-pass review, max.** At most one review round over the fix pass. If that round finds new P1s in the fixes themselves, STOP — do not start another fix/review loop; report the new P1s to the human and let them decide.
+
+Apply deterministic failures first, then P1s. P2/P3 are not applied in the same pass unless the human asks.
 
 ---
 
@@ -851,3 +683,107 @@ These will be shared with all council members in future reviews via the context 
 ```
 
 **If the user says "none":** Skip the update entirely. Say "No conventions added. Moving on." Do not push back or suggest they reconsider.
+
+---
+
+## Phase 8: Emit Council Checkpoint (auto)
+
+**Purpose.** When this skill runs inside an Aura Companion Council pair, this phase tells the observer half "the orchestrator just finished reviewing — here is the review file, cross-check it." The observer wakes within ~1 second of the checkpoint POST and emits its independent review to `<workspace>/.council/reviews/council-review-<provider>-observer.md`. Without this step the council loop never closes — the observer remains in "Awaiting first checkpoint" forever.
+
+The value: the orchestrator-run council review and the observer-run independent review come from different model contexts. Disagreement between them is itself signal.
+
+**Council pairing is a property of the SESSION, not of the workspace stack.** A Python workspace paired in the Aura Companion UI has an observer that needs waking exactly like an Aura workspace does. Do not skip this phase on the grounds that this is not an Aura project.
+
+**Skip this phase entirely** if any of these are true:
+- `http://localhost:3456/api/sessions` does not respond (you are not inside the Aura Companion UI).
+- No session in the response matches the current workspace + orchestrator role.
+- The `POST .../council/checkpoint` returns 409 — that response IS the silent-skip signal.
+
+### Steps
+
+1. **Probe the API.** Run `curl -fsS http://localhost:3456/api/sessions`. Non-zero exit or empty → skip the entire phase.
+
+2. **Discover the orchestrator session id.** Filter the response array for the entry matching ALL of:
+   - `state == "connected"`
+   - `cwd == <current workspace cwd>` (the cwd you reviewed under)
+   - `sessionGroupRole == "orchestrator"`
+   - newest `createdAt` if more than one match
+
+   Zero matches → silent skip. One match → capture `sessionId` (= `ORCH_SID`) and `sessionGroupId` (= `GROUP_ID`).
+
+3. **Compute next sequence.** List `<workspace>/.council/checkpoints/*.json`. Read each file's `sequence` field. `next_sequence = max(...) + 1`, or `0` if the directory is empty or absent.
+
+4. **Build CheckpointPayload.**
+
+   ```json
+   {
+     "schema_version": 1,
+     "checkpoint_id": "council-review-<seq>-<8-hex-random>",
+     "phase": "council-review",
+     "sequence": <next_sequence>,
+     "session_group_id": "<GROUP_ID>",
+     "emitted_at": "<UTC ISO 8601 T-form, no fractional seconds>",
+     "artifact_paths": [".council/review-output/<TIMESTAMP>/FINAL-REVIEW.md"]
+   }
+   ```
+
+   `artifact_paths` should be the single FINAL-REVIEW.md path from Phase 5, workspace-relative. The observer's job here is meta-review — does the orchestrator's review hold up?
+
+5. **POST.** Use the Bash tool:
+
+   ```bash
+   curl -fsS -X POST \
+     "http://localhost:3456/api/sessions/$ORCH_SID/council/checkpoint" \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD"
+   ```
+
+   Expected 200 with `{"ok": true, "written": "...", ...}`.
+
+6. **On non-200:**
+   - **409** ("Session is not part of an active council group"): silent skip, not an error.
+   - **400 / 403 / 500**: surface the raw response body to the user, do not retry.
+
+7. **Do not wait** for the observer's review. The 200 response IS the success signal for this phase; the observer's review lands asynchronously in the Aura UI's ObserverPanel.
+
+---
+
+## Phase 9: Record run-stats + result cache (PRO economy, auto)
+
+**Purpose.** Contribute this pipeline's run to the self-learning dataset and warm the
+skip-if-unchanged cache, via the workspace-agnostic server endpoints (so non-Aura
+pairs collect too). Recording ONLY — it can never drop a finding or change the review
+just produced. **Skip silently** if `localhost:3456` is unreachable.
+
+### Steps
+
+1. Reuse `ORCH_SID` from Phase 8 (or re-discover as in Phase 8 step 2). None → skip.
+
+2. **Complexity vector.** `diffFiles` + `diffLines` from `git diff --numstat` of the
+   reviewed scope; `surfaceCount` + `domainBreadth` from the Phase 0/selection
+   fingerprint (distinct surfaces / distinct seat domains).
+
+3. **Emit run-stats.** One row for this run:
+
+   ```bash
+   curl -fsS -X POST localhost:3456/api/council/economy/stats \
+     -H 'Content-Type: application/json' -d "$STATS_JSON"
+   ```
+
+   `$STATS_JSON` = `{"skill":"council-review","engineVersion":"rc2","complexity":{"diffFiles":<n>,"diffLines":<n>,"surfaceCount":<n>,"domainBreadth":<n>},"seats":[{"seatId":"hunt","guaranteed":true,"tier":"top","model":"default","findings":[{"id":"<fnd>","priority":"P1","survived":true}]}]}`
+   — one seat entry per SEATED advisor; `guaranteed` true for the fail-closed lenses
+   (`hunt`/`willison`/`fowler`/`beck` when domain-relevant); `findings` = that seat's
+   findings in the FINAL synthesis (`survived:true`), or a dropped raw finding
+   (`survived:false`) if you tracked it.
+
+4. **Cache put** — for each seat you **freshly dispatched** this run (NOT the ones
+   reused from cache in Phase 3), write its findings back under the Phase 3 `filesHash`:
+
+   ```bash
+   curl -fsS -X POST localhost:3456/api/council/economy/cache/put \
+     -H 'Content-Type: application/json' -d "$CACHE_JSON"
+   ```
+
+   `$CACHE_JSON` = `{"skill":"council-review","engineVersion":"rc2","seatId":"<id>","filesHash":"<hash from Phase 3>","findings":[{"id":"<fnd>","priority":"P2","summary":"<one-line>"}]}`.
+
+Skip silently on any error — a stats/cache write must never break the review.

@@ -580,6 +580,18 @@ function pluginJson(): string {
   return `${JSON.stringify({ name: PLUGIN_NAME, description: "UI/UX and Council skills shipped with Aura Companion" }, null, 2)}\n`;
 }
 
+/**
+ * Link layers of an exposure: `skills/<name>` is what Claude loads; `.claude/skills/<name>`
+ * mirrors the upstream plugin layout so a vendored SKILL.md that runs
+ * `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<name>/scripts/...` (ui-ux-pro-max) resolves —
+ * Claude substitutes CLAUDE_PLUGIN_ROOT with the exposure dir. Both point at the same
+ * verified, read-only version tree.
+ */
+const LINK_LAYERS: [sub: string, up: string][] = [
+  ["skills", "../../../"],
+  [join(".claude", "skills"), "../../../../"],
+];
+
 /** What `exposures/<id>` must contain, exactly. */
 function exposureMismatches(dir: string, version: string, names: string[]): string[] {
   const out: string[] = [];
@@ -590,7 +602,8 @@ function exposureMismatches(dir: string, version: string, names: string[]): stri
       return [];
     }
   };
-  if (list(dir).join("\0") !== [".claude-plugin", "skills"].join("\0")) out.push("unexpected top-level entries");
+  if (list(dir).join("\0") !== [".claude", ".claude-plugin", "skills"].join("\0")) out.push("unexpected top-level entries");
+  if (list(join(dir, ".claude")).join("\0") !== "skills") out.push("unexpected .claude entries");
   if (list(join(dir, ".claude-plugin")).join("\0") !== "plugin.json") out.push("unexpected .claude-plugin entries");
   try {
     if (readFileSync(join(dir, ".claude-plugin", "plugin.json"), "utf8") !== pluginJson()) out.push("plugin.json differs");
@@ -598,11 +611,13 @@ function exposureMismatches(dir: string, version: string, names: string[]): stri
     out.push("plugin.json unreadable");
   }
   const want = [...names].sort();
-  if (list(join(dir, "skills")).join("\0") !== want.join("\0")) out.push("skill links differ");
-  for (const n of want) {
-    const link = join(dir, "skills", n);
-    const st = lstatSync(link, { throwIfNoEntry: false });
-    if (!st?.isSymbolicLink() || readlinkSync(link) !== `../../../versions/${version}/${n}`) out.push(`${n}: not the expected link`);
+  for (const [sub, up] of LINK_LAYERS) {
+    if (list(join(dir, sub)).join("\0") !== want.join("\0")) out.push(`${sub} links differ`);
+    for (const n of want) {
+      const link = join(dir, sub, n);
+      const st = lstatSync(link, { throwIfNoEntry: false });
+      if (!st?.isSymbolicLink() || readlinkSync(link) !== `${up}versions/${version}/${n}`) out.push(`${sub}/${n}: not the expected link`);
+    }
   }
   return out;
 }
@@ -636,8 +651,10 @@ export function ensurePluginExposure(opts: { root?: string; version: string; nam
   try {
     mkdirSync(join(staging.dir, ".claude-plugin"), { mode: 0o755 });
     writeNewFile(join(staging.dir, ".claude-plugin", "plugin.json"), pluginJson(), 0o444);
-    mkdirSync(join(staging.dir, "skills"), { mode: 0o755 });
-    for (const n of names) symlinkSync(`../../../versions/${opts.version}/${n}`, join(staging.dir, "skills", n));
+    for (const [sub, up] of LINK_LAYERS) {
+      mkdirSync(join(staging.dir, sub), { recursive: true, mode: 0o755 });
+      for (const n of names) symlinkSync(`${up}versions/${opts.version}/${n}`, join(staging.dir, sub, n));
+    }
     makeReadOnly(staging.dir);
     const miss = exposureMismatches(staging.dir, opts.version, names);
     if (miss.length) throw new Error(miss.join("; "));
@@ -681,6 +698,43 @@ function sweepExposures(root: string, keep: Set<string>, now: number): string[] 
 }
 
 // ─── Copies outside the Aura tree (Codex homes, container) ──────────────────
+
+const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Codex inside a container: a `sh` script that copies `names` from the decided
+ * version (visible at the same path through the read-only pack mount) into the
+ * container's CODEX_HOME/skills. That home is a tmpfs the host cannot read, so
+ * ownership cannot be proven there: the script ONLY ADDS and never deletes.
+ *
+ * The name is claimed with `mkdir <dest>` — atomic create-if-absent — and filled in
+ * place. There is no staging path to `rm` and no check-then-`mv` to race (observer
+ * STOP ×2, checkpoint 185): if the name exists (a seeded user skill, an earlier
+ * copy, or one that appeared a moment ago) `mkdir` fails and the name is skipped.
+ * The marker is written last, so a copy interrupted half-way reads as the user's
+ * (never deleted later), not as a complete Aura copy.
+ */
+export function containerCopyScript(opts: {
+  packDir: string;
+  parent: string;
+  manifest: Pick<SkillManifest, "entries">;
+  names: string[];
+}): string {
+  const byName = new Map(shippedEntries(opts.manifest).map((e) => [e.name, e]));
+  const lines = [`mkdir -p ${shq(opts.parent)} || exit 1`];
+  for (const n of [...new Set(opts.names)].sort()) {
+    const entry = byName.get(n);
+    if (!entry || !isPackName(n)) throw new Error(`not a shipped entry of this version: ${JSON.stringify(n)}`);
+    const dest = join(opts.parent, n);
+    const marker = `${JSON.stringify(markerFor(entry), null, 2)}\n`;
+    lines.push(
+      `if mkdir ${shq(dest)} 2>/dev/null; then ` +
+        `cp -R ${shq(`${join(opts.packDir, n)}/.`)} ${shq(dest)} && chmod -R u+w ${shq(dest)} && ` +
+        `printf '%s' ${shq(marker)} > ${shq(join(dest, OWNER_MARKER_FILE))} && chmod -R a-w ${shq(dest)} || exit 1; fi`,
+    );
+  }
+  return lines.join("\n");
+}
 
 /** The skill dirs at `parent`, with ownership proven only where a marker is present. */
 export function listExistingSkills(parent: string, manifest: Pick<SkillManifest, "entries">): ExistingSkill[] {

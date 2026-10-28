@@ -18,6 +18,7 @@ import { readCurrentPack, type CurrentPack, type ExistingSkill } from "./skill-p
 import {
   _resetPluginDirProbeForTest,
   claudeSupportsPluginDir,
+  councilCatalogDir,
   decideSkillExposure,
   defaultPackSource,
   describeToolkit,
@@ -107,6 +108,25 @@ describe("decideSkillExposure", () => {
     expect(codex({ enabled: false })).toMatchObject({ status: "off", items: [] });
   });
 
+  // B5 / owner answer 1: a container created with the read-only skill-pack mount gets
+  // the Claude toolkit via --plugin-dir inside it; an older container (no mount) and
+  // Codex in a container stay "unavailable" with a reason that says why.
+  it("Claude in a container WITH the pack mount → on; without it → unavailable (existing containers)", () => {
+    expect(claude({ containerized: true, containerPackMounted: true }).status).toBe("on");
+    const old = claude({ containerized: true, containerPackMounted: false });
+    expect(old.status).toBe("unavailable");
+    expect(old.reason).toMatch(/created without the toolkit mount/);
+    const noPluginDir = claude({ containerized: true, containerPackMounted: true, cliSupportsPluginDir: false });
+    expect(noPluginDir.status).toBe("unavailable");
+  });
+
+  it("Codex in a container: on with the pack mount (add-only copies), unavailable without it", () => {
+    expect(codex({ containerized: true, containerPackMounted: true }).status).toBe("on");
+    const old = codex({ containerized: true, containerPackMounted: false });
+    expect(old.status).toBe("unavailable");
+    expect(old.reason).toMatch(/created without the toolkit mount/);
+  });
+
   it("every missing precondition → unavailable with a reason, nothing provided", () => {
     const cases = [
       claude({ cliSupportsPluginDir: false }),
@@ -121,6 +141,43 @@ describe("decideSkillExposure", () => {
       expect(e.reason).toBeTruthy();
       expect(providedNames(e)).toEqual([]);
     }
+  });
+});
+
+describe("councilCatalogDir (AURA_COUNCIL_CATALOG_DIR, B5)", () => {
+  // The dispatchers prefer this dir over ~/.claude/skills/_council-experts; it must
+  // only be exported when the catalog is Aura's to provide for this session.
+  const exp = (items: { name: string; outcome: string }[], over: object = {}) =>
+    ({ schemaVersion: 1, backend: "claude", status: "on", version: "v1", decidedAt: 0,
+      items: items.map((i) => ({ ...i, reasons: [] })), ...over }) as never;
+  const skill = { name: "council-plan", outcome: "provide" };
+
+  it("points at the catalog inside the decided version tree", () => {
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "disabled" }]), "/r"))
+      .toBe(join("/r", "versions", "v1", "_council-experts"));
+  });
+  it("catalog blocked by the gate → undefined (fallback path stays in charge)", () => {
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "blocked-by-gate" }]), "/r")).toBeUndefined();
+  });
+
+  // Observer STOP (B5 checkpoint 183): the user's catalog may live where the
+  // dispatchers' $HOME fallback never looks; export the first one that exists.
+  it("catalog the user owns → the first existing user candidate, or undefined if none exists", () => {
+    const d = tmp();
+    const a = join(d, "a", "_council-experts");
+    const b = join(d, "b", "_council-experts");
+    mkdirSync(b, { recursive: true });
+    const owned = exp([skill, { name: "_council-experts", outcome: "skip-user-owns" }]);
+    expect(councilCatalogDir(owned, "/r", [a, b])).toBe(b);
+    mkdirSync(a, { recursive: true });
+    expect(councilCatalogDir(owned, "/r", [a, b])).toBe(a);
+    expect(councilCatalogDir(owned, "/r", [])).toBeUndefined();
+  });
+  it("no catalog entry, nothing provided, or exposure off → undefined", () => {
+    expect(councilCatalogDir(exp([skill]), "/r")).toBeUndefined();
+    expect(councilCatalogDir(exp([{ name: "_council-experts", outcome: "disabled" }, { ...skill, outcome: "disabled" }]), "/r")).toBeUndefined();
+    expect(councilCatalogDir(exp([skill, { name: "_council-experts", outcome: "provide" }], { status: "off" }), "/r")).toBeUndefined();
+    expect(councilCatalogDir(undefined, "/r")).toBeUndefined();
   });
 });
 

@@ -1,10 +1,17 @@
 ---
 name: council-implement
 origin: aura
-description: Execute a Carmack Council plan task by task. Use when explicitly asked to implement a plan, do a "council implement", "carmack implement", "council build", or invoke /council-implement. Reads the output of /council-plan and builds each task sequentially, loading the relevant expert's reference document per task. Verifies after each task. Produces an implementation log for /council-review. Stack: Python 3.11+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
+description: Execute a Carmack Council plan task by task. Use when explicitly asked to implement a plan, do a "council implement", "carmack implement", "council build", or invoke /council-implement. Reads the output of /council-plan and builds each task sequentially, loading the relevant expert's reference document per task. Verifies after each task. Produces an implementation log for /council-review. Also applies /council-review findings in fix-pass mode (cite finding, confirm diff matches the recommendation, failing test first, re-run checks, one review round max). Stack: Python 3.10+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 
 # Carmack Council Implementer
+
+**Catalog root (`$CATALOG`).** The expert catalog lives at `${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}`:
+Aura Companion sets `AURA_COUNCIL_CATALOG_DIR` to the catalog this session should use (the
+one it ships, or your own wherever the CLI found it); outside Aura the old
+`~/.claude/skills/_council-experts` path is the fallback. Resolve it once
+(`echo "${AURA_COUNCIL_CATALOG_DIR:-$HOME/.claude/skills/_council-experts}"`) and write the
+absolute path into every subagent prompt — subagents may not inherit the variable.
 
 You are the **Builder** — John Carmack's philosophy applied to execution. You take a Council Plan and implement it task by task, following the dependency order, loading the relevant expert's reference document for each task, and verifying nothing breaks between tasks.
 
@@ -12,9 +19,9 @@ You are the **Builder** — John Carmack's philosophy applied to execution. You 
 
 ## Stack Context
 
-The opinionated stack:
-- **Python 3.11+** — async/await, type hints
-- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers
+The opinionated stack (see `STACK.md` in project root for full details):
+- **Python 3.10** (production) / **3.12** (CI) — async/await, type hints
+- **aiogram 3.7.0** — async Telegram bot framework; handlers, FSM, callback routers. **NOT python-telegram-bot** — different APIs entirely.
 - **No HTTP server** — polling bot only, no FastAPI/Flask
 - **SQLAlchemy 2.x sync** — `scoped_session` + `psycopg2`; NOT async SQLAlchemy
 - **PostgreSQL 15** — primary database; Alembic for migrations
@@ -24,6 +31,30 @@ The opinionated stack:
 - **pytest + `asyncio.run()`** — testing with monkeypatch; mocked objects, no test database
 
 **Whatever the question, running destructive migrations is never the answer.**
+
+---
+
+## Phase 0: Advisor Reference Model (DO NOT SKIP)
+
+Council selection is **adaptive and universal** — it is defined once, for every
+`/council-*` skill, in `$CATALOG/selection-engine.md`.
+
+**Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
+This replaces the old two-stack detect-or-refuse router: rather than refusing any
+workspace that is not one of two hardcoded stacks, the plan you implement was
+produced by a Chair who selected its advisors adaptively from the catalog. The
+Builder does not re-select — it reads, per task, the reference doc for whichever
+advisor the plan attributed that task to.
+
+- **No fixed panel.** The catalog IS the panel — any advisor whose `meta.yaml`
+  declares a `capabilities` profile is seatable, so a plan may attribute a task to
+  any of them. The reference table in Phase 2 carries a usable row for every such
+  seatable advisor that `/council-plan` can dispatch (canary C13).
+- **No refusal path.** This suffixless skill carries the Python-stack reference
+  table + verification body below; `/council-implement-aura` carries the
+  Aura-stack table + body. Read the plan's `Ref` rows against the matching table.
+
+Proceed to Phase 1 below.
 
 ---
 
@@ -49,15 +80,41 @@ Work through the task sequence one task at a time.
 
 Read the reference document named in the task's `Ref` row before writing any code for that task. This is non-negotiable. The reference doc contains the principles that should guide your implementation decisions.
 
-| Task Domain | Reference Document |
-|---|---|
-| Troy Hunt (Security) | `references/security.md` |
-| Martin Fowler (Refactoring) | `references/refactoring.md` |
-| Telegram UX Expert | `references/quality-frontend.md` |
-| Backend/Python Expert | `references/quality-backend.md` |
-| Brandur Leach (Database) | `references/quality-postgres.md` |
-| Simon Willison (LLM Pipeline) | `references/quality-llm.md` |
-| Docker/Deploy Expert | (Dockerfile best practices, Cloud Run optimization) |
+One row per advisor `/council-plan` can dispatch — i.e. every seatable advisor
+(a `capabilities` profile in `meta.yaml`) that carries a `plan.md` phase doc,
+since the plan selects its roster adaptively from that universe. A plan can
+attribute a task to any of them, so a seat with no row — or a row naming no
+document — makes this step a silent no-op while the implementation log still
+records the attribution.
+
+The `Seat` column is the catalog expert ID, and it is the machine-readable link
+between this table and the adaptive `council-plan` roster — canary C13 checks
+that every seatable advisor the planner can dispatch (capabilities + `plan.md`)
+has a row here and that the row names a file that exists. Without it the two
+lists are prose about each other and drift silently.
+
+| Seat | Task Domain | Reference Document |
+|---|---|---|
+| `hunt` | Troy Hunt (Security) | `references/security.md` |
+| `fowler` | Martin Fowler (Refactoring) | `references/refactoring.md` |
+| `durov` | Pavel Durov (Telegram UX) | `references/quality-durov.md` |
+| `vanrossum` | Guido van Rossum (aiogram / async Python backend) | `references/quality-vanrossum.md` |
+| `brandur` | Brandur Leach (PostgreSQL / Alembic) | `references/quality-brandur.md` |
+| `willison` | Simon Willison (LLM Pipeline) | `references/quality-llm.md` |
+| `saarinen` | Karri Saarinen (UI Quality) | `references/quality-saarinen.md` |
+| `friedman` | Vitaly Friedman (UX Quality) | `references/quality-friedman.md` |
+| `hashimoto` | Mitchell Hashimoto (DevOps — Docker + GHA + VPS systemd) | `references/quality-hashimoto.md` |
+
+`hunt`, `fowler` and `willison` deliberately stay on the domain-named documents
+(`security.md`, `refactoring.md`, `quality-llm.md`) rather than their
+expert-named successors. Those three domain docs are **stack-split** — this
+skill and `council-implement-aura` each carry a differently-tuned version, and
+the Python one is what a `council-plan` task needs. The expert-named
+`quality-hunt.md` / `quality-fowler.md` / `quality-willison.md` are
+single-canonical across both stacks, so repointing these rows would silently
+collapse the Python/Aura tuning into one document. `durov`, `vanrossum` and
+`brandur` have no such problem — each is a Python-only seat, so its expert-named
+doc is strictly more specific with nothing to lose.
 
 If a task has cross-references to other experts, read those reference documents too. The primary domain's doc guides the main implementation; cross-referenced docs inform specific decisions within the task.
 
@@ -177,6 +234,85 @@ Implement the plan as written. Note your concern in the task log. The review wil
 
 **A Risks & Watchpoints item becomes relevant during implementation.**
 Address it within the relevant task. Note it in the "Watchpoints Addressed" section of the log. If addressing it requires significant work outside the plan scope, note it as a follow-up rather than expanding the implementation.
+
+---
+
+## Fix-Pass Mode: Applying Review Findings
+
+When the input is a `/council-review` FINAL-REVIEW.md (or a list of its findings) instead of a plan, you are in fix-pass mode. Same Builder rules, plus this discipline for EVERY applied fix — fixes applied from reviews without it caused ≥20 prod regressions across 7 projects (2026-10 corpus), including fixes that implemented the opposite of the recommendation:
+
+1. **Scope.** Apply the review's Deterministic Check Failures first, then P1s. P2/P3 only if the developer explicitly asks. Skip any "P1" that has no concrete reproduction in the review — report it back as unsubstantiated rather than fixing it.
+2. **Cite the finding.** Each fix names its finding number (or "Deterministic #N") in the task log and commit message.
+3. **Restate and confirm.** Before writing code, restate the finding's recommended behaviour in one sentence in the log. After writing it, re-read your diff and confirm it implements THAT behaviour, not its inverse (guard polarity, allow vs deny, include vs exclude, fail-open vs fail-closed). Record "Diff matches recommendation: yes — <one-line why>". If the recommendation is wrong for this code, do not silently invert it — stop and ask.
+4. **Failing test first.** Write a test that reproduces the finding and FAILS on the current code; then fix; then confirm it passes. Log both runs. No reproducing test possible → do not apply it as a P1 fix; log why and hand it back.
+5. **Re-run Phase 0.** After the fixes, re-run the review's full Phase 0 — lint/format, typecheck, tests and the E2E/smoke run of the changed surface — not just the per-task verification. If the smoke run cannot run, say so at the top of the log.
+6. **One round only.** A fix pass gets at most ONE follow-up review. If that review finds new P1s in your fixes, STOP: do not start another fix/review loop; report the new P1s to the human and let them decide.
+
+In the implementation log, each fix-pass task adds: `**Finding:** #N — <recommended behaviour>`, `**Diff matches recommendation:** yes — <why>`, `**Failing test:** <test name> — failed before ✅ passes after ✅`.
+
+---
+
+## Phase 4: Emit Council Checkpoint (auto)
+
+**Purpose.** When this skill runs inside an Aura Companion Council pair, this phase tells the observer half "the orchestrator just finished implementing — here is the file list, please review the implementation." The observer wakes within ~1 second of the checkpoint POST and emits its review to `<workspace>/.council/reviews/council-implement-<provider>-observer.md`. Without this step the council loop never closes — the observer remains in "Awaiting first checkpoint" forever.
+
+**Council pairing is a property of the SESSION, not of the workspace stack.** A Python workspace paired in the Aura Companion UI has an observer that needs waking exactly like an Aura workspace does. Do not skip this phase on the grounds that this is not an Aura project.
+
+**Skip this phase entirely** if any of these are true:
+- `http://localhost:3456/api/sessions` does not respond (you are not inside the Aura Companion UI).
+- No session in the response matches the current workspace + orchestrator role.
+- The `POST .../council/checkpoint` returns 409 — that response IS the silent-skip signal.
+
+### Steps
+
+1. **Probe the API.** Run `curl -fsS http://localhost:3456/api/sessions`. Non-zero exit or empty → skip the entire phase.
+
+2. **Discover the orchestrator session id.** Filter the response array for the entry matching ALL of:
+   - `state == "connected"`
+   - `cwd == <current workspace cwd>` (the cwd you implemented under)
+   - `sessionGroupRole == "orchestrator"`
+   - newest `createdAt` if more than one match
+
+   Zero matches → silent skip. One match → capture `sessionId` (= `ORCH_SID`) and `sessionGroupId` (= `GROUP_ID`).
+
+3. **Compute next sequence.** List `<workspace>/.council/checkpoints/*.json`. Read each file's `sequence` field. `next_sequence = max(...) + 1`, or `0` if the directory is empty or absent.
+
+4. **Build CheckpointPayload.**
+
+   ```json
+   {
+     "schema_version": 1,
+     "checkpoint_id": "council-implement-<seq>-<8-hex-random>",
+     "phase": "council-implement",
+     "sequence": <next_sequence>,
+     "session_group_id": "<GROUP_ID>",
+     "emitted_at": "<UTC ISO 8601 T-form, no fractional seconds>",
+     "artifact_paths": [<workspace-relative paths to every file in the "Ready for Review" list of the implementation log>]
+   }
+   ```
+
+   `artifact_paths` is the **list of modified/created files** from the implementation log's "Ready for Review" section — these are exactly the files the observer needs to read to review the implementation. Cap at 50 paths (schema limit `MAX_ARTIFACT_PATHS`); if you exceeded that count, list the top-50 most-changed and add a NOTE to the log that observer cannot see the rest this cycle.
+
+   **The files must exist in the pair's workspace (the orchestrator session's cwd) at the moment you POST.** The observer reads that directory, not your git worktree. If you implemented in a separate worktree (e.g. `/tmp/wt-*`), emit the checkpoint only after the branch is merged/pulled into the pair's workspace — or run the whole pair inside the worktree. The server rejects a checkpoint whose paths are missing there with `400 {"missingPaths": [...]}` (Aura ≥ 2026-10-19); fix the list rather than retrying blindly. Waking the observer on unreadable paths only produces an `OBSERVER-BLOCKED` INFO.
+
+5. **POST.** Use the Bash tool:
+
+   ```bash
+   curl -fsS -X POST \
+     "http://localhost:3456/api/sessions/$ORCH_SID/council/checkpoint" \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD"
+   ```
+
+   Expected 200 with `{"ok": true, "written": "...", ...}`.
+
+6. **On non-200:**
+   - **409** ("Session is not part of an active council group"): silent skip, not an error.
+   - **400 / 403 / 500**: surface the raw response body to the user, do not retry.
+
+7. **Do not wait** for the observer's review. The 200 response IS the success signal for this phase; the observer's review lands asynchronously in the Aura UI's ObserverPanel.
+
+**Multi-task runs:** if you emit more than one checkpoint in a single implementation pass, increment `sequence` per POST and leave ≥1.5s between calls — the watcher's `(file, mtimeNs)` debounce can otherwise coalesce sub-second neighbours and the observer loses a cycle.
 
 ---
 
