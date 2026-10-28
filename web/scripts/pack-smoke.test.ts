@@ -28,6 +28,7 @@ function obs(kind: RunObservation["kind"], over: Partial<RunObservation> = {}): 
     argv: kind === "off" ? ["-p"] : argvWith,
     exposed: kind === "off" ? null : kind === "seeded" ? ["council-plan"] : ["council-plan", SEEDED_SKILL],
     ...(kind === "seeded" ? { seeded: { name: SEEDED_SKILL, before: "aaa", after: "aaa" } } : {}),
+    ...(kind === "off" ? {} : { canary: [] }),
     ...over,
   };
 }
@@ -65,6 +66,15 @@ describe("judgeRun", () => {
     expect(judgeRun(obs("seeded", { seeded: { name: SEEDED_SKILL, before: "aaa", after: "bbb" } })).join()).toMatch(/user's taste-skill changed/);
     expect(judgeRun(obs("seeded", { seeded: { name: SEEDED_SKILL, before: "aaa", after: null } })).join()).toMatch(/changed/);
     expect(judgeRun(obs("seeded", { exposed: ["council-plan", SEEDED_SKILL] })).join()).toMatch(/exposure links/);
+  });
+
+  // B5: ui-ux-pro-max ships only while its documented ${CLAUDE_PLUGIN_ROOT} commands
+  // run from the installed exposure; a red canary or a canary that never ran fails the smoke.
+  it("fails when the ${CLAUDE_PLUGIN_ROOT} canary failed or did not run", () => {
+    const red = { skill: "ui-ux-pro-max", ok: false, errors: ["exit 2: python \"${CLAUDE_PLUGIN_ROOT}/...\""] };
+    expect(judgeRun(obs("plain", { canary: [red] })).join()).toMatch(/ui-ux-pro-max canary: exit 2/);
+    expect(judgeRun(obs("plain", { canary: undefined })).join()).toMatch(/canary did not run/);
+    expect(judgeRun(obs("plain", { canary: [{ ...red, ok: true, errors: [] }] }))).toEqual([]);
   });
 
   it("fails an off run whose spawn argv still has --plugin-dir", () => {

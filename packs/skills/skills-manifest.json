@@ -488,13 +488,11 @@
       "compat": {
         "claude": true,
         "codex": false,
-        "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which Codex does not set (see vendor-lock knownIssues)."
+        "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which only Claude substitutes (Aura's exposure mirrors .claude/skills for it); Codex does not set it."
       },
       "ship": {
-        "status": "blocked",
-        "reasons": [
-          "known issue: SKILL.md invokes scripts via ${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/... (11 places), which only resolves when installed as a Claude Code plugin with the upstream layout; as a plain skill or under Codex the path does not exist and the skill silently falls back to generic advice. Phase B must add a hashed path overlay or a canary that runs the documented command from the installed location (review 2026-10-27-2139 #6)."
-        ]
+        "status": "ship",
+        "reasons": []
       },
       "digest": "8dbb021c611a3e2a94e451710fd21114605a7d88b3398f57729cafe072f73b60",
       "files": {

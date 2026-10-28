@@ -258,7 +258,9 @@ describe("the real packs/skills tree", () => {
       const e = manifest.entries.find((x) => x.name === s.name)!;
       if (s.humanReview.status !== "approved" || s.knownIssues.length) expect(e.ship.status, s.name).toBe("blocked");
     }
-    expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("blocked");
+    // B5 (owner answer 2): ui-ux-pro-max's knownIssue was cleared once the
+    // ${CLAUDE_PLUGIN_ROOT} canary went green (plugin-root-canary.test.ts), so it ships.
+    expect(manifest.entries.find((e) => e.name === "ui-ux-pro-max")?.ship.status).toBe("ship");
   });
 
   it("the committed manifest lists no excluded file, and the catalog keeps its runtime vocabulary", () => {

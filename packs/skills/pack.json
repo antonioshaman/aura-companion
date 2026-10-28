@@ -59,7 +59,7 @@
       "name": "ui-ux-pro-max",
       "kind": "skill",
       "origin": "vendored",
-      "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which Codex does not set (see vendor-lock knownIssues)." }
+      "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which only Claude substitutes (Aura's exposure mirrors .claude/skills for it); Codex does not set it." }
     }
   ]
 }

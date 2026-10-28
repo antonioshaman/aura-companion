@@ -6,7 +6,7 @@
 // REAL packs/skills tree against the committed vendor-lock.json.
 
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -156,9 +156,14 @@ describe("committed packs/skills vendor lock", () => {
     }
   });
 
-  it("ui-ux-pro-max's plugin-only script path is recorded as a Phase B blocker (finding #6)", () => {
+  it("ui-ux-pro-max's plugin-only script path (finding #6) was cleared only with its canary in place (B5)", () => {
+    // Why: owner answer 2 — clear the knownIssue only while a canary runs the documented
+    // ${CLAUDE_PLUGIN_ROOT} commands from an installed exposure. The note must point at
+    // that canary, and the canary must exist, or the clearance is unbacked.
     const ux = lock.skills.find((s) => s.name === "ui-ux-pro-max")!;
-    expect(ux.knownIssues.join()).toMatch(/CLAUDE_PLUGIN_ROOT/);
+    expect(ux.knownIssues).toEqual([]);
+    expect(ux.humanReview.notes).toMatch(/plugin-root-canary\.ts/);
+    expect(existsSync(join(import.meta.dirname, "plugin-root-canary.test.ts"))).toBe(true);
   });
 });
 

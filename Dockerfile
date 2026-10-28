@@ -8,7 +8,8 @@
 # marked copies (Codex).
 #
 # Pinned: the bun and node base images by digest, Claude Code and Codex by version.
-# python3 + node are on PATH so shipped skills can run their scripts.
+# python3 (+ the `python` alias ui-ux-pro-max's documented commands use) and node are on
+# PATH so shipped skills can run their scripts.
 #
 #   docker build -t aura-companion .
 #   docker run -p 3456:3456 -v aura-home:/home/node aura-companion
@@ -38,7 +39,7 @@ ARG CLAUDE_CODE_VERSION=2.1.283
 ARG CODEX_VERSION=0.162.1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 git ca-certificates \
+ && apt-get install -y --no-install-recommends python3 python-is-python3 git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN npm install -g --no-audit --no-fund \

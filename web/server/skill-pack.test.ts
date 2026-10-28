@@ -304,7 +304,8 @@ describe("installPack / readCurrentPack", () => {
 
   it("ships exactly the gate-passing entries of the real packs/skills manifest", () => {
     // AC2.1 / AC2.4 against the real tree: everything with ship.status "ship" lands,
-    // ui-ux-pro-max (blocked until B3/B4) does not.
+    // anything blocked does not (fixture "blocked-one" pins that when the real tree has
+    // none). ui-ux-pro-max ships since B5 (its CLAUDE_PLUGIN_ROOT canary is green).
     const manifest = JSON.parse(readFileSync(join(REPO_PACKS, "skills-manifest.json"), "utf8")) as SkillManifest;
     const root = tmp();
     const r = installPack({ sourceDir: REPO_PACKS, manifest, root });
@@ -312,8 +313,9 @@ describe("installPack / readCurrentPack", () => {
     if ("error" in cur) throw new Error(cur.error);
     const shipped = manifest.entries.filter((e) => e.ship.status === "ship").map((e) => e.name);
     expect(cur.manifest.entries.map((e) => e.name)).toEqual(shipped);
-    expect(shipped).not.toContain("ui-ux-pro-max");
-    expect(existsSync(join(r.dir, "ui-ux-pro-max"))).toBe(false);
+    for (const e of manifest.entries.filter((x) => x.ship.status !== "ship")) expect(existsSync(join(r.dir, e.name)), e.name).toBe(false);
+    expect(shipped).toContain("ui-ux-pro-max");
+    expect(existsSync(join(r.dir, "ui-ux-pro-max", "scripts", "search.py"))).toBe(true);
     expect(existsSync(join(r.dir, PACK_MANIFEST_FILE))).toBe(true);
   });
 });
@@ -537,13 +539,42 @@ describe("ensurePluginExposure (Claude --plugin-dir)", () => {
     const { root, version } = installed();
     const r = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
     if ("error" in r) throw new Error(r.error);
-    expect(readdirSync(r.dir).sort()).toEqual([".claude-plugin", "skills"]);
+    expect(readdirSync(r.dir).sort()).toEqual([".claude", ".claude-plugin", "skills"]);
     expect(JSON.parse(readFileSync(join(r.dir, ".claude-plugin", "plugin.json"), "utf8")).name).toBe(PLUGIN_NAME);
     expect(readdirSync(join(r.dir, "skills")).sort()).toEqual(["audit", "polish"]);
     expect(readlinkSync(join(r.dir, "skills", "polish"))).toBe(`../../../versions/${version}/polish`);
     // The link resolves to the verified tree: the CLI reads the real SKILL.md through it.
     expect(readFileSync(join(r.dir, "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
     expect(statSync(r.dir).mode & 0o222).toBe(0);
+  });
+
+  // B5 / owner answer 2: a vendored SKILL.md that runs
+  // ${CLAUDE_PLUGIN_ROOT}/.claude/skills/<name>/scripts/... (ui-ux-pro-max) must resolve.
+  // Claude substitutes CLAUDE_PLUGIN_ROOT with the exposure dir, so the exposure
+  // carries a second link layer with the upstream plugin layout.
+  it("mirrors every linked skill under .claude/skills (upstream plugin layout)", () => {
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish", "audit"] });
+    if ("error" in r) throw new Error(r.error);
+    expect(readdirSync(join(r.dir, ".claude"))).toEqual(["skills"]);
+    expect(readdirSync(join(r.dir, ".claude", "skills")).sort()).toEqual(["audit", "polish"]);
+    expect(readlinkSync(join(r.dir, ".claude", "skills", "polish"))).toBe(`../../../../versions/${version}/polish`);
+    expect(readFileSync(join(r.dir, ".claude", "skills", "polish", "SKILL.md"), "utf8")).toContain("name: polish");
+  });
+
+  it("rebuilds a pre-B5 exposure that lacks the .claude link layer", () => {
+    // Why: exposures built by B3/B4 have only skills/; reusing one would leave the
+    // ${CLAUDE_PLUGIN_ROOT}/.claude/skills paths dangling.
+    const { root, version } = installed();
+    const r = ensurePluginExposure({ root, version, names: ["polish"] });
+    if ("error" in r) throw new Error(r.error);
+    chmodSync(r.dir, 0o755);
+    chmodSync(join(r.dir, ".claude"), 0o755);
+    chmodSync(join(r.dir, ".claude", "skills"), 0o755);
+    rmSync(join(r.dir, ".claude"), { recursive: true, force: true });
+    const again = ensurePluginExposure({ root, version, names: ["polish"] });
+    expect(again).toEqual(r);
+    expect(readlinkSync(join(r.dir, ".claude", "skills", "polish"))).toBe(`../../../../versions/${version}/polish`);
   });
 
   it("is content-addressed and idempotent: same version + names → same dir", () => {

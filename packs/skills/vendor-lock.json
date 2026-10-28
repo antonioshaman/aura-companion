@@ -25,15 +25,13 @@
           "writes-user-project"
         ]
       },
-      "knownIssues": [
-        "SKILL.md invokes scripts via ${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/... (11 places), which only resolves when installed as a Claude Code plugin with the upstream layout; as a plain skill or under Codex the path does not exist and the skill silently falls back to generic advice. Phase B must add a hashed path overlay or a canary that runs the documented command from the installed location (review 2026-10-27-2139 #6)."
-      ],
+      "knownIssues": [],
       "humanReview": {
         "status": "approved",
         "basis": "ai-prereview",
         "reviewer": "Anton Shmonin (owner)",
         "date": "2026-10-27",
-        "notes": "AI pre-review 2026-10-27, accepted by the owner as the basis for approval (decision 1A). Runtime scripts (core.py, search.py, design_system.py, validate_data.py) read local CSV data only; the hosts in validate_data.py are URL-validation patterns, not calls. design_system.py can write design-system/<slug>/*.md into the user's project (--persist); SKILL.md forbids --force without user authorisation. The upstream's own scripts/tests make network 'freshness' calls and subprocess runs; they are dev-only and not invoked by SKILL.md.",
+        "notes": "AI pre-review 2026-10-27, accepted by the owner as the basis for approval (decision 1A). Runtime scripts (core.py, search.py, design_system.py, validate_data.py) read local CSV data only; the hosts in validate_data.py are URL-validation patterns, not calls. design_system.py can write design-system/<slug>/*.md into the user's project (--persist); SKILL.md forbids --force without user authorisation. The upstream's own scripts/tests make network 'freshness' calls and subprocess runs; they are dev-only and not invoked by SKILL.md. B5 (2026-10-28): the ${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/... knownIssue is resolved by the Claude exposure's .claude/skills link layer (skill-pack.ts LINK_LAYERS); web/scripts/plugin-root-canary.ts runs every concrete documented command from an installed exposure (unit test + pack-smoke). Codex still gets no copy (compat.codex false).",
         "reviewedCommit": "477bcb28c9812b385cb51a4605ddf30d7b2266e2",
         "reviewedDigest": "eecce3cf6c8b8206d8b9ffecf9af5bde67f7e8546947d9c8b6f44c8aa4f8522e"
       },

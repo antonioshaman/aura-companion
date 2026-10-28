@@ -215,6 +215,8 @@ describe("artifact gates (uiux Task 9)", () => {
     expect(df).not.toMatch(/:latest\b/);
     // python3 + node for skill scripts; the image is built from the npm tarball.
     expect(df).toMatch(/apt-get install[^\n]*python3/);
+    // B5: ui-ux-pro-max's SKILL.md runs `python ...`; Debian has no `python` without the alias.
+    expect(df).toMatch(/apt-get install[^\n]*python-is-python3/);
     expect(df).toMatch(/bun pm pack/);
     expect(df).toMatch(/test -f packs\/skills\/skills-manifest\.json/);
   });

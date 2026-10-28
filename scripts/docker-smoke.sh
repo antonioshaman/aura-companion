@@ -23,7 +23,7 @@ cleanup() {
 }
 
 echo "== runtimes"
-docker run --rm --entrypoint sh "$IMAGE" -c 'python3 --version && node --version && bun --version && claude --version && codex --version'
+docker run --rm --entrypoint sh "$IMAGE" -c 'python3 --version && python --version && node --version && bun --version && claude --version && codex --version'
 
 echo "== boot"
 trap cleanup EXIT
