@@ -1,0 +1,65 @@
+{
+  "_doc": "Hand-maintained declaration of what packs/skills ships (PLAN-aura-uiux-agent-enrichment Task 5). Every top-level dir must be declared here. `bun scripts/skill-manifest.ts generate` turns this + vendor-lock.json + the tree into skills-manifest.json; `check` fails when the manifest is stale or a declaration is missing. compat: a false flag needs a note saying why; flip it only after the skill was run under that CLI.",
+  "schemaVersion": 1,
+  "firstParty": {
+    "repo": "antonioshaman/aura-companion",
+    "licence": "MIT",
+    "licenceFile": "LICENSE"
+  },
+  "entries": [
+    {
+      "name": "_council-experts",
+      "kind": "catalog",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": true, "note": "Reference data read by the council-* dispatchers, not invocable on its own." }
+    },
+    {
+      "name": "council-implement",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool and tracks progress with TodoWrite; not verified under Codex." }
+    },
+    {
+      "name": "council-implement-aura",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool and tracks progress with TodoWrite; not verified under Codex." }
+    },
+    {
+      "name": "council-plan",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool; not verified under Codex." }
+    },
+    {
+      "name": "council-plan-aura",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool; not verified under Codex." }
+    },
+    {
+      "name": "council-review",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool; not verified under Codex." }
+    },
+    {
+      "name": "council-review-aura",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Dispatches experts through Claude Code's Task tool; not verified under Codex." }
+    },
+    {
+      "name": "taste-skill",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": true }
+    },
+    {
+      "name": "ui-ux-pro-max",
+      "kind": "skill",
+      "origin": "vendored",
+      "compat": { "claude": true, "codex": false, "note": "SKILL.md runs its scripts via ${CLAUDE_PLUGIN_ROOT}, which Codex does not set (see vendor-lock knownIssues)." }
+    }
+  ]
+}

@@ -179,6 +179,10 @@ jobs:
         working-directory: web
         run: bun scripts/vendored-skills.ts check
 
+      - name: Shipped skills manifest matches the tree (ship gate, ownership hashes)
+        working-directory: web
+        run: bun scripts/skill-manifest.ts check
+
       - name: UI/UX source catalog verdicts follow from their facts
         working-directory: web
         run: bun scripts/uiux-sources.ts check

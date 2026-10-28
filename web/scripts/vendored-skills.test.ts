@@ -118,7 +118,7 @@ describe("readTree", () => {
     mkdirSync(join(root, "s"));
     writeFileSync(join(root, "s", "SKILL.md"), "x");
     symlinkSync("/etc/passwd", join(root, "s", "leak"));
-    expect(() => readTree(join(root, "s"))).toThrow(/symlink in vendored tree: leak/);
+    expect(() => readTree(join(root, "s"))).toThrow(/symlink in skill tree: leak/);
   });
 });
 
