@@ -81,6 +81,19 @@ export function judgeRun(o: RunObservation): string[] {
 
 // ─── Effect shell ───────────────────────────────────────────────────────────
 
+/**
+ * The server env for one smoke boot. Telemetry is forced off: every boot has a
+ * fresh HOME and so a fresh instanceId, and with the opt-out default each one
+ * registered as a new install on the global stats Worker (68 of 78 "installs"
+ * on 2026-10-28 were smoke boots).
+ */
+export function smokeEnv(o: { home: string; path: string; tmpdir: string; port: number; token: string }): Record<string, string> {
+  return {
+    HOME: o.home, PATH: o.path, TMPDIR: o.tmpdir, PORT: String(o.port),
+    COMPANION_AUTH_TOKEN: o.token, COMPANION_TELEMETRY: "0", NODE_ENV: "production", LANG: "C.UTF-8",
+  };
+}
+
 function treeDigest(dir: string): string | null {
   if (!existsSync(dir)) return null;
   const t = readTree(dir);
@@ -156,15 +169,10 @@ async function runOnce(kind: RunKind, pkgDir: string, work: string): Promise<{ o
   const token = "pack-smoke-token-0123456789abcdef";
   const logPath = join(run, "server.log");
   const out = openSync(logPath, "a");
-  const env: Record<string, string> = {
-    HOME: home,
-    PATH: [dirname(fakeClaude), dirname(process.execPath), "/usr/local/bin", "/usr/bin", "/bin"].join(":"),
-    TMPDIR: join(run, "tmp"),
-    PORT: String(port),
-    COMPANION_AUTH_TOKEN: token,
-    NODE_ENV: "production",
-    LANG: "C.UTF-8",
-  };
+  const env = smokeEnv({
+    home, path: [dirname(fakeClaude), dirname(process.execPath), "/usr/local/bin", "/usr/bin", "/bin"].join(":"),
+    tmpdir: join(run, "tmp"), port, token,
+  });
   mkdirSync(env.TMPDIR, { recursive: true });
   const server = spawn(process.execPath, [join(pkgDir, "bin", "cli.ts"), "serve"], { env, cwd: run, stdio: ["ignore", out, out] });
   const base = `http://127.0.0.1:${port}/api`;

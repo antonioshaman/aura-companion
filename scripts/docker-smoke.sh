@@ -27,7 +27,7 @@ docker run --rm --entrypoint sh "$IMAGE" -c 'python3 --version && python --versi
 
 echo "== boot"
 trap cleanup EXIT
-docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:3456" -e COMPANION_AUTH_TOKEN="$TOKEN" "$IMAGE" >/dev/null
+docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:3456" -e COMPANION_AUTH_TOKEN="$TOKEN" -e COMPANION_TELEMETRY=0 "$IMAGE" >/dev/null
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then break; fi
   sleep 1
