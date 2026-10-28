@@ -11,3 +11,14 @@ Review for accessibility compliance and real keyboard/screen-reader usability. C
 FINDING shape: same. No code. Don't flag visual design (`saarinen`'s lane), UX flow (`friedman`'s lane).
 
 OUTPUT to .council/review-output/$TIMESTAMP/watson.md, return one-liner.
+
+## Addendum (2026-10-28) — platform and method references, loaded on demand
+
+Source: aura
+
+Read only the files this change needs, from this seat's folder in the catalog root the dispatcher gave you (`$CATALOG/watson/references/`):
+- Telegram Mini App (`telegram-web-app.js`, `@telegram-apps/*`, `Telegram.WebApp`) → `platform-telegram-mini-app.md`
+- iOS or iPadOS screen → `platform-ios.md`
+- Android screen → `platform-android.md`
+
+A plain web change needs none of them. Where a platform rule and a web default disagree, the platform rule wins; each file's `Source conflicts` block states the default chosen.

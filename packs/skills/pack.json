@@ -14,6 +14,12 @@
       "compat": { "claude": true, "codex": true, "note": "Reference data read by the council-* dispatchers, not invocable on its own." }
     },
     {
+      "name": "aura-uiux",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": false, "note": "Markdown-only; not yet run under Codex, so it stays Claude-only until a recorded Codex run." }
+    },
+    {
       "name": "council-implement",
       "kind": "skill",
       "origin": "first-party",

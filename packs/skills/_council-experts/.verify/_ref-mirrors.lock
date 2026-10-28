@@ -267,13 +267,21 @@ attested:
   - path: _council-experts/fowler/review.md
     sha256: 2f4c80104d8cddd46f53ea61951d4baef4d55e78015bbfbb46fc6ce02ace658a
   - path: _council-experts/friedman/plan-aura.md
-    sha256: 1707c13db543bc8f5fd20fac17eccf7ad7e7b95eafa83206c5aee5c07e576077
+    sha256: 62ea65682303decc6cbc5025f95e630b2f47ccd53f2779b95bf930a870aa985d
   - path: _council-experts/friedman/plan.md
-    sha256: 6c4b4b73f4864b5f39c56cb5bfad7929f25095cc2b52d2109b6822c7beb73502
+    sha256: 22c2cc18234f1aba878905450526834c85471033a1d66553283aa6b0f1c42738
+  - path: _council-experts/friedman/references/evaluation-method.md
+    sha256: f9be713b162ff620668e013a23a0b9a6b4af8990403dbee8604359f801a71831
+  - path: _council-experts/friedman/references/platform-android.md
+    sha256: e83548946c6413fae28d054a5f4349dd5bece77e42f28de3193ac66b059028ac
+  - path: _council-experts/friedman/references/platform-ios.md
+    sha256: a5bb4f847c70625cd10bf8b316b7d90a8bda4bb570381bf8284769ace00b212f
+  - path: _council-experts/friedman/references/platform-telegram-mini-app.md
+    sha256: 44d9b31165e1c1543200856f360252a5109a58f97b0421657e38d834bced0e57
   - path: _council-experts/friedman/review-aura.md
-    sha256: 5b429e595f69ef18c3e32b60f50559198f7b2f27a420ae2bbf4fe28d91a58492
+    sha256: 7d14d9f724ea841c7c0de865590873f79fa8272a65e2cc77cef44cb7eadea417
   - path: _council-experts/friedman/review.md
-    sha256: 039b4c40c5ac97e2a406a397ad8c1fac2ee5a793a7e46f3f2b335a37af7313c4
+    sha256: 42b66c52959c268f131c410fa21ae4504716a9dff76ce026787a057522a1d5c1
   - path: _council-experts/hashimoto/plan-aura.md
     sha256: fe73404c982f2e9268b62beaafad89636f0688aed451f9d955359ecfd2fd6438
   - path: _council-experts/hashimoto/plan.md
@@ -307,13 +315,21 @@ attested:
   - path: _council-experts/ritchie/review-aura.md
     sha256: 9de1f8b331330111f09c2cfdd40e305d81309eea01d0cb2e34ae1861841e44bb
   - path: _council-experts/saarinen/plan-aura.md
-    sha256: 2f57b3192c9c98d1c9f4eea38aa67296158bc5cf7ab0f4fa11f7bc53aae71d23
+    sha256: f19e05eded7ad85f9ad9bb9f1faa30a8ba430b7edf3af31f91962aa7d761799d
   - path: _council-experts/saarinen/plan.md
-    sha256: f41a3f7028a4972aaa5f575692ff31a4b8eebacdd1d26842e7737770c3ea98aa
+    sha256: ed6404f3694281dc9680e28be1cc3ff0749a91fdbf42d8d480e57956e29ab78b
+  - path: _council-experts/saarinen/references/platform-android.md
+    sha256: ef88043a40ee283285c5e8e6aef49f094d32d489e7dc99484ddba98e5b6702e3
+  - path: _council-experts/saarinen/references/platform-ios.md
+    sha256: c6d0919e1233a37c61ef8347178aabe62882ff2627de78a8dd7694f58f056410
+  - path: _council-experts/saarinen/references/platform-telegram-mini-app.md
+    sha256: 56fbbce0ebcbc301adb2fd89440adae1acd2f97880f010c6ddb01adb09bd41c5
+  - path: _council-experts/saarinen/references/token-ladder.md
+    sha256: 68891b6948b15cd021ef7fc86db045b1dcbfee3cc59527ea58297b9b6d90fc3c
   - path: _council-experts/saarinen/review-aura.md
-    sha256: 1ac696d6c6dfad2d556a946e0bc7f8bce4aa494c6c7d85ccd66a437262d929aa
+    sha256: d739607f48c014deeabffd90ee95b9d871f544462faf89513b792a84fc2ca060
   - path: _council-experts/saarinen/review.md
-    sha256: 25408b386ac9cd42fca378dc70de0f99cb10ededab37959117eeb76c4e88110f
+    sha256: d4fc9269128b56545a9ad37bc69cd318bca9aa2366268af2bced6963153b4ce2
   - path: _council-experts/selection-engine.md
     sha256: 1d2b7e2a5da154fb7bb9c1af0029884249b8d5035e7d800139dc9b0bcbf75014
   - path: _council-experts/sridharan/plan.md
@@ -333,9 +349,15 @@ attested:
   - path: _council-experts/vanrossum/review.md
     sha256: b632902ef6675c13c7be3ce58c9bbc09f9fb0bf0f8582a0703c754b43655b9b1
   - path: _council-experts/watson/plan-aura.md
-    sha256: 1e8ff2aa62e0552672bdf1a17e8e78422c594567e69a9bd3976352b443f2ecf0
+    sha256: dc9b205512c075fdcac9d5576dc5e4055a7b8761497e33f7d1784da2490dc38b
+  - path: _council-experts/watson/references/platform-android.md
+    sha256: 172594578f36908001820e29b861c823dd52b3022df6652583182db974eed529
+  - path: _council-experts/watson/references/platform-ios.md
+    sha256: 40f910b31c6f4dcd0025a0684233233fd75be68001d0b67480b58a4fc29a53ff
+  - path: _council-experts/watson/references/platform-telegram-mini-app.md
+    sha256: b6330d3b7a8ad211305357c0a29de912a9d8850a2fb6bc319c5aab44d46543a3
   - path: _council-experts/watson/review-aura.md
-    sha256: 74eda6bba94271075b3e1e5edcc9a888ba8564dff97826760f9b4b197a1d74cc
+    sha256: ce7fe409e09eec1f532f5b6d2d777df0229f0527ff6e870f52a5dbf77f6651fc
   - path: _council-experts/willison/plan-aura.md
     sha256: 872c309d11574b05fe6c1c41b0a33f767857053f2a432b08193c2229d40a65ca
   - path: _council-experts/willison/plan.md
@@ -345,7 +367,7 @@ attested:
   - path: _council-experts/willison/review.md
     sha256: 25787f30c6cd4ffcbfb5c6ea5648e02cea5ad984b2292d68ec694834819087ee
   - path: council-implement-aura/SKILL.md
-    sha256: 135b743cd5dd79bf0678802d0421dcb868f52a1e9963f52a243953b98a20374c
+    sha256: 6e7d9eef806f94aa73d259b65c64dfea7653c2c0be0eaf763da5c878e58cd453
   - path: council-implement-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-implement-aura/references/quality-abramov.md
@@ -371,7 +393,7 @@ attested:
   - path: council-implement-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-implement/SKILL.md
-    sha256: 951a19406f4cf0e69dce17c49e477072679ba0a4ee3ea4ddcb49382a6f1f61a3
+    sha256: f2f4de8c20a82e5a9cf9b646b749bcdbf6e2f493945a9261c301f3f4ea99a812
   - path: council-implement/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-implement/references/quality-frontend.md
@@ -385,7 +407,7 @@ attested:
   - path: council-implement/references/security.md
     sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
   - path: council-plan-aura/SKILL.md
-    sha256: dd2f0bdc7477adcca7121b9a1b529b667cf7e3c3b28b504bd4601d82e22378d4
+    sha256: 92b9e1bb7f0295af90a0f39ab2c635c10709130ced3f44f3ea6f878ef0bb4211
   - path: council-plan-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-plan-aura/references/quality-backend.md
@@ -405,7 +427,7 @@ attested:
   - path: council-plan-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-plan/SKILL.md
-    sha256: 1bee0b16e120d887ed127baf639388f55eb85e4cbbc6fa575885ba17aad799e5
+    sha256: 4055697fef3e7025e69f8642aee174a90dfa21587368b9b1eb3901065f4915b5
   - path: council-plan/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-plan/references/quality-frontend.md
@@ -423,7 +445,7 @@ attested:
   - path: council-plan/references/security.md
     sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
   - path: council-review-aura/SKILL.md
-    sha256: f8a10c5fff364ffa6f4d1794f1f6f499b6d79ee7681b2126a6f561b611e5fed3
+    sha256: 3d458efdd9dfc383dae8ecdbd57f30138e015b4e89fb6745c5f30c421c051c9a
   - path: council-review-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-review-aura/references/quality-backend.md
@@ -443,7 +465,7 @@ attested:
   - path: council-review-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-review/SKILL.md
-    sha256: 5d430954bc3625ecace80a49dfa9b43b59b81c7718a6561731756aa4e125182a
+    sha256: f3d38c60e442fd0ce8e29f3d2db4fe977d6e06cbe6b4a074ecb3386a91799f5f
   - path: council-review/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-review/references/quality-frontend.md
