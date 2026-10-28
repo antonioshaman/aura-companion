@@ -4650,6 +4650,39 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(envOf(0).AURA_COUNCIL_CATALOG_DIR).toBeUndefined();
   });
 
+  // B5 / owner answer 1: a container created with the read-only pack mount (same path)
+  // gets the same exposure via --plugin-dir inside it, probed against the container's
+  // own CLI; a container without the mount (created before B5) stays unavailable.
+  it("Claude in a container with the pack mount: --plugin-dir inside the docker exec, container CLI probed", async () => {
+    const version = await installFixturePack();
+    const hostProbe = vi.fn(() => true);
+    const containerProbe = vi.fn(() => true);
+    launcher.probeClaudePluginDir = hostProbe;
+    launcher.containerHasPack = () => true;
+    launcher.probeContainerPluginDir = containerProbe;
+    const info = launcher.launch({ cwd: tempDir, layers: ALL_ON, containerId: "abc123def456", containerName: "companion-test" });
+    const argv = argvOf(0);
+    expect(argv.slice(0, 2)).toEqual(["docker", "exec"]);
+    const inner = argv[argv.length - 1];
+    expect(inner).toContain(`'--plugin-dir' '${join(launcher.skillPackRoot, "exposures")}`);
+    expect(argv).toContain("PYTHONDONTWRITEBYTECODE=1");
+    expect(containerProbe).toHaveBeenCalledWith("abc123def456", expect.any(String));
+    expect(hostProbe).not.toHaveBeenCalled();
+    expect(info.skillExposure).toMatchObject({ status: "on", version });
+  });
+
+  it("Claude in a container WITHOUT the pack mount (pre-B5): unavailable, no --plugin-dir, CLI never probed", async () => {
+    await installFixturePack();
+    const containerProbe = vi.fn(() => true);
+    launcher.containerHasPack = () => false;
+    launcher.probeContainerPluginDir = containerProbe;
+    const info = launcher.launch({ cwd: tempDir, layers: ALL_ON, containerId: "abc123def456", containerName: "companion-test" });
+    expect(argvOf(0)[argvOf(0).length - 1]).not.toContain("--plugin-dir");
+    expect(info.skillExposure).toMatchObject({ status: "unavailable" });
+    expect(info.skillExposure?.reason).toMatch(/created without the toolkit mount/);
+    expect(containerProbe).not.toHaveBeenCalled();
+  });
+
   it("Claude: no pack installed → no --plugin-dir, labelled unavailable, CLI never probed", () => {
     const probe = vi.fn(() => true);
     launcher.probeClaudePluginDir = probe;

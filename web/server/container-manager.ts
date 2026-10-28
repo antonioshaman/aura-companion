@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_SANDBOX_IMAGE } from "./sandbox-image.js";
+import { DEFAULT_PACK_ROOT } from "./skill-pack.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,6 +75,8 @@ function exec(cmd: string, opts?: ExecSyncOptionsWithStringEncoding): string {
 
 export class ContainerManager {
   private containers = new Map<string, ContainerInfo>();
+  /** Aura's skill pack, bind-mounted read-only (same path) into new containers. */
+  skillPackRoot: string = DEFAULT_PACK_ROOT;
 
   /** Check whether Docker daemon is reachable. */
   checkDocker(): boolean {
@@ -189,6 +192,13 @@ export class ContainerManager {
     const gitconfigPath = join(homedir, ".gitconfig");
     if (existsSync(gitconfigPath)) {
       args.push("-v", `${gitconfigPath}:/companion-host-gitconfig:ro`);
+    }
+
+    // Aura's skill pack, read-only at the same absolute path: the Claude exposure
+    // (--plugin-dir, relative links into versions/) and AURA_COUNCIL_CATALOG_DIR then
+    // resolve inside the container unchanged (B5). A ':' would break `-v` parsing.
+    if (!this.skillPackRoot.includes(":") && existsSync(this.skillPackRoot)) {
+      args.push("-v", `${this.skillPackRoot}:${this.skillPackRoot}:ro`);
     }
 
     // Port mappings: -p [hostIp:]0:{containerPort}
@@ -743,6 +753,25 @@ export class ContainerManager {
         { encoding: "utf-8", timeout: QUICK_EXEC_TIMEOUT_MS },
       );
       return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Was this container created with the read-only skill-pack mount? Containers created
+   * before B5 were not, and keep "toolkit unavailable". Any inspect failure → false.
+   */
+  hasSkillPackMount(containerId: string): boolean {
+    validateContainerId(containerId);
+    try {
+      const raw = exec(`docker inspect -f '{{json .Mounts}}' ${shellEscape(containerId)}`, {
+        encoding: "utf-8",
+        timeout: QUICK_EXEC_TIMEOUT_MS,
+      });
+      const mounts = JSON.parse(raw) as Array<{ Type?: string; Source?: string; Destination?: string; RW?: boolean }>;
+      return Array.isArray(mounts) && mounts.some((m) =>
+        m.Type === "bind" && m.Source === this.skillPackRoot && m.Destination === this.skillPackRoot && m.RW === false);
     } catch {
       return false;
     }

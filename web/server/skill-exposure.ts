@@ -15,7 +15,10 @@
 //   Codex   marked, read-only copies in the Aura-managed per-session CODEX_HOME
 //           (`syncCopies`), never the user's `~/.codex`. Claude-only skills
 //           (`compat.codex === false`) are not copied: `requires-claude`.
-//   Container sessions are not wired yet → "toolkit unavailable".
+//   Containers  new containers get `<pack root>` bind-mounted read-only at the same
+//           path (container-manager), so a Claude session inside one gets the same
+//           `--plugin-dir`. Containers created before that, and Codex in a
+//           container, stay "toolkit unavailable".
 //
 // Delivery itself (trees, copies, ownership) stays in skill-pack.ts.
 
@@ -69,7 +72,12 @@ export interface ExposureInput {
   /** The `uiux` layer flag for this session. */
   enabled: boolean;
   containerized: boolean;
-  /** Claude only: whether the installed CLI supports `--plugin-dir`. */
+  /**
+   * Containerized only: the container was created with the read-only skill-pack
+   * bind mount (same path as on the host). Older containers lack it.
+   */
+  containerPackMounted?: boolean;
+  /** Claude only: whether the installed CLI (inside the container, if any) supports `--plugin-dir`. */
   cliSupportsPluginDir?: boolean;
   pack: CurrentPack;
   /** Skill dirs that already answer to a name for this CLI (the user's win). */
@@ -82,7 +90,10 @@ export function decideSkillExposure(input: ExposureInput): SkillExposure {
   const base = { schemaVersion: SKILL_EXPOSURE_SCHEMA_VERSION, backend: input.backend, decidedAt: input.now ?? Date.now() } as const;
   if (!input.enabled) return { ...base, status: "off", items: [] };
   const unavailable = (reason: string): SkillExposure => ({ ...base, status: "unavailable", reason, items: [] });
-  if (input.containerized) return unavailable("container sessions do not receive the toolkit yet");
+  if (input.containerized && input.backend === "codex") return unavailable("Codex container sessions do not receive the toolkit yet");
+  if (input.containerized && input.containerPackMounted !== true) {
+    return unavailable("this container was created without the toolkit mount; new container sessions get it");
+  }
   if (input.backend === "claude" && input.cliSupportsPluginDir !== true) {
     return unavailable("the installed Claude Code CLI does not support --plugin-dir");
   }

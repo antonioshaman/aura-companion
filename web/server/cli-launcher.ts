@@ -2205,6 +2205,17 @@ export class CliLauncher {
   skillPackRoot = DEFAULT_PACK_ROOT;
   /** `--plugin-dir` support of a Claude binary; a seam for tests. */
   probeClaudePluginDir: (binary: string) => boolean = claudeSupportsPluginDir;
+  /** Was the container created with the read-only skill-pack mount (B5)? A seam for tests. */
+  containerHasPack: (containerId: string) => boolean = (id) => containerManager.hasSkillPackMount(id);
+  /** `--plugin-dir` support of the Claude binary INSIDE a container; cached per container + binary. */
+  probeContainerPluginDir: (containerId: string, binary: string) => boolean = (id, bin) =>
+    claudeSupportsPluginDir(`container:${id}\0${bin}`, () => {
+      try {
+        return containerManager.execInContainer(id, ["bash", "-lc", `${bin} --help`]);
+      } catch {
+        return null;
+      }
+    });
 
   /** The `uiux` layer for this spawn. Observers are read-only reviewers: no toolkit. */
   private uiuxWanted(options: LaunchOptions): boolean {
@@ -2252,12 +2263,18 @@ export class CliLauncher {
           ...listExistingSkills(join(configDir, "skills"), pack.manifest),
           ...listExistingSkills(join(info.cwd, ".claude", "skills"), pack.manifest),
         ];
+        // Containers: only one created with the read-only pack mount can see the
+        // exposure; its own CLI is the one probed for --plugin-dir.
+        const mounted = isContainerized && !("error" in pack) && !!options.containerId && this.containerHasPack(options.containerId);
         return decideSkillExposure({
           backend: "claude",
           enabled: this.uiuxWanted(options),
           containerized: isContainerized,
+          containerPackMounted: mounted,
           // Probed only when a pack exists: no `--help` spawn on installs without one.
-          cliSupportsPluginDir: !isContainerized && !("error" in pack) && this.probeClaudePluginDir(binary),
+          cliSupportsPluginDir: !("error" in pack) && (isContainerized
+            ? mounted && this.probeContainerPluginDir(options.containerId!, binary)
+            : this.probeClaudePluginDir(binary)),
           pack,
           existing,
         });

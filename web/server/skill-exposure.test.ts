@@ -108,6 +108,24 @@ describe("decideSkillExposure", () => {
     expect(codex({ enabled: false })).toMatchObject({ status: "off", items: [] });
   });
 
+  // B5 / owner answer 1: a container created with the read-only skill-pack mount gets
+  // the Claude toolkit via --plugin-dir inside it; an older container (no mount) and
+  // Codex in a container stay "unavailable" with a reason that says why.
+  it("Claude in a container WITH the pack mount → on; without it → unavailable (existing containers)", () => {
+    expect(claude({ containerized: true, containerPackMounted: true }).status).toBe("on");
+    const old = claude({ containerized: true, containerPackMounted: false });
+    expect(old.status).toBe("unavailable");
+    expect(old.reason).toMatch(/created without the toolkit mount/);
+    const noPluginDir = claude({ containerized: true, containerPackMounted: true, cliSupportsPluginDir: false });
+    expect(noPluginDir.status).toBe("unavailable");
+  });
+
+  it("Codex in a container stays unavailable even with the mount (no in-container copies yet)", () => {
+    const e = codex({ containerized: true, containerPackMounted: true });
+    expect(e.status).toBe("unavailable");
+    expect(e.reason).toMatch(/Codex/);
+  });
+
   it("every missing precondition → unavailable with a reason, nothing provided", () => {
     const cases = [
       claude({ cliSupportsPluginDir: false }),
