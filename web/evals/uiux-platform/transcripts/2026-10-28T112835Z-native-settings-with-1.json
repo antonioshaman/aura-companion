@@ -19,7 +19,8 @@
     },
     "antiMarkers": {
       "browser-confirm": false,
-      "web-hover": false
+      "web-hover": false,
+      "font-scaling-disabled": false
     },
     "pass": false
   }

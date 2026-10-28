@@ -6,8 +6,8 @@ Models: sonnet. Runs: 18. Last run: 2026-10-28T11:28:35Z.
 
 | Fixture | Arm | Pass rate | Skill loaded | Marker hits (`!x` = anti-marker) |
 |---|---|---|---|---|
-| native-settings | with | 2/3 | 3/3 | safe-area 2/3, dynamic-type 2/3, touch-target-44-48 3/3, native-confirm 3/3, !browser-confirm 0/3, !web-hover 0/3 |
-| native-settings | without | 0/3 | 0/3 | safe-area 3/3, dynamic-type 0/3, touch-target-44-48 3/3, native-confirm 3/3, !browser-confirm 0/3, !web-hover 0/3 |
+| native-settings | with | 2/3 | 3/3 | safe-area 2/3, dynamic-type 2/3, touch-target-44-48 3/3, native-confirm 3/3, !browser-confirm 0/3, !web-hover 0/3, !font-scaling-disabled 0/3 |
+| native-settings | without | 0/3 | 0/3 | safe-area 3/3, dynamic-type 0/3, touch-target-44-48 3/3, native-confirm 3/3, !browser-confirm 0/3, !web-hover 0/3, !font-scaling-disabled 0/3 |
 | tma-checkout | with | 2/3 | 3/3 | safe-area 3/3, back-button 3/3, main-button 3/3, theme-params 3/3, touch-target-44-48 3/3, !browser-confirm 1/3, !bare-100vh 0/3 |
 | tma-checkout | without | 0/3 | 0/3 | safe-area 3/3, back-button 2/3, main-button 0/3, theme-params 3/3, touch-target-44-48 3/3, !browser-confirm 0/3, !bare-100vh 3/3 |
 | web-checkout | with | 3/3 | 0/3 | !telegram-api-leak 0/3, !native-api-leak 0/3 |

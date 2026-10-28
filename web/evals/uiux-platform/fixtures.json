@@ -23,13 +23,14 @@
       "prompt": "Build the account settings screen of our React Native app, which ships on iOS and Android. It shows a profile row, a list of settings rows and a Delete account action that must be confirmed. Reply with the complete code in one message; do not create or edit any files.",
       "markers": {
         "safe-area": "SafeAreaView|useSafeAreaInsets|safe[-_ ]?area",
-        "dynamic-type": "allowFontScaling|maxFontSizeMultiplier|fontScale|Dynamic Type|adjustsFontForContentSizeCategory",
+        "dynamic-type": "allowFontScaling(?!\\s*=\\s*\\{\\s*false)|maxFontSizeMultiplier\\s*=\\s*\\{\\s*(?!1(\\.0+)?\\s*\\})\\d|fontScale|Dynamic Type|adjustsFontForContentSizeCategory",
         "touch-target-44-48": "(minHeight|minWidth|height|hitSlop)\\s*[:=]\\s*\\{?\\s*(4[4-9]|5\\d)\\b",
         "native-confirm": "Alert\\.alert|ActionSheetIOS|showActionSheetWithOptions|BottomSheet"
       },
       "antiMarkers": {
         "browser-confirm": "\\bwindow\\.(confirm|alert)\\s*\\(",
-        "web-hover": ":hover|onMouseEnter"
+        "web-hover": ":hover|onMouseEnter",
+        "font-scaling-disabled": "allowFontScaling\\s*=\\s*\\{\\s*false|maxFontSizeMultiplier\\s*=\\s*\\{\\s*1(\\.0+)?\\s*\\}"
       }
     },
     {

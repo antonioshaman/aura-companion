@@ -68,6 +68,29 @@ describe("grade — platform fixtures need every marker and no web-only anti-mar
   });
 });
 
+describe("grade — disabling font scaling is not Dynamic Type support (observer WARN, checkpoint council-implement-187)", () => {
+  const withScaling = (attrs: string) => NATIVE_GOOD.replace("allowFontScaling maxFontSizeMultiplier={2}", attrs);
+
+  it("allowFontScaling={false} neither counts as the marker nor passes", () => {
+    const g = grade(withScaling("allowFontScaling={false}"), fx["native-settings"]);
+    expect(g.markers["dynamic-type"]).toBe(false);
+    expect(g.antiMarkers["font-scaling-disabled"]).toBe(true);
+    expect(g.pass).toBe(false);
+  });
+
+  it("maxFontSizeMultiplier={1} pins text at 100%: anti-marker, fail", () => {
+    const g = grade(withScaling("maxFontSizeMultiplier={1}"), fx["native-settings"]);
+    expect(g.markers["dynamic-type"]).toBe(false);
+    expect(g.antiMarkers["font-scaling-disabled"]).toBe(true);
+    expect(g.pass).toBe(false);
+  });
+
+  it("a cap above 1 or an explicit allowFontScaling={true} still counts", () => {
+    expect(grade(withScaling("maxFontSizeMultiplier={1.5}"), fx["native-settings"]).pass).toBe(true);
+    expect(grade(withScaling("allowFontScaling={true}"), fx["native-settings"]).pass).toBe(true);
+  });
+});
+
 describe("grade — the paired web control must NOT produce platform markers", () => {
   it("a plain web checkout passes", () => {
     expect(grade(`<button onClick={() => history.back()}>Back</button>\n.pay { min-height: 44px; }`, fx["web-checkout"]).pass).toBe(true);
