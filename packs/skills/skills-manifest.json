@@ -23,7 +23,7 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "687b8714033f1e8847242503cceab56e9ef125ebbcef348f99e810c02b997e32",
+      "digest": "ef9e97603cc35fddf2531cda9d4466c6ee20916c37dd7055cf03962e7aef9813",
       "files": {
         ".verify/capability-vocabulary.json": "741f4b01d7f38a9e51c819a3b8bd0f57a0c8871236526f710ff3048b3fc23dbd",
         "README.md": "6d7b4df6c967f576bcae951614c289f733a3a66c8c0bde30193fcc3ea15dd64e",
@@ -64,11 +64,15 @@
         "fowler/review-aura.md": "30c5da4a831b4970c3e56241d88507fb9333ea081ac3946b2957f598e1287af3",
         "fowler/review.md": "2f4c80104d8cddd46f53ea61951d4baef4d55e78015bbfbb46fc6ce02ace658a",
         "friedman/meta.yaml": "8f36553dbfd5787d3c9a6b54f468824cb54b42dabe68825e82dd9cd12bf3ed56",
-        "friedman/plan-aura.md": "1707c13db543bc8f5fd20fac17eccf7ad7e7b95eafa83206c5aee5c07e576077",
-        "friedman/plan.md": "6c4b4b73f4864b5f39c56cb5bfad7929f25095cc2b52d2109b6822c7beb73502",
+        "friedman/plan-aura.md": "62ea65682303decc6cbc5025f95e630b2f47ccd53f2779b95bf930a870aa985d",
+        "friedman/plan.md": "22c2cc18234f1aba878905450526834c85471033a1d66553283aa6b0f1c42738",
+        "friedman/references/evaluation-method.md": "f9be713b162ff620668e013a23a0b9a6b4af8990403dbee8604359f801a71831",
+        "friedman/references/platform-android.md": "e83548946c6413fae28d054a5f4349dd5bece77e42f28de3193ac66b059028ac",
+        "friedman/references/platform-ios.md": "a5bb4f847c70625cd10bf8b316b7d90a8bda4bb570381bf8284769ace00b212f",
+        "friedman/references/platform-telegram-mini-app.md": "44d9b31165e1c1543200856f360252a5109a58f97b0421657e38d834bced0e57",
         "friedman/references/quality-friedman.md": "d9dcdaf9d6dec00ff4aad301702fbea9d3e8667fe8b6c6e01f6015b1fcb41e49",
-        "friedman/review-aura.md": "5b429e595f69ef18c3e32b60f50559198f7b2f27a420ae2bbf4fe28d91a58492",
-        "friedman/review.md": "039b4c40c5ac97e2a406a397ad8c1fac2ee5a793a7e46f3f2b335a37af7313c4",
+        "friedman/review-aura.md": "7d14d9f724ea841c7c0de865590873f79fa8272a65e2cc77cef44cb7eadea417",
+        "friedman/review.md": "42b66c52959c268f131c410fa21ae4504716a9dff76ce026787a057522a1d5c1",
         "hashimoto/meta.yaml": "9d259bb66e97e76d2dd4a1e0b97864550b3b9930d16606b1ea5fe576c5fc096f",
         "hashimoto/plan-aura.md": "fe73404c982f2e9268b62beaafad89636f0688aed451f9d955359ecfd2fd6438",
         "hashimoto/plan.md": "18e01edf241bb2e77d98bb94f80080d2669c57ee60248b0be661bd1414be0097",
@@ -97,11 +101,15 @@
         "ritchie/plan-aura.md": "89f1cda6aac01b458d8d44bcd4c8120933979f483292ee6c86bc592e91a6767a",
         "ritchie/review-aura.md": "9de1f8b331330111f09c2cfdd40e305d81309eea01d0cb2e34ae1861841e44bb",
         "saarinen/meta.yaml": "5168e2c625a46a1d51967402cc7a41ad500b7a184a7af4db8119830b6dfcfb60",
-        "saarinen/plan-aura.md": "2f57b3192c9c98d1c9f4eea38aa67296158bc5cf7ab0f4fa11f7bc53aae71d23",
-        "saarinen/plan.md": "f41a3f7028a4972aaa5f575692ff31a4b8eebacdd1d26842e7737770c3ea98aa",
+        "saarinen/plan-aura.md": "f19e05eded7ad85f9ad9bb9f1faa30a8ba430b7edf3af31f91962aa7d761799d",
+        "saarinen/plan.md": "ed6404f3694281dc9680e28be1cc3ff0749a91fdbf42d8d480e57956e29ab78b",
+        "saarinen/references/platform-android.md": "ef88043a40ee283285c5e8e6aef49f094d32d489e7dc99484ddba98e5b6702e3",
+        "saarinen/references/platform-ios.md": "c6d0919e1233a37c61ef8347178aabe62882ff2627de78a8dd7694f58f056410",
+        "saarinen/references/platform-telegram-mini-app.md": "56fbbce0ebcbc301adb2fd89440adae1acd2f97880f010c6ddb01adb09bd41c5",
         "saarinen/references/quality-saarinen.md": "de583ee88c048ac0f09934b6b1870b091445885fa1cebd807fcd466038c49aac",
-        "saarinen/review-aura.md": "1ac696d6c6dfad2d556a946e0bc7f8bce4aa494c6c7d85ccd66a437262d929aa",
-        "saarinen/review.md": "25408b386ac9cd42fca378dc70de0f99cb10ededab37959117eeb76c4e88110f",
+        "saarinen/references/token-ladder.md": "68891b6948b15cd021ef7fc86db045b1dcbfee3cc59527ea58297b9b6d90fc3c",
+        "saarinen/review-aura.md": "d739607f48c014deeabffd90ee95b9d871f544462faf89513b792a84fc2ca060",
+        "saarinen/review.md": "d4fc9269128b56545a9ad37bc69cd318bca9aa2366268af2bced6963153b4ce2",
         "selection-engine.md": "1d2b7e2a5da154fb7bb9c1af0029884249b8d5035e7d800139dc9b0bcbf75014",
         "sridharan/meta.yaml": "b0378f7cb8c2b153f8d272b87f4171b00360d9cf7f1663123f58cffe62bf3880",
         "sridharan/plan.md": "e5893ef990a998608b64bc9e1181624074febb4cea083841e2b304518a121e5e",
@@ -120,9 +128,12 @@
         "vanrossum/references/quality-vanrossum.md": "1fc271f1da69606cc8edea4bf06eefa9f4eba8dc1183228c3f651193c4ebf574",
         "vanrossum/review.md": "b632902ef6675c13c7be3ce58c9bbc09f9fb0bf0f8582a0703c754b43655b9b1",
         "watson/meta.yaml": "b6ca688b0c880b6b451e1e122e1f4b2a415d9f26e04b8f9431325d423c81e5d5",
-        "watson/plan-aura.md": "1e8ff2aa62e0552672bdf1a17e8e78422c594567e69a9bd3976352b443f2ecf0",
+        "watson/plan-aura.md": "dc9b205512c075fdcac9d5576dc5e4055a7b8761497e33f7d1784da2490dc38b",
+        "watson/references/platform-android.md": "172594578f36908001820e29b861c823dd52b3022df6652583182db974eed529",
+        "watson/references/platform-ios.md": "d18301edbe45a64a6ad74378948cdf76cac7e4b37de771e4356d0914e7f47e3b",
+        "watson/references/platform-telegram-mini-app.md": "b6330d3b7a8ad211305357c0a29de912a9d8850a2fb6bc319c5aab44d46543a3",
         "watson/references/quality-watson.md": "3bb7028e755a14a075731df1e33918ceeaabbf5ae5caab84c10e8f939163afad",
-        "watson/review-aura.md": "74eda6bba94271075b3e1e5edcc9a888ba8564dff97826760f9b4b197a1d74cc",
+        "watson/review-aura.md": "ce7fe409e09eec1f532f5b6d2d777df0229f0527ff6e870f52a5dbf77f6651fc",
         "willison/meta.yaml": "de40d3afdd986d4fff0f07fad3afac44f4ac13852df29eb60c4242940fe8c8fa",
         "willison/plan-aura.md": "872c309d11574b05fe6c1c41b0a33f767857053f2a432b08193c2229d40a65ca",
         "willison/plan.md": "d96ac733203648aa5ea65aa68abdc9b41ad936b1215ce1f3efd51d49b29fdc7d",
@@ -219,6 +230,37 @@
         "LICENSE": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
         "NOTICE.md": "47213058bb19cf397da7afde7a5f299eb1605d0c761c56b643a63660fe63e5f0",
         "SKILL.md": "1670baa962df4d5e94f373a2fa6bf3efd523dd4792676a5e5acb57628cc585e1"
+      }
+    },
+    {
+      "name": "aura-uiux",
+      "frontmatterName": null,
+      "kind": "skill",
+      "source": {
+        "type": "first-party",
+        "repo": "antonioshaman/aura-companion"
+      },
+      "licence": {
+        "spdx": "MIT",
+        "verdict": "shippable"
+      },
+      "compat": {
+        "claude": true,
+        "codex": true,
+        "note": "Codex run 2026-10-28: codex-cli 0.162.1, gpt-6.1-sol, read-only sandbox, skill as project .agents/skills — Codex listed aura-uiux, followed its routing to references/telegram-mini-app.md and restated its back-navigation and touch-target rules."
+      },
+      "ship": {
+        "status": "ship",
+        "reasons": []
+      },
+      "digest": "8f3e1cc49eb04df52e1784c3cb2afde6ea8f03cb5209b8ac8475d91b50b75e42",
+      "files": {
+        "SKILL.md": "5974f47d1495ce37acd3886092e0a4843b0777e916fb7862e6abfaeedc954dcb",
+        "references/android.md": "185df56faaec5432d836a323705d607cacc46bd1d636d20c54429546855a16f6",
+        "references/evaluation-method.md": "2ed724140a59a4453f42c8e939705b9b73fb162752cc7392aa509a2567c534d8",
+        "references/ios.md": "d0b89b592880736b0a479b11dcc6ebd5109a9a03955d68618bc636ae65fb6d07",
+        "references/telegram-mini-app.md": "e136eaad16db28d895abd173d62621474e2ea214af6b83920e2b1da9421b9c4b",
+        "references/token-ladder.md": "b3e8af22e765f318642345b721adc0c6d467574ba15f99b46be45fed71030fdd"
       }
     },
     {

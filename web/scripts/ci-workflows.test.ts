@@ -112,6 +112,9 @@ const GATE_COMMANDS = [
   "bun scripts/vendored-skills.ts check",
   "bun scripts/skill-manifest.ts check",
   "bun scripts/uiux-sources.ts check",
+  // Phase C Task 12: old sections intact, attribution, conflict ledger, copy-check
+  // receipt, injection lint, description lint + cap, platform coverage.
+  "bun scripts/uiux-enrichment.ts check",
 ];
 
 /**

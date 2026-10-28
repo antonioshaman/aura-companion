@@ -368,6 +368,18 @@ export interface CorpusItem {
   fetchedAt: string;
   /** True when the text is too short to be a useful comparison base. */
   thin: boolean;
+  /** Present when the text was captured with a browser (JS-rendered site), not fetched. */
+  capture?: CaptureRecord;
+}
+
+/**
+ * A JS-rendered source captured page by page with agent-browser (HANDOFF-A decision
+ * 3A). `terms` is the site's licence/terms of use, recorded BEFORE the text is used.
+ */
+export interface CaptureRecord {
+  tool: "agent-browser";
+  pages: string[];
+  terms: { url: string; note: string };
 }
 
 export function sha256(text: string): string {
@@ -419,6 +431,32 @@ export function htmlToText(html: string): string {
 export function corpusItem(id: string, textUrl: string, text: string, fetchedAt: string, ref: string | null = null): CorpusItem {
   const bytes = Buffer.byteLength(text, "utf8");
   return { id, textUrl, ref, sha256: sha256(text), bytes, fetchedAt, thin: bytes < THIN_TEXT_BYTES };
+}
+
+/** Captured pages joined in URL order, each under a `URL:` header, so a re-capture is reproducible. */
+export function captureText(pages: { url: string; text: string }[]): string {
+  return [...pages]
+    .sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : 0))
+    .map((p) => `URL: ${p.url}\n\n${p.text.trim()}\n`)
+    .join("\n");
+}
+
+/** A corpus item for a browser capture. Throws without terms: no licence record, no use. */
+export function captureItem(
+  id: string,
+  textUrl: string,
+  text: string,
+  pages: string[],
+  terms: CaptureRecord["terms"],
+  capturedAt: string,
+): CorpusItem {
+  if (!/^https:\/\//.test(terms.url) || !terms.note.trim()) throw new Error(`${id}: capture needs the site's terms (https url + note)`);
+  if (!pages.length) throw new Error(`${id}: capture has no pages`);
+  return { ...corpusItem(id, textUrl, text, capturedAt), capture: { tool: "agent-browser", pages: [...pages].sort(), terms } };
+}
+
+export function isCaptured(m: CorpusItem): boolean {
+  return m.capture !== undefined;
 }
 
 /**
@@ -563,6 +601,19 @@ async function runCorpus(refresh: boolean): Promise<number> {
         drift.push(`${e.id}: not in the manifest (run with --refresh to add it)`);
         continue;
       }
+      // A browser capture cannot be re-fetched; carry the local text over, hash-checked.
+      const captured = prior?.find((m) => m.id === e.id && isCaptured(m));
+      if (captured) {
+        const local = corpusTextPath(e.id);
+        const text = existsSync(local) ? readFileSync(local, "utf8") : null;
+        if (text === null || sha256(text) !== captured.sha256) {
+          drift.push(`${e.id}: captured with agent-browser — re-run \`capture ${e.id} <dir>\` (text ${text === null ? "missing" : "does not match the manifest"})`);
+          continue;
+        }
+        writeFileSync(corpusTextPath(e.id, staging), text);
+        items.push(captured);
+        continue;
+      }
       const ref = isReadmeApi(base) ? (pinned?.ref ?? (await headSha(base))) : null;
       const url = ref ? readmeAtRef(base, ref) : base;
       const text = await fetchText(url);
@@ -599,6 +650,100 @@ async function runCorpus(refresh: boolean): Promise<number> {
   const thin = items.filter((i) => i.thin).map((i) => i.id);
   console.log(`uiux corpus: ${items.length} texts ${rebuild ? "rebuilt from the manifest" : "re-pinned"}${thin.length ? `; UNCHECKABLE (thin): ${thin.join(", ")}` : ""}`);
   return 0;
+}
+
+/**
+ * Install one captured text and the manifest that hashes it as a pair (observer
+ * STOP, checkpoint council-implement-187). Both are written to temp files first;
+ * the old text is moved aside, not overwritten; any failure before the manifest
+ * is in place puts the old text back and leaves the old manifest untouched.
+ */
+export function installCapture(opts: {
+  textPath: string;
+  text: string;
+  manifestPath: string;
+  manifestText: string;
+  rename?: (from: string, to: string) => void;
+}): void {
+  const { textPath, text, manifestPath, manifestText } = opts;
+  const rename = opts.rename ?? renameSync;
+  const tmpText = `${textPath}.tmp-${process.pid}`;
+  const tmpManifest = `${manifestPath}.tmp-${process.pid}`;
+  const old = `${textPath}.old-${process.pid}`;
+  let moved = false;
+  let installed = false;
+  try {
+    writeFileSync(tmpText, text);
+    writeFileSync(tmpManifest, manifestText);
+    if (existsSync(textPath)) {
+      renameSync(textPath, old);
+      moved = true;
+    }
+    rename(tmpText, textPath);
+    installed = true;
+    rename(tmpManifest, manifestPath);
+  } catch (err) {
+    if (installed) rmSync(textPath, { force: true });
+    if (moved) renameSync(old, textPath);
+    rmSync(tmpText, { force: true });
+    rmSync(tmpManifest, { force: true });
+    throw err;
+  }
+  rmSync(old, { force: true });
+}
+
+/**
+ * `capture <id> <dir> --terms-url <https> --terms-note <text>`: install agent-browser
+ * page captures (`<dir>/*.txt`, first line `URL: <page>`) as the corpus text of a
+ * catalog source and record the pages + terms in the manifest.
+ */
+function runCapture(args: string[]): number {
+  const [id, dir] = args;
+  const flag = (name: string) => {
+    const i = args.indexOf(name);
+    return i >= 0 ? (args[i + 1] ?? "") : "";
+  };
+  const entries = loadCatalogEntries();
+  const entry = entries.find((e) => e.id === id);
+  if (!entry || !dir || !existsSync(dir)) {
+    console.error("usage: capture <catalog-id> <dir> --terms-url <https url> --terms-note <text>");
+    return 2;
+  }
+  const textUrl = corpusTextUrl(entry);
+  if (textUrl === null) {
+    console.error(`${id}: excluded source — nothing to capture`);
+    return 1;
+  }
+  const pages = readdirSync(dir)
+    .filter((f) => f.endsWith(".txt"))
+    .map((f) => {
+      const raw = readFileSync(join(dir, f), "utf8");
+      const m = /^URL: (\S+)\n\n/.exec(raw);
+      if (!m) throw new Error(`${f}: first line must be "URL: <page>"`);
+      return { url: m[1], text: raw.slice(m[0].length) };
+    });
+  const text = captureText(pages);
+  let item: CorpusItem;
+  try {
+    item = captureItem(id, textUrl, text, pages.map((p) => p.url), { url: flag("--terms-url"), note: flag("--terms-note") }, stamp());
+  } catch (err) {
+    console.error((err as Error).message);
+    return 1;
+  }
+  const items = loadCorpusManifest().filter((m) => m.id !== id);
+  items.push(item);
+  const order = new Map(entries.map((e, i) => [e.id, i]));
+  items.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  mkdirSync(CORPUS_DIR, { recursive: true });
+  const doc = JSON.parse(readFileSync(CORPUS_MANIFEST_FILE, "utf8")) as { _doc: string };
+  try {
+    installCapture({ textPath: corpusTextPath(id), text, manifestPath: CORPUS_MANIFEST_FILE, manifestText: JSON.stringify({ _doc: doc._doc, items }, null, 2) + "\n" });
+  } catch (err) {
+    console.error(`uiux corpus: capture not installed, previous text and manifest kept — ${(err as Error).message}`);
+    return 1;
+  }
+  console.log(`uiux corpus: ${id} captured — ${pages.length} pages, ${item.bytes} bytes${item.thin ? " (STILL THIN)" : ""}`);
+  return item.thin ? 1 : 0;
 }
 
 export function loadCorpusManifest(path = CORPUS_MANIFEST_FILE): CorpusItem[] {
@@ -728,8 +873,9 @@ if (import.meta.main) {
   else if (cmd === "check") process.exit(runCheck());
   else if (cmd === "corpus") process.exit(await runCorpus(process.argv.includes("--refresh")));
   else if (cmd === "verify-corpus") process.exit(runVerifyCorpus());
+  else if (cmd === "capture") process.exit(runCapture(process.argv.slice(3)));
   else {
-    console.error("usage: bun scripts/uiux-sources.ts fetch|check|corpus [--refresh]|verify-corpus");
+    console.error("usage: bun scripts/uiux-sources.ts fetch|check|corpus [--refresh]|verify-corpus|capture <id> <dir> --terms-url <u> --terms-note <n>");
     process.exit(2);
   }
 }

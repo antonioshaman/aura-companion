@@ -1,0 +1,63 @@
+{
+  "_doc": "Phase C enrichment scope (PLAN Task 12). Each file keeps its pre-existing bytes (length + sha256 at baselineCommit, a commit on main); null = new file. Regenerate with `bun scripts/uiux-enrichment.ts baseline <commit> [paths]`.",
+  "baselineCommit": "ab95b21a513526d0738884aa46066617bffaa8e4",
+  "files": {
+    "packs/skills/_council-experts/friedman/plan-aura.md": {
+      "bytes": 787,
+      "sha256": "1707c13db543bc8f5fd20fac17eccf7ad7e7b95eafa83206c5aee5c07e576077"
+    },
+    "packs/skills/_council-experts/friedman/plan.md": {
+      "bytes": 1630,
+      "sha256": "6c4b4b73f4864b5f39c56cb5bfad7929f25095cc2b52d2109b6822c7beb73502"
+    },
+    "packs/skills/_council-experts/friedman/references/evaluation-method.md": null,
+    "packs/skills/_council-experts/friedman/references/platform-android.md": null,
+    "packs/skills/_council-experts/friedman/references/platform-ios.md": null,
+    "packs/skills/_council-experts/friedman/references/platform-telegram-mini-app.md": null,
+    "packs/skills/_council-experts/friedman/review-aura.md": {
+      "bytes": 1127,
+      "sha256": "5b429e595f69ef18c3e32b60f50559198f7b2f27a420ae2bbf4fe28d91a58492"
+    },
+    "packs/skills/_council-experts/friedman/review.md": {
+      "bytes": 2324,
+      "sha256": "039b4c40c5ac97e2a406a397ad8c1fac2ee5a793a7e46f3f2b335a37af7313c4"
+    },
+    "packs/skills/_council-experts/saarinen/plan-aura.md": {
+      "bytes": 741,
+      "sha256": "2f57b3192c9c98d1c9f4eea38aa67296158bc5cf7ab0f4fa11f7bc53aae71d23"
+    },
+    "packs/skills/_council-experts/saarinen/plan.md": {
+      "bytes": 1761,
+      "sha256": "f41a3f7028a4972aaa5f575692ff31a4b8eebacdd1d26842e7737770c3ea98aa"
+    },
+    "packs/skills/_council-experts/saarinen/references/platform-android.md": null,
+    "packs/skills/_council-experts/saarinen/references/platform-ios.md": null,
+    "packs/skills/_council-experts/saarinen/references/platform-telegram-mini-app.md": null,
+    "packs/skills/_council-experts/saarinen/references/token-ladder.md": null,
+    "packs/skills/_council-experts/saarinen/review-aura.md": {
+      "bytes": 1031,
+      "sha256": "1ac696d6c6dfad2d556a946e0bc7f8bce4aa494c6c7d85ccd66a437262d929aa"
+    },
+    "packs/skills/_council-experts/saarinen/review.md": {
+      "bytes": 2288,
+      "sha256": "25408b386ac9cd42fca378dc70de0f99cb10ededab37959117eeb76c4e88110f"
+    },
+    "packs/skills/_council-experts/watson/plan-aura.md": {
+      "bytes": 739,
+      "sha256": "1e8ff2aa62e0552672bdf1a17e8e78422c594567e69a9bd3976352b443f2ecf0"
+    },
+    "packs/skills/_council-experts/watson/references/platform-android.md": null,
+    "packs/skills/_council-experts/watson/references/platform-ios.md": null,
+    "packs/skills/_council-experts/watson/references/platform-telegram-mini-app.md": null,
+    "packs/skills/_council-experts/watson/review-aura.md": {
+      "bytes": 1052,
+      "sha256": "74eda6bba94271075b3e1e5edcc9a888ba8564dff97826760f9b4b197a1d74cc"
+    },
+    "packs/skills/aura-uiux/SKILL.md": null,
+    "packs/skills/aura-uiux/references/android.md": null,
+    "packs/skills/aura-uiux/references/evaluation-method.md": null,
+    "packs/skills/aura-uiux/references/ios.md": null,
+    "packs/skills/aura-uiux/references/telegram-mini-app.md": null,
+    "packs/skills/aura-uiux/references/token-ladder.md": null
+  }
+}

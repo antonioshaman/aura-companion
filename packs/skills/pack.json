@@ -14,6 +14,12 @@
       "compat": { "claude": true, "codex": true, "note": "Reference data read by the council-* dispatchers, not invocable on its own." }
     },
     {
+      "name": "aura-uiux",
+      "kind": "skill",
+      "origin": "first-party",
+      "compat": { "claude": true, "codex": true, "note": "Codex run 2026-10-28: codex-cli 0.162.1, gpt-6.1-sol, read-only sandbox, skill as project .agents/skills — Codex listed aura-uiux, followed its routing to references/telegram-mini-app.md and restated its back-navigation and touch-target rules." }
+    },
+    {
       "name": "council-implement",
       "kind": "skill",
       "origin": "first-party",

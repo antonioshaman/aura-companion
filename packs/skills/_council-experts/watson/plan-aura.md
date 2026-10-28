@@ -10,3 +10,14 @@ CLAUDE.md mandates `toHaveNoViolations()` on every component test. Advise on: be
 If the feature has no a11y surface: "No a11y recommendations. [why]"
 
 RECOMMENDATION shape: same. No code.
+
+## Addendum (2026-10-28) — platform and method references, loaded on demand
+
+Source: aura
+
+Read only the files this change needs, from this seat's folder in the catalog root the dispatcher gave you (`$CATALOG/watson/references/`):
+- Telegram Mini App (`telegram-web-app.js`, `@telegram-apps/*`, `Telegram.WebApp`) → `platform-telegram-mini-app.md`
+- iOS or iPadOS screen → `platform-ios.md`
+- Android screen → `platform-android.md`
+
+A plain web change needs none of them. Where a platform rule and a web default disagree, the platform rule wins; each file's `Source conflicts` block states the default chosen.
