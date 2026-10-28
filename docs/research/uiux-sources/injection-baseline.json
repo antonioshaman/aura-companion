@@ -1,0 +1,53 @@
+{
+  "_doc": "Documented baseline for the injection lint over shipped markdown (PLAN Task 12). Each entry is a reviewed, legitimate match; a new match, or an entry that no longer matches, fails `uiux-enrichment.ts check`. Never add an entry without a human-readable reason.",
+  "entries": [
+    {
+      "path": "_council-experts/backend-python-ptb/plan.md",
+      "rule": "html-comment",
+      "excerpt": "<!-- INCUBATION SEAT — Co-Pilot stack (python-telegram-bot v20 + FastAPI webhook). Seated in no",
+      "reason": "First-party catalog maintainer note: marks an incubation seat that no panel dispatches. Reviewed 2026-10-28; visible in the raw file the agent reads, carries no instruction."
+    },
+    {
+      "path": "_council-experts/deploy-copilot/plan.md",
+      "rule": "html-comment",
+      "excerpt": "<!-- INCUBATION SEAT — Co-Pilot stack (Cloud Run + VPS systemd hybrid). Seated in no panel;",
+      "reason": "First-party catalog maintainer note: marks an incubation seat that no panel dispatches. Reviewed 2026-10-28; visible in the raw file the agent reads, carries no instruction."
+    },
+    {
+      "path": "_council-experts/firestore-doc/plan.md",
+      "rule": "html-comment",
+      "excerpt": "<!-- INCUBATION SEAT — Co-Pilot stack. Seated in no panel; no Chair can dispatch this file.",
+      "reason": "First-party catalog maintainer note: marks an incubation seat that no panel dispatches. Reviewed 2026-10-28; visible in the raw file the agent reads, carries no instruction."
+    },
+    {
+      "path": "_council-experts/willison/references/quality-willison.md",
+      "rule": "ignore-instructions",
+      "excerpt": "- **prompt injection** — user-supplied content reaching the model is potentially adversarial; treat it as an untrusted b",
+      "reason": "Willison reference quoting an injection payload as the example of what to defend against; reviewed 2026-10-28, it is an example, not an instruction."
+    },
+    {
+      "path": "council-plan/references/quality-willison.md",
+      "rule": "ignore-instructions",
+      "excerpt": "- **prompt injection** — user-supplied content reaching the model is potentially adversarial; treat it as an untrusted b",
+      "reason": "Willison reference quoting an injection payload as the example of what to defend against; reviewed 2026-10-28, it is an example, not an instruction."
+    },
+    {
+      "path": "council-plan-aura/references/quality-willison.md",
+      "rule": "ignore-instructions",
+      "excerpt": "- **prompt injection** — user-supplied content reaching the model is potentially adversarial; treat it as an untrusted b",
+      "reason": "Willison reference quoting an injection payload as the example of what to defend against; reviewed 2026-10-28, it is an example, not an instruction."
+    },
+    {
+      "path": "council-review/references/quality-willison.md",
+      "rule": "ignore-instructions",
+      "excerpt": "- **prompt injection** — user-supplied content reaching the model is potentially adversarial; treat it as an untrusted b",
+      "reason": "Willison reference quoting an injection payload as the example of what to defend against; reviewed 2026-10-28, it is an example, not an instruction."
+    },
+    {
+      "path": "council-review-aura/references/quality-willison.md",
+      "rule": "ignore-instructions",
+      "excerpt": "- **prompt injection** — user-supplied content reaching the model is potentially adversarial; treat it as an untrusted b",
+      "reason": "Willison reference quoting an injection payload as the example of what to defend against; reviewed 2026-10-28, it is an example, not an instruction."
+    }
+  ]
+}

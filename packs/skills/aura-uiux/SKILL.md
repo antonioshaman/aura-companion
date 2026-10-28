@@ -10,7 +10,9 @@ description: Sourced platform rules for UI work on Telegram Mini Apps, iOS and A
 
 Use this skill alongside the design skills (audit, critique, polish, adapt, ui-ux-pro-max, taste-skill) when the target is not a plain desktop web page, or when findings need a shared scale. It adds platform rules and method; it does not replace those skills.
 
-## Route — read one platform file, then at most one method file
+## Addendum (2026-10-28) — route: read one platform file, then at most one method file
+
+Source: aura
 
 | The task targets | Read |
 |---|---|
@@ -22,7 +24,9 @@ Use this skill alongside the design skills (audit, critique, polish, adapt, ui-u
 
 A plain web page or SPA needs no platform file: the web defaults in the design skills apply. A Mini App runs inside Telegram on a phone, so read `telegram-mini-app.md` and treat touch-target and back-navigation rules from the host OS file as the floor.
 
-## Word budget
+## Addendum (2026-10-28) — word budget
+
+Source: aura
 
 This file stays under 400 words. Each reference file stays under 900 words and opens with "When this applies", so a session reads one platform file (about 700 words) and at most one method file, never the whole folder.
 

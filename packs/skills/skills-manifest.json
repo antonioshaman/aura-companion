@@ -253,9 +253,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "6a9c04fbeb379dad4b154dbae50a08b3549bd21d99dcf3f86fed26ef86d28dee",
+      "digest": "8f3e1cc49eb04df52e1784c3cb2afde6ea8f03cb5209b8ac8475d91b50b75e42",
       "files": {
-        "SKILL.md": "8c4c4e6c75784a6485423741e25e40d6c100fc68c61b0fd3f6ebdf1ae8ce1a13",
+        "SKILL.md": "5974f47d1495ce37acd3886092e0a4843b0777e916fb7862e6abfaeedc954dcb",
         "references/android.md": "185df56faaec5432d836a323705d607cacc46bd1d636d20c54429546855a16f6",
         "references/evaluation-method.md": "2ed724140a59a4453f42c8e939705b9b73fb162752cc7392aa509a2567c534d8",
         "references/ios.md": "d0b89b592880736b0a479b11dcc6ebd5109a9a03955d68618bc636ae65fb6d07",

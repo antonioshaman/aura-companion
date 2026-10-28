@@ -149,8 +149,9 @@ jobs:
   # Tasks 1-4). verify-catalog.sh is the catalog's own canary gate (P0, C1-C6,
   # C10-C15: inline-panel ban, capability universe, mirrors byte-identical,
   # sha256 lock, symlink/mode defences); it exits non-zero on any violation.
-  # The two bun checks are hermetic (no network): vendored-skills re-hashes every
-  # pinned file, uiux-sources re-derives every catalog verdict from its facts.
+  # The bun checks are hermetic (no network): vendored-skills re-hashes every
+  # pinned file, uiux-sources re-derives every catalog verdict from its facts,
+  # uiux-enrichment re-checks the append-only enrichment and its copy-check receipt.
   council-skills:
     runs-on: ubuntu-latest
     steps:
@@ -186,6 +187,10 @@ jobs:
       - name: UI/UX source catalog verdicts follow from their facts
         working-directory: web
         run: bun scripts/uiux-sources.ts check
+
+      - name: UI/UX enrichment is append-only, attributed and copy-checked
+        working-directory: web
+        run: bun scripts/uiux-enrichment.ts check
 
   # The npm tarball and the server image, tested as artifacts
   # (PLAN-aura-uiux-agent-enrichment Task 9). `npm pack` runs prepack, which
