@@ -345,7 +345,7 @@ attested:
   - path: _council-experts/willison/review.md
     sha256: 25787f30c6cd4ffcbfb5c6ea5648e02cea5ad984b2292d68ec694834819087ee
   - path: council-implement-aura/SKILL.md
-    sha256: 135b743cd5dd79bf0678802d0421dcb868f52a1e9963f52a243953b98a20374c
+    sha256: 6e7d9eef806f94aa73d259b65c64dfea7653c2c0be0eaf763da5c878e58cd453
   - path: council-implement-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-implement-aura/references/quality-abramov.md
@@ -371,7 +371,7 @@ attested:
   - path: council-implement-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-implement/SKILL.md
-    sha256: 951a19406f4cf0e69dce17c49e477072679ba0a4ee3ea4ddcb49382a6f1f61a3
+    sha256: f2f4de8c20a82e5a9cf9b646b749bcdbf6e2f493945a9261c301f3f4ea99a812
   - path: council-implement/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-implement/references/quality-frontend.md
@@ -385,7 +385,7 @@ attested:
   - path: council-implement/references/security.md
     sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
   - path: council-plan-aura/SKILL.md
-    sha256: dd2f0bdc7477adcca7121b9a1b529b667cf7e3c3b28b504bd4601d82e22378d4
+    sha256: 92b9e1bb7f0295af90a0f39ab2c635c10709130ced3f44f3ea6f878ef0bb4211
   - path: council-plan-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-plan-aura/references/quality-backend.md
@@ -405,7 +405,7 @@ attested:
   - path: council-plan-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-plan/SKILL.md
-    sha256: 1bee0b16e120d887ed127baf639388f55eb85e4cbbc6fa575885ba17aad799e5
+    sha256: 4055697fef3e7025e69f8642aee174a90dfa21587368b9b1eb3901065f4915b5
   - path: council-plan/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-plan/references/quality-frontend.md
@@ -423,7 +423,7 @@ attested:
   - path: council-plan/references/security.md
     sha256: 4456d14484abcc4fc454391ba78af6b0972b1a51f4a09fc5b39320023784165f
   - path: council-review-aura/SKILL.md
-    sha256: f8a10c5fff364ffa6f4d1794f1f6f499b6d79ee7681b2126a6f561b611e5fed3
+    sha256: 3d458efdd9dfc383dae8ecdbd57f30138e015b4e89fb6745c5f30c421c051c9a
   - path: council-review-aura/references/quality-a11y.md
     sha256: fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73
   - path: council-review-aura/references/quality-backend.md
@@ -443,7 +443,7 @@ attested:
   - path: council-review-aura/references/security.md
     sha256: 20710cfe59127d4db80b2b79226365fe5ac86320c7a57921541465ec65bee890
   - path: council-review/SKILL.md
-    sha256: 5d430954bc3625ecace80a49dfa9b43b59b81c7718a6561731756aa4e125182a
+    sha256: f3d38c60e442fd0ce8e29f3d2db4fe977d6e06cbe6b4a074ecb3386a91799f5f
   - path: council-review/references/quality-backend.md
     sha256: 308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b
   - path: council-review/references/quality-frontend.md
