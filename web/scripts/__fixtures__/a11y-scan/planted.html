@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>a11y-scan fixture: planted violations</title></head>
+<body>
+  <main>
+    <h1>Planted defects</h1>
+    <!-- button-name (4.1.2): an icon-only button with no accessible name -->
+    <button id="close"><svg width="12" height="12" aria-hidden="true"></svg></button>
+    <!-- color-contrast (1.4.3) only in dark: light grey text on white -->
+    <p id="low" class="low">Low contrast in dark</p>
+  </main>
+  <style>@media (prefers-color-scheme: dark) { .low { color: #ddd; background: #fff; } }</style>
+</body>
+</html>

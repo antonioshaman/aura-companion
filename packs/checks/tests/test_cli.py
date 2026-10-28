@@ -13,7 +13,7 @@ class CliTest(RepoTestCase):
         rc, out, _ = self.repo.cli("--list")
         self.assertEqual(rc, 0)
         for pack in ("python-alembic", "env", "secrets", "pii", "llm-output", "fallback", "deploy",
-                     "telegram-miniapp", "call-site-parity"):
+                     "telegram-miniapp", "call-site-parity", "uiux"):
             self.assertIn(f"[{pack}]", out)
 
     def test_usage_errors_exit_2(self):
