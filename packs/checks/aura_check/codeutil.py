@@ -14,7 +14,7 @@ JS_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 CODE_EXT = PY_EXT + JS_EXT
 
 TEST_PATH_RE = re.compile(
-    r"(^|/)(tests?|__tests__|spec|fixtures?)/|(^|/)test_[^/]*\.py$|_test\.py$|\.(test|spec)\.[jt]sx?$"
+    r"(^|/)(tests?|__tests__|spec|fixtures?|__fixtures__)/|(^|/)test_[^/]*\.py$|_test\.py$|\.(test|spec)\.[jt]sx?$"
 )
 
 

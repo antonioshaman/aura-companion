@@ -195,6 +195,9 @@ AXE_DISABLE_RE = re.compile(
     r"[\"']?([a-z][a-z0-9-]*)[\"']?\s*:\s*\{\s*enabled\s*:\s*false\s*\}|\.?disableRules\s*\(([^)]*)")
 COMMENT_LINE_RE = re.compile(r"^\s*(//|/\*|\*)")
 TRAILING_COMMENT_RE = re.compile(r"(^|\s)(//|/\*)")
+REASON_RE = re.compile(
+    r"(?i)\b(because|since|reason|exclu\w*|portal\w*|mock\w*|known|artifact|"
+    r"does ?n[o']t apply|not applicable)\b")
 TEST_OPEN_RE = re.compile(r"^\s*(it|test)(\.\w+)?\s*\(")
 AXE_ANCHOR_LOOKBACK = 12  # lines from an override back to its axe(...) / axeRules / AxeBuilder
 TEST_LOOKBACK = 40        # lines from an override back to the it()/test() that holds it
@@ -228,17 +231,33 @@ def axe_rule_disabled(ctx: Context):
                 continue
             if TRAILING_COMMENT_RE.search(line[m.end():]):
                 continue
-            # The reason may sit inside the same it()/test() (above the axe call
-            # or between the overrides), or in the comment block right above a
-            # shared config such as `const axeRules = {`. A comment above the
-            # it() describes the test, not the override.
+            # A reason counts when it is tied to this override (observer WARN,
+            # checkpoint 189: a stray "// Arrange" inside the test is not one):
+            #  1. the comment block right above the override line;
+            #  2. any comment in the same it()/test(), or in the block above a
+            #     shared config, that names the disabled rule;
+            #  3. the block right above an axe line (call / import / config)
+            #     that gives a reason ("because", "portal", "excluded" ...).
+            def block_above(k):
+                out, j = [], k - 1
+                while j >= 1 and COMMENT_LINE_RE.match(lines[j - 1]):
+                    out.append(lines[j - 1])
+                    j -= 1
+                return out
+
+            if block_above(n):
+                continue
+            ids = [m.group(1)] if m.group(1) else re.findall(r"[a-z][a-z0-9-]+", m.group(2) or "")
+            names_rule = lambda l: any(re.search(r"(?<![\w-])" + re.escape(i) + r"(?![\w-])", l) for i in ids)
             test_open = next((k for k in range(n - 1, max(0, n - TEST_LOOKBACK), -1)
                               if TEST_OPEN_RE.match(lines[k - 1])), None)
-            scope = list(range((test_open or anchor) + 1, n))
-            k = anchor - 1
-            while k >= 1 and COMMENT_LINE_RE.match(lines[k - 1]):
-                scope.append(k)
-                k -= 1
-            if any(COMMENT_LINE_RE.match(lines[k - 1]) for k in scope):
+            start = test_open or anchor
+            scope = [lines[k - 1] for k in range(start + 1, n) if COMMENT_LINE_RE.match(lines[k - 1])]
+            scope += block_above(anchor)
+            if any(names_rule(l) for l in scope):
+                continue
+            # The it()/test() line itself is a title, not an axe call ("passes axe ...").
+            axe_lines = [k for k in range(start, n) if "axe" in lines[k - 1].lower() and k != test_open]
+            if any(REASON_RE.search(l) or names_rule(l) for k in axe_lines for l in block_above(k)):
                 continue
             yield path, n, "an axe rule is switched off with no comment saying why"

@@ -50,7 +50,7 @@ const BUN = onPath("bun") ?? join(process.env.HOME ?? "", ".bun", "bin", "bun");
 const REF: StateRef = { url: "http://127.0.0.1:5174/#/x", theme: "light", viewport: "375x812" };
 
 function raw(over: Partial<RawAxeState> = {}): RawAxeState {
-  return { axeVersion: "4.11.1", elements: 40, passNodes: 120, violations: [], incomplete: [], ...over };
+  return { axeVersion: "4.11.1", elements: 40, rendered: 30, passNodes: 120, violations: [], incomplete: [], ...over };
 }
 
 const VIOLATION = {
@@ -80,6 +80,13 @@ describe("pure core", () => {
     expect(summarizeState(REF, raw()).blank).toBe(false);
     expect(summarizeState(REF, raw({ elements: 0 })).blank).toBe(true);
     expect(summarizeState(REF, raw({ passNodes: 0 })).blank).toBe(true);
+  });
+
+  it("an app shell that never rendered is blank even though axe checked document-level rules", () => {
+    // Observer STOP (checkpoint council-implement-189): <div id="root"></div> plus a
+    // script tag has elements > 0 and axe passes html-has-lang / document-title, so
+    // only the count of elements with a rendered box can tell it apart.
+    expect(summarizeState(REF, raw({ elements: 3, rendered: 0, passNodes: 2 })).blank).toBe(true);
   });
 
   it("one violation row per node, with rule id, selector, criterion and state", () => {
@@ -358,6 +365,12 @@ describe.skipIf(!agentBrowser)("real browser on a fixture page", () => {
 
   it("a blank page is skipped, not passed", () => {
     const { r, art } = scan("blank.html");
+    expect(r.status).toBe(EXIT.skipped);
+    expect(art.reason).toMatch(/^blank page/);
+  }, 180_000);
+
+  it("an app shell whose root never rendered is skipped, not passed (observer STOP, checkpoint 189)", () => {
+    const { r, art } = scan("shell.html");
     expect(r.status).toBe(EXIT.skipped);
     expect(art.reason).toMatch(/^blank page/);
   }, 180_000);

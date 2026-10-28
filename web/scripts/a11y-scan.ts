@@ -99,6 +99,7 @@ export interface ManualCheck {
 export interface StateResult {
   state: StateRef;
   elements: number;
+  rendered: number;
   nodesChecked: number;
   violations: Violation[];
   incomplete: ManualCheck[];
@@ -126,6 +127,8 @@ export interface ScanArtifact {
 export interface RawAxeState {
   axeVersion: string;
   elements: number;
+  /** Elements in <body> with a rendered box (width and height > 0), not script/style/noscript/template. */
+  rendered: number;
   passNodes: number;
   violations: { id: string; impact: string | null; tags: string[]; help: string; helpUrl: string; nodes: { target: unknown[] }[] }[];
   incomplete: { id: string; tags: string[]; help: string; nodes: { target: unknown[] }[] }[];
@@ -178,7 +181,11 @@ export function summarizeState(state: StateRef, raw: RawAxeState): StateResult {
     }
   }
   const nodesChecked = raw.passNodes + violations.length + incomplete.length;
-  return { state, elements: raw.elements, nodesChecked, violations, incomplete, blank: raw.elements === 0 || nodesChecked === 0 };
+  // An app shell whose bundle never ran (<div id="root"></div>) has elements and
+  // passes document-level rules (html-has-lang, document-title): only rendered
+  // boxes show that nothing was drawn.
+  const blank = raw.elements === 0 || raw.rendered === 0 || nodesChecked === 0;
+  return { state, elements: raw.elements, rendered: raw.rendered, nodesChecked, violations, incomplete, blank };
 }
 
 /**
@@ -189,7 +196,7 @@ export function summarizeState(state: StateRef, raw: RawAxeState): StateResult {
 export function decide(states: readonly StateResult[], expected: number, abort: string | null): { status: ScanStatus; reason: string | null } {
   if (abort) return { status: "skipped", reason: abort };
   const blank = states.find((s) => s.blank);
-  if (blank) return { status: "skipped", reason: `blank page: ${stateLabel(blank.state)} rendered ${blank.elements} element(s) and axe checked ${blank.nodesChecked} node(s)` };
+  if (blank) return { status: "skipped", reason: `blank page: ${stateLabel(blank.state)} has ${blank.elements} element(s), ${blank.rendered} with a rendered box, and axe checked ${blank.nodesChecked} node(s)` };
   if (states.length < expected) return { status: "skipped", reason: `only ${states.length} of ${expected} state(s) were scanned` };
   if (states.length === 0) return { status: "skipped", reason: "nothing was scanned" };
   if (states.some((s) => s.violations.length > 0)) return { status: "fail", reason: null };
@@ -414,6 +421,11 @@ export function pageScript(): string {
   return JSON.stringify({
     axeVersion: axe.version,
     elements: document.body ? document.body.querySelectorAll("*").length : 0,
+    rendered: document.body ? [...document.body.querySelectorAll("*")].filter((el) => {
+      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(el.tagName)) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0; // an empty block <div id="root"> is full-width but 0 px tall
+    }).length : 0,
     passNodes: r.passes.reduce((s, v) => s + v.nodes.length, 0),
     violations: r.violations.map(pick),
     incomplete: r.incomplete.map(pick),
@@ -438,7 +450,7 @@ function parseEval(stdout: string): RawAxeState | { error: string } {
   }
   const r = raw as Partial<RawAxeState> & { error?: string };
   if (r?.error) return { error: r.error };
-  if (!r || !Array.isArray(r.violations) || !Array.isArray(r.incomplete) || typeof r.elements !== "number" || typeof r.passNodes !== "number") {
+  if (!r || !Array.isArray(r.violations) || !Array.isArray(r.incomplete) || typeof r.elements !== "number" || typeof r.rendered !== "number" || typeof r.passNodes !== "number") {
     return { error: "the page script returned an unexpected shape" };
   }
   return r as RawAxeState;

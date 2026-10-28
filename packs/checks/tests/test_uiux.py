@@ -198,3 +198,48 @@ class AxeRuleDisabledTest(RepoTestCase):
         self.assertEqual([l for _, _, l in hits(self.repo, "uiux.axe-rule-disabled-unjustified")],
                          [15, 21, 22, 23])
 
+
+    def test_an_unrelated_comment_inside_the_test_is_not_a_reason(self):
+        # Observer WARN (checkpoint council-implement-189): "// Arrange" before
+        # render() or "// Act" right above the axe call says nothing about the
+        # override. A reason must sit on the override line, in the comment block
+        # right above it, or in the block right above the axe call / shared config
+        # and name the rule or give a reason ("because", "portal", "excluded" ...).
+        self.repo.write("web/src/A.test.tsx",
+                        'import { axe } from "vitest-axe";\n'          # 1
+                        "it('a', async () => {\n"                      # 2
+                        "  // Arrange\n"                               # 3
+                        "  render(<A />);\n"                           # 4
+                        "  // Act\n"                                   # 5
+                        "  const r = await axe(container, {\n"         # 6
+                        '    rules: { "button-name": { enabled: false } },\n'  # 7
+                        "  });\n});\n"                                 # 8-9
+                        "it('b', async () => {\n"                      # 10
+                        "  const r = await axe(container, {\n"         # 11
+                        "    rules: {\n"                               # 12
+                        "      // the menu portals outside the container\n"  # 13
+                        '      region: { enabled: false },\n'          # 14
+                        "    },\n  });\n});\n")
+        self.assertEqual([l for _, _, l in hits(self.repo, "uiux.axe-rule-disabled-unjustified")], [7])
+
+    def test_a_label_above_an_it_whose_title_says_axe_is_not_a_reason(self):
+        # Found while fixing the WARN above (AgentCard.test.tsx shape): the it()
+        # title contains "axe" and the comment above it says "disabled agent".
+        # Neither is about the override.
+        self.repo.write("web/src/A.test.tsx",
+                        'import { axe } from "vitest-axe";\n'                               # 1
+                        "// Test 20: Accessibility scan - disabled agent\n"                 # 2
+                        'it("passes axe accessibility checks for disabled agent", async () => {\n'  # 3
+                        "  const r = await axe(container, {\n"                              # 4
+                        '    rules: { "heading-order": { enabled: false } },\n'             # 5
+                        "  });\n});\n")
+        self.assertEqual([l for _, _, l in hits(self.repo, "uiux.axe-rule-disabled-unjustified")], [5])
+
+
+class FixtureDirsTest(RepoTestCase):
+    def test_planted_defects_in_fixture_dirs_are_test_data(self):
+        # web/scripts/__fixtures__/a11y-scan/planted.html holds a deliberate
+        # icon-only button: the rendered scan's own test fixture.
+        self.repo.write("web/scripts/__fixtures__/a11y-scan/planted.html",
+                        '<button id="close"><svg width="12" height="12" aria-hidden="true"></svg></button>\n')
+        self.assertEqual(hits(self.repo), [])
