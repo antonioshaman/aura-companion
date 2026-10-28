@@ -17,6 +17,9 @@ import { join, relative, resolve } from "node:path";
 
 import {
   buildEntry,
+  captureItem,
+  captureText,
+  isCaptured,
   CATEGORIES,
   assertSameRepo,
   checkableCorpus,
@@ -408,5 +411,48 @@ describe("commitCorpus — the old corpus survives any failure until the new man
     commitCorpus({ staging, target, manifestPath: manifest, manifestText: null });
     expect(readFileSync(join(target, "a-src.txt"), "utf8")).toBe("new text");
     expect(readFileSync(manifest, "utf8")).toBe("OLD MANIFEST");
+  });
+});
+
+// ─── Phase C decision 3A — JS-rendered sources captured with agent-browser ──
+// HIG and Material 3 render client-side, so a plain fetch yields a 15-byte shell
+// (thin → uncheckable). Their text is captured with agent-browser instead; the
+// item records the pages and the site's terms, and a rebuild never re-fetches it.
+
+describe("capture — agent-browser texts enter the corpus with their terms recorded", () => {
+  const pages = [
+    { url: "https://hig.example/b", text: "Beta page." },
+    { url: "https://hig.example/a", text: "Alpha page." },
+  ];
+  const terms = { url: "https://hig.example/terms", note: "All rights reserved; paraphrase facts only." };
+
+  it("joins pages in URL order with a URL header, so the same captures always give the same text", () => {
+    expect(captureText(pages)).toBe("URL: https://hig.example/a\n\nAlpha page.\n\nURL: https://hig.example/b\n\nBeta page.\n");
+    expect(captureText([...pages].reverse())).toBe(captureText(pages));
+  });
+
+  it("records tool, pages and terms; a non-thin capture becomes checkable", () => {
+    const text = captureText(pages.map((p) => ({ ...p, text: p.text.repeat(200) })));
+    const item = captureItem("apple-hig", "https://hig.example", text, pages.map((p) => p.url), terms, "2026-10-28T00:00:00Z");
+    expect(item.capture).toEqual({ tool: "agent-browser", pages: ["https://hig.example/a", "https://hig.example/b"], terms });
+    expect(item.thin).toBe(false);
+    expect(isCaptured(item)).toBe(true);
+    expect(isCaptured(corpusItem("x-src", "u", "t", "x"))).toBe(false);
+  });
+
+  it("refuses a capture without the site's terms — the licence is recorded before use (fail closed)", () => {
+    expect(() => captureItem("apple-hig", "u", "text", ["u"], { url: "", note: "x" }, "t")).toThrow(/terms/);
+    expect(() => captureItem("apple-hig", "u", "text", ["u"], { url: "https://t", note: " " }, "t")).toThrow(/terms/);
+    expect(() => captureItem("apple-hig", "u", "text", [], terms, "t")).toThrow(/no pages/);
+  });
+
+  it("the committed manifest records agent-browser captures of HIG and Material 3, neither thin", () => {
+    const m = loadCorpusManifest();
+    for (const id of ["apple-hig", "material-3"]) {
+      const item = m.find((i) => i.id === id);
+      expect(item && isCaptured(item), `${id} must be captured`).toBe(true);
+      expect(item?.thin).toBe(false);
+      expect(item?.capture?.terms.url).toMatch(/^https:\/\//);
+    }
   });
 });

@@ -275,19 +275,68 @@
       "id": "apple-hig",
       "textUrl": "https://developer.apple.com/design/human-interface-guidelines",
       "ref": null,
-      "sha256": "f2fb92e3c126cd7f32324fea0115c45c4da238d830304e74b9a93ee9c2ef2fb6",
-      "bytes": 58,
-      "fetchedAt": "2026-10-27T21:56:23Z",
-      "thin": true
+      "sha256": "ef2162f1f222852e120dfcc460c747f6aadf295629089b4f65214e85a781a64c",
+      "bytes": 202247,
+      "fetchedAt": "2026-10-28T11:11:53Z",
+      "thin": false,
+      "capture": {
+        "tool": "agent-browser",
+        "pages": [
+          "https://developer.apple.com/design/human-interface-guidelines/accessibility",
+          "https://developer.apple.com/design/human-interface-guidelines/action-sheets",
+          "https://developer.apple.com/design/human-interface-guidelines/alerts",
+          "https://developer.apple.com/design/human-interface-guidelines/buttons",
+          "https://developer.apple.com/design/human-interface-guidelines/color",
+          "https://developer.apple.com/design/human-interface-guidelines/dark-mode",
+          "https://developer.apple.com/design/human-interface-guidelines/layout",
+          "https://developer.apple.com/design/human-interface-guidelines/materials",
+          "https://developer.apple.com/design/human-interface-guidelines/modality",
+          "https://developer.apple.com/design/human-interface-guidelines/motion",
+          "https://developer.apple.com/design/human-interface-guidelines/onboarding",
+          "https://developer.apple.com/design/human-interface-guidelines/privacy",
+          "https://developer.apple.com/design/human-interface-guidelines/sheets",
+          "https://developer.apple.com/design/human-interface-guidelines/tab-bars",
+          "https://developer.apple.com/design/human-interface-guidelines/toolbars",
+          "https://developer.apple.com/design/human-interface-guidelines/typography"
+        ],
+        "terms": {
+          "url": "https://www.apple.com/legal/internet-services/terms/site.html",
+          "note": "Apple Website Terms of Use: all site Content (text, graphics, interfaces) is owned or licensed by Apple and protected by copyright; use is a personal, non-transferable privilege. No redistribution licence — reference only: facts paraphrased with attribution, no verbatim text in shipped files."
+        }
+      }
     },
     {
       "id": "material-3",
       "textUrl": "https://m3.material.io/",
       "ref": null,
-      "sha256": "9d89cdc64edf175d454ce5ca7263d0bbbc043e7f2f78388d48a09d24d305d40c",
-      "bytes": 15,
-      "fetchedAt": "2026-10-27T21:56:23Z",
-      "thin": true
+      "sha256": "2d20d3fbd786fd20b857f7f1836730198b23ddd7cb60f81189c2ff6512b65d2d",
+      "bytes": 105922,
+      "fetchedAt": "2026-10-28T11:11:53Z",
+      "thin": false,
+      "capture": {
+        "tool": "agent-browser",
+        "pages": [
+          "https://m3.material.io/components/bottom-sheets/guidelines",
+          "https://m3.material.io/components/dialogs/guidelines",
+          "https://m3.material.io/components/navigation-bar/guidelines",
+          "https://m3.material.io/components/snackbar/guidelines",
+          "https://m3.material.io/foundations/design-tokens/overview",
+          "https://m3.material.io/foundations/designing/flow",
+          "https://m3.material.io/foundations/designing/structure",
+          "https://m3.material.io/foundations/interaction/gestures",
+          "https://m3.material.io/foundations/layout/breakpoints/overview",
+          "https://m3.material.io/foundations/layout/layout-overview/overview",
+          "https://m3.material.io/foundations/overview/principles",
+          "https://m3.material.io/styles/color/roles",
+          "https://m3.material.io/styles/elevation/applying-elevation",
+          "https://m3.material.io/styles/elevation/overview",
+          "https://m3.material.io/styles/motion/overview/how-it-works"
+        ],
+        "terms": {
+          "url": "https://policies.google.com/terms",
+          "note": "m3.material.io links only the Google Terms of Service; no Creative Commons or other content licence is stated on the guideline pages. Reference only: facts paraphrased with attribution, no verbatim text in shipped files. (The Apache-2.0 material-components-android / material-web repos are separate catalog entries.)"
+        }
+      }
     },
     {
       "id": "material-components-android",
@@ -311,10 +360,27 @@
       "id": "tma-js",
       "textUrl": "https://docs.telegram-mini-apps.com/platform/viewport",
       "ref": null,
-      "sha256": "e948d2712e638536e4737d050c413f55c603c911c437704423f10add22a945fa",
-      "bytes": 2845,
-      "fetchedAt": "2026-10-27T21:56:24Z",
-      "thin": false
+      "sha256": "20471b89d625030e375028a941a7e1dbaff33fcd63d3914318e230c6724dac41",
+      "bytes": 9292,
+      "fetchedAt": "2026-10-28T11:11:53Z",
+      "thin": false,
+      "capture": {
+        "tool": "agent-browser",
+        "pages": [
+          "https://docs.telegram-mini-apps.com/platform/back-button",
+          "https://docs.telegram-mini-apps.com/platform/closing-behavior",
+          "https://docs.telegram-mini-apps.com/platform/haptic-feedback",
+          "https://docs.telegram-mini-apps.com/platform/main-button",
+          "https://docs.telegram-mini-apps.com/platform/popup",
+          "https://docs.telegram-mini-apps.com/platform/swipe-behavior",
+          "https://docs.telegram-mini-apps.com/platform/theming",
+          "https://docs.telegram-mini-apps.com/platform/viewport"
+        ],
+        "terms": {
+          "url": "https://github.com/Telegram-Mini-Apps/tma.js/blob/master/LICENSE",
+          "note": "docs.telegram-mini-apps.com is built from the Telegram-Mini-Apps/tma.js repository, MIT licence (catalog verdict redistributable). Paraphrased with attribution all the same."
+        }
+      }
     },
     {
       "id": "ui-ux-pro-max",
