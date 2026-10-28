@@ -120,10 +120,11 @@ describe("decideSkillExposure", () => {
     expect(noPluginDir.status).toBe("unavailable");
   });
 
-  it("Codex in a container stays unavailable even with the mount (no in-container copies yet)", () => {
-    const e = codex({ containerized: true, containerPackMounted: true });
-    expect(e.status).toBe("unavailable");
-    expect(e.reason).toMatch(/Codex/);
+  it("Codex in a container: on with the pack mount (add-only copies), unavailable without it", () => {
+    expect(codex({ containerized: true, containerPackMounted: true }).status).toBe("on");
+    const old = codex({ containerized: true, containerPackMounted: false });
+    expect(old.status).toBe("unavailable");
+    expect(old.reason).toMatch(/created without the toolkit mount/);
   });
 
   it("every missing precondition → unavailable with a reason, nothing provided", () => {

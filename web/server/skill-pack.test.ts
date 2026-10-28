@@ -39,6 +39,7 @@ import {
   type SkillManifest,
 } from "./skill-manifest.js";
 import {
+  containerCopyScript,
   ensurePluginExposure,
   installPack,
   isSafeRelPath,
@@ -628,3 +629,53 @@ describe("ensurePluginExposure (Claude --plugin-dir)", () => {
     expect(existsSync(e1.dir)).toBe(false);
   });
 });
+
+// B5 cleanup: Codex inside a container. Its CODEX_HOME (/root/.codex) is a tmpfs the
+// host cannot read, so Aura cannot prove ownership there; the script only ADDS copies
+// from the read-only same-path pack mount and never deletes or replaces anything —
+// a seeded user skill (or an earlier copy) with the same name is left exactly as is.
+// Run here with the local `sh` against a temp dir standing in for the container.
+describe("containerCopyScript (Codex in a container)", () => {
+  function installed() {
+    const src = source();
+    const root = tmp();
+    const { version } = installPack({ sourceDir: src.dir, manifest: src.manifest, root });
+    const cur = readCurrentPack(root);
+    if ("error" in cur) throw new Error(cur.error);
+    return { packDir: join(root, "versions", version), manifest: cur.manifest };
+  }
+  const run = (script: string) => spawnSync("sh", ["-c", script], { encoding: "utf8" });
+
+  it("adds marked copies that read as Aura's, current", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "codex home", "skills");
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] }));
+    expect(r.status, r.stderr).toBe(0);
+    expect(readdirSync(parent).sort()).toEqual(["audit", "polish"]);
+    for (const n of ["polish", "audit"]) {
+      expect(readOwnership(join(parent, n), n, manifest)).toMatchObject({ owner: "aura", current: true });
+    }
+  });
+
+  it("never touches an existing dir with the same name (user's or earlier), adds the rest", () => {
+    const { packDir, manifest } = installed();
+    const parent = join(tmp(), "skills");
+    mkdirSync(join(parent, "polish"), { recursive: true });
+    writeFileSync(join(parent, "polish", "SKILL.md"), "mine\n");
+    const r = run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] }));
+    expect(r.status, r.stderr).toBe(0);
+    expect(readdirSync(join(parent, "polish"))).toEqual(["SKILL.md"]);
+    expect(readFileSync(join(parent, "polish", "SKILL.md"), "utf8")).toBe("mine\n");
+    expect(readOwnership(join(parent, "audit"), "audit", manifest).owner).toBe("aura");
+    // A second run is a no-op.
+    expect(run(containerCopyScript({ packDir, parent, manifest, names: ["polish", "audit"] })).status).toBe(0);
+  });
+
+  it("refuses names that are not shipped entries of the manifest, or unsafe", () => {
+    const { packDir, manifest } = installed();
+    for (const names of [["nope"], ["../polish"], ["blocked-one"]]) {
+      expect(() => containerCopyScript({ packDir, parent: "/root/.codex/skills", manifest, names })).toThrow();
+    }
+  });
+});
+

@@ -699,6 +699,40 @@ function sweepExposures(root: string, keep: Set<string>, now: number): string[] 
 
 // ─── Copies outside the Aura tree (Codex homes, container) ──────────────────
 
+const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Codex inside a container: a `sh` script that copies `names` from the decided
+ * version (visible at the same path through the read-only pack mount) into the
+ * container's CODEX_HOME/skills. That home is a tmpfs the host cannot read, so
+ * ownership cannot be proven there: the script ONLY ADDS. A name that already exists
+ * (a seeded user skill, or an earlier copy) is never deleted or replaced. Each copy is
+ * staged under a tmp name, gets its ownership marker, is made read-only, then renamed.
+ */
+export function containerCopyScript(opts: {
+  packDir: string;
+  parent: string;
+  manifest: Pick<SkillManifest, "entries">;
+  names: string[];
+}): string {
+  const byName = new Map(shippedEntries(opts.manifest).map((e) => [e.name, e]));
+  const lines = ["set -e", `mkdir -p ${shq(opts.parent)}`];
+  for (const n of [...new Set(opts.names)].sort()) {
+    const entry = byName.get(n);
+    if (!entry || !isPackName(n)) throw new Error(`not a shipped entry of this version: ${JSON.stringify(n)}`);
+    const dest = join(opts.parent, n);
+    const tmp = join(opts.parent, `${COPY_STAGING_PREFIX}${n}`);
+    const marker = `${JSON.stringify(markerFor(entry), null, 2)}\n`;
+    lines.push(
+      `if [ ! -e ${shq(dest)} ] && [ ! -L ${shq(dest)} ]; then ` +
+        `rm -rf ${shq(tmp)}; cp -R ${shq(join(opts.packDir, n))} ${shq(tmp)}; chmod -R u+w ${shq(tmp)}; ` +
+        `printf '%s' ${shq(marker)} > ${shq(join(tmp, OWNER_MARKER_FILE))}; chmod -R a-w ${shq(tmp)}; ` +
+        `mv ${shq(tmp)} ${shq(dest)}; fi`,
+    );
+  }
+  return lines.join("\n");
+}
+
 /** The skill dirs at `parent`, with ownership proven only where a marker is present. */
 export function listExistingSkills(parent: string, manifest: Pick<SkillManifest, "entries">): ExistingSkill[] {
   let names: string[];

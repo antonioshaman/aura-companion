@@ -17,8 +17,9 @@
 //           (`compat.codex === false`) are not copied: `requires-claude`.
 //   Containers  new containers get `<pack root>` bind-mounted read-only at the same
 //           path (container-manager), so a Claude session inside one gets the same
-//           `--plugin-dir`. Containers created before that, and Codex in a
-//           container, stay "toolkit unavailable".
+//           `--plugin-dir`; Codex gets add-only copies in the container's own
+//           CODEX_HOME (skill-pack.containerCopyScript). Containers created before
+//           that stay "toolkit unavailable".
 //
 // Delivery itself (trees, copies, ownership) stays in skill-pack.ts.
 
@@ -90,7 +91,6 @@ export function decideSkillExposure(input: ExposureInput): SkillExposure {
   const base = { schemaVersion: SKILL_EXPOSURE_SCHEMA_VERSION, backend: input.backend, decidedAt: input.now ?? Date.now() } as const;
   if (!input.enabled) return { ...base, status: "off", items: [] };
   const unavailable = (reason: string): SkillExposure => ({ ...base, status: "unavailable", reason, items: [] });
-  if (input.containerized && input.backend === "codex") return unavailable("Codex container sessions do not receive the toolkit yet");
   if (input.containerized && input.containerPackMounted !== true) {
     return unavailable("this container was created without the toolkit mount; new container sessions get it");
   }

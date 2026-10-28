@@ -4815,6 +4815,51 @@ describe("UI/UX toolkit exposure at spawn (Task 7)", () => {
     expect(out.env?.PYTHONDONTWRITEBYTECODE).toBe("1");
   });
 
+  // B5 cleanup: Codex in a container with the pack mount gets add-only copies in the
+  // container's CODEX_HOME (via `docker exec sh -c <script>`); names already there
+  // (seeded user skills) are labelled the user's and never touched.
+  it("Codex in a container with the pack mount: add-only copy script runs in the container", async () => {
+    await installFixturePack();
+    const listing = { out: "" };
+    const exec = vi.fn((_id: string, cmd: string[]) => (cmd.join(" ").includes("ls -A") ? listing.out : ""));
+    launcher.containerHasPack = () => true;
+    launcher.containerExec = exec;
+    const apply = (sid: string) => {
+      const info = { sessionId: sid, cwd: tempDir } as unknown as SdkSessionInfo;
+      const out = (launcher as unknown as {
+        applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): { env?: Record<string, string> };
+      }).applyCodexSkillExposure(sid, info, { layers: ALL_ON, containerId: "abc123def456" }, join(tempDir, "unused"), true);
+      return { info, out };
+    };
+    const first = apply("codex-a");
+    expect(first.info.skillExposure?.status).toBe("on");
+    const script = exec.mock.calls.map(([, c]) => c.join(" ")).find((c) => c.includes("cp -R")) ?? "";
+    expect(script).toContain("/root/.codex/skills/polish");
+    // Claude-only skills are labelled, never copied.
+    expect(script).not.toContain("council-plan");
+    expect(first.out.env?.PYTHONDONTWRITEBYTECODE).toBe("1");
+
+    // polish already in the container (a seeded user skill) → the user's; nothing copied.
+    exec.mockClear();
+    listing.out = "polish\n";
+    const second = apply("codex-b");
+    expect(second.info.skillExposure?.items.find((i) => i.name === "polish")?.outcome).toBe("skip-user-owns");
+    expect(exec.mock.calls.some(([, c]) => c.join(" ").includes("cp -R"))).toBe(false);
+  });
+
+  it("Codex in a container WITHOUT the pack mount: unavailable, nothing executed in the container", async () => {
+    await installFixturePack();
+    const exec = vi.fn(() => "");
+    launcher.containerHasPack = () => false;
+    launcher.containerExec = exec;
+    const info = { sessionId: "codex-sid", cwd: tempDir } as unknown as SdkSessionInfo;
+    (launcher as unknown as {
+      applyCodexSkillExposure(sid: string, info: SdkSessionInfo, o: object, home: string, c: boolean): unknown;
+    }).applyCodexSkillExposure("codex-sid", info, { layers: ALL_ON, containerId: "abc123def456" }, join(tempDir, "unused"), true);
+    expect(info.skillExposure?.status).toBe("unavailable");
+    expect(exec).not.toHaveBeenCalled();
+  });
+
   it("Codex: toolkit off removes Aura's copies and leaves the user's skill untouched", async () => {
     await installFixturePack();
     const home = join(tempDir, "codex-home");

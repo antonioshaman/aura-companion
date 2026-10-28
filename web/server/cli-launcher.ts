@@ -67,6 +67,7 @@ import {
   ensurePluginExposure,
   listExistingSkills,
   readCurrentPack,
+  containerCopyScript,
   syncCopies,
   verifyVersionDir,
 } from "./skill-pack.js";
@@ -232,6 +233,8 @@ function sanitizeSpawnArgsForLog(args: string[]): string {
 }
 
 const CODEX_WS_PROXY_PATH = fileURLToPath(new URL("./codex-ws-proxy.cjs", import.meta.url));
+/** CODEX_HOME inside a container: a tmpfs seeded from the host ~/.codex (container-manager). */
+const CONTAINER_CODEX_HOME = "/root/.codex";
 const CODEX_CONTAINER_WS_PORT = Number(process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502");
 
 export interface SdkSessionInfo {
@@ -2206,6 +2209,8 @@ export class CliLauncher {
   skillPackRoot = DEFAULT_PACK_ROOT;
   /** `--plugin-dir` support of a Claude binary; a seam for tests. */
   probeClaudePluginDir: (binary: string) => boolean = claudeSupportsPluginDir;
+  /** Run a command inside a container (Codex add-only copies); a seam for tests. */
+  containerExec: (containerId: string, cmd: string[]) => string = (id, cmd) => containerManager.execInContainer(id, cmd);
   /** Was the container created with the read-only skill-pack mount (B5)? A seam for tests. */
   containerHasPack: (containerId: string) => boolean = (id) => containerManager.hasSkillPackMount(id);
   /** `--plugin-dir` support of the Claude binary INSIDE a container; cached per container + binary. */
@@ -2340,6 +2345,50 @@ export class CliLauncher {
    * skills; Aura copies of anything else (toolkit off included) are removed.
    * Dirs that are not provably Aura's are never touched (skill-pack.syncCopies).
    */
+  /**
+   * Codex inside a container: the container's CODEX_HOME is a tmpfs the host cannot
+   * read, so copies are add-only (skill-pack.containerCopyScript) and names already
+   * there — seeded from the user's ~/.codex — are the user's. Needs the read-only
+   * same-path pack mount; older containers stay unavailable.
+   */
+  private applyContainerCodexSkillExposure(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): LaunchOptions {
+    const id = options.containerId;
+    if (!id) return options;
+    const parent = `${CONTAINER_CODEX_HOME}/skills`;
+    try {
+      const exposure = this.decideOnce(info, () => {
+        const pack = readCurrentPack(this.skillPackRoot);
+        const mounted = !("error" in pack) && this.containerHasPack(id);
+        const existing = mounted
+          ? this.containerExec(id, ["sh", "-c", `ls -A ${parent} 2>/dev/null || true`]).split("\n").filter((n) => n && !n.startsWith("."))
+              .map((name) => ({ name, frontmatterName: null, ownership: { owner: "user" as const, reason: "already in the container's CODEX_HOME" } }))
+          : [];
+        return decideSkillExposure({
+          backend: "codex", enabled: this.uiuxWanted(options), containerized: true,
+          containerPackMounted: mounted, pack, existing,
+        });
+      });
+      const names = providedNames(exposure);
+      if (exposure.status !== "on" || !exposure.version || names.length === 0) return options;
+      const packDir = join(this.skillPackRoot, "versions", exposure.version);
+      const v = verifyVersionDir(packDir);
+      if ("errors" in v) {
+        this.setDeliveryError(exposure, `version ${exposure.version}: ${v.errors.slice(0, 3).join("; ")}`);
+        return options;
+      }
+      this.containerExec(id, ["sh", "-c", containerCopyScript({ packDir, parent, manifest: v.manifest, names })]);
+      this.setDeliveryError(exposure, undefined);
+      return { ...options, env: { ...options.env, PYTHONDONTWRITEBYTECODE: "1", ...this.catalogEnv(exposure, []) } };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      log.warn("skill-exposure", "Codex container toolkit copy failed; spawning without it", {
+        event: "skill_exposure.failed", sessionId, error,
+      });
+      if (info.skillExposure) this.setDeliveryError(info.skillExposure, error);
+      return options;
+    }
+  }
+
   private applyCodexSkillExposure(
     sessionId: string,
     info: SdkSessionInfo,
@@ -2347,13 +2396,7 @@ export class CliLauncher {
     codexHome: string,
     isContainerized: boolean,
   ): LaunchOptions {
-    if (isContainerized) {
-      this.decideOnce(info, () => decideSkillExposure({
-        backend: "codex", enabled: this.uiuxWanted(options), containerized: true,
-        pack: { error: "container" }, existing: [],
-      }));
-      return options;
-    }
+    if (isContainerized) return this.applyContainerCodexSkillExposure(sessionId, info, options);
     const parent = join(codexHome, "skills");
     try {
       const exposure = this.decideOnce(info, () => {
@@ -2620,7 +2663,7 @@ export class CliLauncher {
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");
-      dockerArgs.push("-e", "CODEX_HOME=/root/.codex");
+      dockerArgs.push("-e", `CODEX_HOME=${CONTAINER_CODEX_HOME}`);
       dockerArgs.push(options.containerId!);
       const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
       dockerArgs.push("bash", "-lc", innerCmd);
