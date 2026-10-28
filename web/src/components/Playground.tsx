@@ -876,6 +876,9 @@ const PLAYGROUND_BUDGET_EXCEEDED = {
 };
 
 export function Playground() {
+  // Demo actions report here instead of a blocking window.alert (aura-check uiux.native-alert).
+  const [badgeAction, setBadgeAction] = useState<string | null>(null);
+  const [suggestionAction, setSuggestionAction] = useState<string | null>(null);
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark"),
   );
@@ -1174,7 +1177,7 @@ export function Playground() {
                     reason: "Read is a read-only tool",
                     timestamp: Date.now(),
                   }}
-                  onDismiss={() => alert("Dismissed!")}
+                  onDismiss={() => setBadgeAction("Dismissed")}
                 />
               </div>
             </Card>
@@ -1190,10 +1193,11 @@ export function Playground() {
                     reason: "Recursive delete of root directory",
                     timestamp: Date.now(),
                   }}
-                  onDismiss={() => alert("Dismissed!")}
+                  onDismiss={() => setBadgeAction("Dismissed")}
                 />
               </div>
             </Card>
+            <p role="status" className="text-xs text-cc-muted min-h-4">{badgeAction}</p>
             <Card label="Auto-resolved badge (no dismiss)">
               <div className="border border-cc-border rounded-xl overflow-hidden bg-cc-card">
                 <AiValidationBadge
@@ -1882,7 +1886,7 @@ export function Playground() {
                   </div>
                 </div>
                 {/* Comments */}
-                <div className="px-4 py-2 border-t border-cc-border space-y-1.5 max-h-36 overflow-y-auto">
+                <div role="region" aria-label="Issue comments" tabIndex={0} className="px-4 py-2 border-t border-cc-border space-y-1.5 max-h-36 overflow-y-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
                   <span className="text-[10px] text-cc-muted uppercase tracking-wider">
                     Comments
                   </span>
@@ -2606,7 +2610,7 @@ export function Playground() {
                     key={suggestion}
                     type="button"
                     className="px-3 py-1.5 text-sm rounded-full border border-cc-border bg-cc-card text-cc-fg hover:bg-cc-hover transition-colors"
-                    onClick={() => alert(`Selected: ${suggestion}`)}
+                    onClick={() => setSuggestionAction(`Selected: ${suggestion}`)}
                   >
                     {suggestion}
                   </button>
@@ -2620,13 +2624,14 @@ export function Playground() {
                     key={suggestion}
                     type="button"
                     className="px-3 py-1.5 text-sm rounded-full border border-cc-primary/30 bg-cc-primary/5 text-cc-primary hover:bg-cc-primary/10 transition-colors"
-                    onClick={() => alert(`Selected: ${suggestion}`)}
+                    onClick={() => setSuggestionAction(`Selected: ${suggestion}`)}
                   >
                     {suggestion}
                   </button>
                 ))}
               </div>
             </Card>
+            <p role="status" className="text-xs text-cc-muted min-h-4">{suggestionAction}</p>
           </div>
         </Section>
 

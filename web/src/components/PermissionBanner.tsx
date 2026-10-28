@@ -538,7 +538,7 @@ function ExitPlanModeDisplay({ input }: { input: Record<string, unknown> }) {
             </span>
             <span className="text-[11px] text-cc-primary font-semibold tracking-wide uppercase">Plan</span>
           </div>
-          <div className="px-3 py-3 max-h-72 overflow-y-auto markdown-body text-[13px] text-cc-fg leading-relaxed">
+          <div role="region" aria-label="Plan" tabIndex={0} className="px-3 py-3 max-h-72 overflow-y-auto markdown-body text-[13px] text-cc-fg leading-relaxed focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
             <Markdown
               remarkPlugins={[remarkGfm]}
               components={{

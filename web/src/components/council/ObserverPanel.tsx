@@ -513,7 +513,7 @@ export function ObserverPanel({
       )}
 
       {/* Findings */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div role="region" aria-label="Findings scroll area" tabIndex={0} className="flex-1 min-h-0 overflow-y-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
         <FindingsLog
           findings={findings}
           nowMs={nowMs}

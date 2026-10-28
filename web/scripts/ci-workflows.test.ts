@@ -278,3 +278,47 @@ describe("GHCR image publish on release tags (uiux B5)", () => {
     expect(runs[push]).toContain("ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aura-companion");
   });
 });
+
+// PLAN-aura-uiux-agent-enrichment follow-up (2026-10-28): the rendered axe scan of
+// #/playground runs in CI against a throwaway production build. jsdom cannot see
+// layout rules (scrollable-region-focusable, contrast), so this job is the only
+// gate for them. Pinned properties:
+//   - agent-browser is installed at an exact version (no floating @latest);
+//   - the throwaway server boots with COMPANION_TELEMETRY=0 and an isolated HOME,
+//     so CI boots never register as installs on the stats Worker (#438);
+//   - the scan step's exit code is not masked: fail (1) AND skipped (3) turn the
+//     job red — a skipped scan must never read as a pass;
+//   - the artifact is uploaded even when the scan fails, so the rows are readable.
+describe("rendered a11y scan of the Playground runs in CI", () => {
+  const job = loadWorkflow("a11y.yml").jobs["rendered-scan"] as Job & {
+    steps: (Step & { uses?: string; env?: Record<string, string>; with?: Record<string, string> })[];
+  };
+
+  it("exists and installs a pinned agent-browser", () => {
+    expect(job).toBeDefined();
+    const install = job.steps.find((s) => s.run?.includes("agent-browser"));
+    expect(install?.run).toMatch(/agent-browser@\d+\.\d+\.\d+\b/);
+    expect(install?.run).not.toMatch(/@latest/);
+  });
+
+  it("boots the throwaway server with telemetry off and an isolated HOME", () => {
+    const serve = job.steps.find((s) => s.run?.includes("server/index.ts"));
+    expect(serve).toBeDefined();
+    expect(serve!.env?.COMPANION_TELEMETRY).toBe("0");
+    expect(serve!.env?.HOME).toBeDefined();
+    expect(serve!.env?.HOST).toBe("127.0.0.1");
+  });
+
+  it("scans #/playground and never masks the exit code", () => {
+    const scan = job.steps.find((s) => s.run?.includes("scripts/a11y-scan.ts"));
+    expect(scan?.run).toContain("#/playground");
+    expect(scan?.run).not.toMatch(/\|\|\s*(true|exit 0)/);
+    expect(scan?.["continue-on-error"]).not.toBe(true);
+    expect(job["continue-on-error"]).not.toBe(true);
+  });
+
+  it("uploads the scan artifact even when the scan fails", () => {
+    const upload = job.steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
+    expect(upload?.if).toBe("always()");
+  });
+});

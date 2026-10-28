@@ -652,6 +652,11 @@ describe("ObserverPanel — worst-case overflow contract (layout-stability spec)
     expect(scrollRegion).not.toBeNull();
     expect(scrollRegion?.className).toContain("flex-1");
     expect(scrollRegion?.className).toContain("min-h-0");
+    // Findings rows may hold no focusable child, so the scroll region itself
+    // takes focus (rendered axe scan: scrollable-region-focusable, WCAG 2.1.1).
+    expect(scrollRegion).toHaveAttribute("tabindex", "0");
+    expect(scrollRegion).toHaveAttribute("role", "region");
+    expect(scrollRegion).toHaveAttribute("aria-label", "Findings scroll area");
 
     // jsdom reports 0 for both; asserting equality documents the invariant and
     // fails loudly only if a future jsdom/happy-dom gains layout and the panel
