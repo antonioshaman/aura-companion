@@ -42,7 +42,10 @@ function makePlugin(): string {
 /** One `claude -p` run; returns the final answer and the tool calls it made. */
 function runOnce(f: Fixture, arm: "with" | "without", model: string, plugin: string): Promise<{ output: string; tools: string[] }> {
   const cwd = mkdtempSync(join(tmpdir(), "uiux-eval-cwd-"));
-  const args = ["-p", f.prompt, "--output-format", "stream-json", "--verbose", "--model", model, "--max-turns", "10", "--allowedTools", "Skill,Read,Glob,Grep"];
+  const args = ["-p", f.prompt, "--output-format", "stream-json", "--verbose", "--model", model, "--max-turns", "10", "--allowedTools", "Skill,Read,Glob,Grep",
+    // Skip the operator's user settings: their Stop hooks (self-reflect, guards) fire in a
+    // nested `-p` run, and the final message becomes a reply to the hook, not the answer.
+    "--setting-sources", "project,local"];
   if (arm === "with") args.push("--plugin-dir", plugin);
   const env = { ...process.env };
   // A nested run must look like a fresh CLI, not a child of this Aura session.
