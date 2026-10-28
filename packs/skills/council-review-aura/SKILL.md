@@ -751,3 +751,25 @@ is absent (non-Aura checkout).
    ```
 
    Skip silently on any error — a cache-write failure must never break the review.
+
+## Addendum (2026-10-28) — rendered-UI accessibility scan (Phase 0, step 5)
+
+Source: aura, wcag-22
+
+When the change touches UI (`.tsx`/`.css` under `web/src/`, `web/index.html`, `landing/`, `platform/src/`), Phase 0 also scans the rendered UI. It is a deterministic check like the others, and it runs before any seat is dispatched.
+
+1. Start a throwaway dev server on a free loopback port. Never use the production service on :3456, and stop the throwaway server by its own PID.
+2. Pick the states the diff touches: the route of every changed screen, and `#/playground` for message/chat components (CLAUDE.md keeps every such component there).
+3. Run the scanner:
+   ```bash
+   cd web && bun scripts/a11y-scan.ts --url "http://127.0.0.1:<port>/#/<route>" [--url …] \
+     --out "../.council/review-output/$TIMESTAMP/a11y-scan"
+   ```
+   It scans light and dark themes at a 375×812 viewport with the WCAG 2.0–2.2 A/AA rules. axe-core is pinned in `web/package.json` and loaded from `node_modules` at run time; never copy it anywhere. Only loopback URLs are accepted. Where the host blocks Chrome's sandbox, the skip reason says so; retry with `--browser-args=--no-sandbox`.
+4. Exit codes: `0` pass, `1` fail, `3` skipped, `2` usage error. The status is the `status` field of `a11y-scan.json`. Quote it; never set it or upgrade it yourself:
+   - `fail`: copy every row (rule id, selector, WCAG criterion, state) into **Deterministic Check Failures**.
+   - `skipped`: open the report with `⚠ UNVERIFIED — rendered a11y scan skipped: <reason>` and set the confidence to Low. A skipped scan is never a pass.
+   - `pass`: write "axe found no violations on N states". Never write "accessible": axe covers roughly a third of WCAG.
+   - "Needs manual check" rows (axe `incomplete`) are open items, not passes.
+5. In the Phase 5 output, the **Deterministic checks** line adds `rendered a11y: pass | fail (N) | skipped (<reason>)`. Paste the artifact's "What axe cannot see (not verified)" checklist under the a11y findings. Tick a line only with evidence from this review (a keyboard walk, a screen-reader pass), and name that evidence.
+6. Put the artifact path (`.council/review-output/$TIMESTAMP/a11y-scan/a11y-scan.md`) in the context brief for watson.

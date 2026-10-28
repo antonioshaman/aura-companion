@@ -23,7 +23,7 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "ef9e97603cc35fddf2531cda9d4466c6ee20916c37dd7055cf03962e7aef9813",
+      "digest": "72249391a8d12b2e68634b9d98998616d5206c3cb3f76d00a5d08ac50e39526b",
       "files": {
         ".verify/capability-vocabulary.json": "741f4b01d7f38a9e51c819a3b8bd0f57a0c8871236526f710ff3048b3fc23dbd",
         "README.md": "6d7b4df6c967f576bcae951614c289f733a3a66c8c0bde30193fcc3ea15dd64e",
@@ -133,7 +133,7 @@
         "watson/references/platform-ios.md": "d18301edbe45a64a6ad74378948cdf76cac7e4b37de771e4356d0914e7f47e3b",
         "watson/references/platform-telegram-mini-app.md": "b6330d3b7a8ad211305357c0a29de912a9d8850a2fb6bc319c5aab44d46543a3",
         "watson/references/quality-watson.md": "3bb7028e755a14a075731df1e33918ceeaabbf5ae5caab84c10e8f939163afad",
-        "watson/review-aura.md": "ce7fe409e09eec1f532f5b6d2d777df0229f0527ff6e870f52a5dbf77f6651fc",
+        "watson/review-aura.md": "eba326bfa6b04f84970ad1c79b0f221f742f49f647be54fbb846ab8bf079494c",
         "willison/meta.yaml": "de40d3afdd986d4fff0f07fad3afac44f4ac13852df29eb60c4242940fe8c8fa",
         "willison/plan-aura.md": "872c309d11574b05fe6c1c41b0a33f767857053f2a432b08193c2229d40a65ca",
         "willison/plan.md": "d96ac733203648aa5ea65aa68abdc9b41ad936b1215ce1f3efd51d49b29fdc7d",
@@ -604,9 +604,9 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "81197c97576c47d82677f4b5c31d90c3732058aadcfbeda70532ace830400011",
+      "digest": "b1b5c26ba40097ec6d01f657ea3faab8362c12f7a1cc0ecbca23b09e2c88b461",
       "files": {
-        "SKILL.md": "3d458efdd9dfc383dae8ecdbd57f30138e015b4e89fb6745c5f30c421c051c9a",
+        "SKILL.md": "7ac935fd2f63225d5f8c559bc476042c81ca1727063e4f4a4d677b8ee7b73e62",
         "references/quality-a11y.md": "fa07bc59ef1dfd11eeb4c218e7e62097f14894bac01bb486caaee188573e5a73",
         "references/quality-abramov.md": "02c3fe835cec96cc8e03709574f9e879a8073db751ea6f47d3385836865bc914",
         "references/quality-backend.md": "308685e49060badd633ee0b4e27122b1ab5a72d7aa5f2bf12df3e6e74883b33b",

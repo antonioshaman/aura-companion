@@ -22,3 +22,12 @@ Read only the files this change needs, from this seat's folder in the catalog ro
 - Android screen → `platform-android.md`
 
 A plain web change needs none of them. Where a platform rule and a web default disagree, the platform rule wins; each file's `Source conflicts` block states the default chosen.
+
+## Addendum (2026-10-28) — the rendered scan artifact
+
+Source: aura, wcag-22
+
+If the context brief names a rendered-scan artifact (`a11y-scan/a11y-scan.md` / `.json`), read it first:
+- Cite its violations by rule id, selector, WCAG criterion and state (theme, viewport). Trace each one to the component that renders it.
+- Its status is not yours to change. A `skipped` scan means nothing was verified in the browser. A `pass` means only that axe found nothing; do not call the UI accessible.
+- Work through its "not verified" checklist from the code where you can (focus order, live regions, reduced motion). Mark each line checked, with the file:line evidence, or leave it "not verified".
