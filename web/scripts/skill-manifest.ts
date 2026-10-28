@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 
 import {
   filesDigest,
+  frontmatterName,
   hashTree,
   invocationNames,
   OWNER_MARKER_FILE,
@@ -79,12 +80,8 @@ export interface ManifestInput {
 
 // ─── Pure core ──────────────────────────────────────────────────────────────
 
-/** `name:` from a SKILL.md YAML frontmatter, unquoted; null when absent. */
-export function frontmatterName(skillMd: string): string | null {
-  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd);
-  const m = fm && /^name:\s*(.+?)\s*$/m.exec(fm[1]);
-  return m ? m[1].replace(/^(['"])(.*)\1$/, "$2") : null;
-}
+/** Re-exported: the server's skill-pack module needs the same parse (scripts/ does not ship). */
+export { frontmatterName };
 
 /** First-party licence verdict: shippable SPDX id AND the repo licence file says so. */
 function firstPartyLicence(pack: PackDecl, text: string | null): { verdict: ManifestEntry["licence"]["verdict"]; reasons: string[] } {
