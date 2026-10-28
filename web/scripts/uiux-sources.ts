@@ -653,6 +653,46 @@ async function runCorpus(refresh: boolean): Promise<number> {
 }
 
 /**
+ * Install one captured text and the manifest that hashes it as a pair (observer
+ * STOP, checkpoint council-implement-187). Both are written to temp files first;
+ * the old text is moved aside, not overwritten; any failure before the manifest
+ * is in place puts the old text back and leaves the old manifest untouched.
+ */
+export function installCapture(opts: {
+  textPath: string;
+  text: string;
+  manifestPath: string;
+  manifestText: string;
+  rename?: (from: string, to: string) => void;
+}): void {
+  const { textPath, text, manifestPath, manifestText } = opts;
+  const rename = opts.rename ?? renameSync;
+  const tmpText = `${textPath}.tmp-${process.pid}`;
+  const tmpManifest = `${manifestPath}.tmp-${process.pid}`;
+  const old = `${textPath}.old-${process.pid}`;
+  let moved = false;
+  let installed = false;
+  try {
+    writeFileSync(tmpText, text);
+    writeFileSync(tmpManifest, manifestText);
+    if (existsSync(textPath)) {
+      renameSync(textPath, old);
+      moved = true;
+    }
+    rename(tmpText, textPath);
+    installed = true;
+    rename(tmpManifest, manifestPath);
+  } catch (err) {
+    if (installed) rmSync(textPath, { force: true });
+    if (moved) renameSync(old, textPath);
+    rmSync(tmpText, { force: true });
+    rmSync(tmpManifest, { force: true });
+    throw err;
+  }
+  rmSync(old, { force: true });
+}
+
+/**
  * `capture <id> <dir> --terms-url <https> --terms-note <text>`: install agent-browser
  * page captures (`<dir>/*.txt`, first line `URL: <page>`) as the corpus text of a
  * catalog source and record the pages + terms in the manifest.
@@ -695,9 +735,13 @@ function runCapture(args: string[]): number {
   const order = new Map(entries.map((e, i) => [e.id, i]));
   items.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   mkdirSync(CORPUS_DIR, { recursive: true });
-  writeAtomic(corpusTextPath(id), text);
   const doc = JSON.parse(readFileSync(CORPUS_MANIFEST_FILE, "utf8")) as { _doc: string };
-  writeAtomic(CORPUS_MANIFEST_FILE, JSON.stringify({ _doc: doc._doc, items }, null, 2) + "\n");
+  try {
+    installCapture({ textPath: corpusTextPath(id), text, manifestPath: CORPUS_MANIFEST_FILE, manifestText: JSON.stringify({ _doc: doc._doc, items }, null, 2) + "\n" });
+  } catch (err) {
+    console.error(`uiux corpus: capture not installed, previous text and manifest kept — ${(err as Error).message}`);
+    return 1;
+  }
   console.log(`uiux corpus: ${id} captured — ${pages.length} pages, ${item.bytes} bytes${item.thin ? " (STILL THIN)" : ""}`);
   return item.thin ? 1 : 0;
 }

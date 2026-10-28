@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
@@ -19,6 +19,7 @@ import {
   buildEntry,
   captureItem,
   captureText,
+  installCapture,
   isCaptured,
   CATEGORIES,
   assertSameRepo,
@@ -454,5 +455,54 @@ describe("capture — agent-browser texts enter the corpus with their terms reco
       expect(item?.thin).toBe(false);
       expect(item?.capture?.terms.url).toMatch(/^https:\/\//);
     }
+  });
+});
+
+// Observer STOP (checkpoint council-implement-187-31ae66f0): capture replaced the
+// corpus text before writing the manifest, so a failed manifest write left the
+// new text under the old sha256 and the old text was gone.
+describe("installCapture — text and manifest change together or not at all", () => {
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), "uiux-capture-"));
+    const textPath = join(root, "apple-hig.txt");
+    const manifestPath = join(root, "manifest.json");
+    writeFileSync(textPath, "old text");
+    writeFileSync(manifestPath, "OLD MANIFEST");
+    return { root, textPath, manifestPath };
+  };
+
+  it("a failed manifest rename restores the old text and leaves the old manifest", () => {
+    const { root, textPath, manifestPath } = setup();
+    const failOnManifest = (from: string, to: string) => {
+      if (to === manifestPath) throw new Error("ENOSPC");
+      renameSync(from, to);
+    };
+    expect(() => installCapture({ textPath, text: "new text", manifestPath, manifestText: "NEW", rename: failOnManifest })).toThrow(/ENOSPC/);
+    expect(readFileSync(textPath, "utf8")).toBe("old text");
+    expect(readFileSync(manifestPath, "utf8")).toBe("OLD MANIFEST");
+    expect(readdirSync(root).sort()).toEqual(["apple-hig.txt", "manifest.json"]);
+  });
+
+  it("a failed text install leaves both untouched", () => {
+    const { root, textPath, manifestPath } = setup();
+    const failOnText = (from: string, to: string) => {
+      if (to === textPath) throw new Error("EIO");
+      renameSync(from, to);
+    };
+    expect(() => installCapture({ textPath, text: "new text", manifestPath, manifestText: "NEW", rename: failOnText })).toThrow(/EIO/);
+    expect(readFileSync(textPath, "utf8")).toBe("old text");
+    expect(readFileSync(manifestPath, "utf8")).toBe("OLD MANIFEST");
+    expect(readdirSync(root).sort()).toEqual(["apple-hig.txt", "manifest.json"]);
+  });
+
+  it("on success both are new and nothing is left behind; a first capture has no old text", () => {
+    const { root, textPath, manifestPath } = setup();
+    installCapture({ textPath, text: "new text", manifestPath, manifestText: "NEW" });
+    expect(readFileSync(textPath, "utf8")).toBe("new text");
+    expect(readFileSync(manifestPath, "utf8")).toBe("NEW");
+    expect(readdirSync(root).sort()).toEqual(["apple-hig.txt", "manifest.json"]);
+    const fresh = join(root, "material-3.txt");
+    installCapture({ textPath: fresh, text: "m3", manifestPath, manifestText: "NEWER" });
+    expect(readFileSync(fresh, "utf8")).toBe("m3");
   });
 });
