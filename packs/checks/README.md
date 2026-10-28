@@ -35,6 +35,7 @@ packs/checks/bin/aura-check --list          # packs and rules
 | `--main-branch NAME` | Branch names a prod checkout may be on (default `main`, `master`). |
 | `--format json` | Machine-readable findings. |
 | `--strict` | Warnings fail too. |
+| `--baseline PATH` | Reviewed, accepted findings (path relative to `--root`). Unlisted findings are reported as usual; in a full scan a stale entry fails. See [Baseline](#baseline). |
 
 **Exit codes:** `0` no errors (warnings allowed) · `1` at least one error (or any finding
 with `--strict`) · `2` usage / environment problem (unknown pack, `--changed` outside git…).
@@ -62,11 +63,50 @@ Secrets are never printed: findings show a 4-character prefix and the length.
 | | `telegram.fsm-swallows-commands` | warn | aiogram `@router.message(SomeState)` with no filter excluding commands (best effort) |
 | `call-site-parity` | `call-site-parity.guard-missing` | warn | the diff adds an `if` guard in front of an existing call to a project function; its other call sites (≤ 10 — more means a generic helper) have no matching condition (`--changed` only) |
 
+| `uiux` | `uiux.native-alert` | warn | `alert()` / `window.alert()` used as user feedback (source: nielsen-heuristics #9; telegram-webapps showAlert/showPopup) |
+| | `uiux.focusable-aria-hidden` | error | `aria-hidden="true"` on a button, link, input or `tabIndex>=0` element (wcag-22 4.1.2; aria-apg) |
+| | `uiux.outline-none-without-focus-style` | warn | `outline-none`/`outline-0` in a class list with no `focus:`/`focus-visible:` style on the same element (wcag-22 2.4.7) |
+| | `uiux.clickable-non-interactive` | warn | `onClick` on a `div`/`span`/`tr`… with no role, tabIndex or key handler (wcag-22 2.1.1, 4.1.2; eslint-plugin-jsx-a11y) |
+| | `uiux.icon-button-no-name` | warn | a `<button>` whose only children are icons, with no `aria-label`/`title`/sr-only text (wcag-22 4.1.2, 1.1.1) |
+| | `uiux.axe-rule-disabled-unjustified` | warn | an axe rule switched off (`rules: {x: {enabled: false}}`, `disableRules`) with no comment in the test or above the shared config saying why (axe-core; wcag-22) |
+
 `aura-check --list` prints the same table from the code; the evidence for each rule is
 printed under every report.
 
 The code heuristics (`llm-output`, `fallback`, `telegram-miniapp`, `call-site-parity`) are
 line-based approximations, deliberately warn-level, and skip test files.
+
+The `uiux` rules cite a published guideline (`source:` — ids from
+`docs/research/uiux-sources/catalog.json`) rather than a project incident. They read
+JSX/HTML opening tags approximately and stay quiet when they cannot know (spread props,
+`{expression}` children, a full-viewport `inset-0` backdrop, a panel whose `onClick` only
+calls `stopPropagation`). They do not replace a rendered axe scan.
+
+### Baseline
+
+`--baseline .aura-check-baseline.json` accepts known findings without hiding new ones.
+Each entry is a **true problem with a human ruling**; a rule that fires on correct code is
+fixed or dropped, never baselined.
+
+```json
+{"entries": [{
+  "rule": "uiux.icon-button-no-name", "path": "web/src/components/DiffPanel.tsx",
+  "match": "<button | onClick={() => setSidebarOpen(false)}", "count": 1,
+  "ruling": "true-problem", "action": "fix-later",
+  "reason": "Icon-only close button with no aria-label.",
+  "ruledBy": "owner", "ruledAt": "2026-10-28"}]}
+```
+
+- `match` is the finding's line plus the next one, whitespace-collapsed, joined by ` | `
+  (line numbers drift; the text rarely does). `count` is how many identical findings it covers.
+- `ruling` must be `true-problem`; `action` is `fix-later` or `accepted`; `reason`,
+  `ruledBy` and a `YYYY-MM-DD` `ruledAt` are required. An invalid file exits `2`.
+- A finding beyond an entry's `count` is reported. In a full scan an entry that matches
+  fewer findings than its `count` is reported as `baseline.stale-entry` (error): remove it
+  once the defect is fixed. `--changed` skips the stale check (it sees only touched files).
+
+Aura's own CI runs `aura-check --pack uiux --strict --baseline .aura-check-baseline.json`
+over the whole repo.
 
 ### Suppressing a finding
 

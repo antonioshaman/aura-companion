@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from . import baseline as baseline_mod
 from . import core
 
 
@@ -44,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default=".", help="repository root (default: cwd)")
     p.add_argument("--format", choices=("text", "json"), default="text")
     p.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
+    p.add_argument("--baseline", metavar="PATH",
+                   help="JSON list of reviewed, accepted findings; unlisted findings and stale entries fail")
     p.add_argument("--list", action="store_true", help="list packs and rules, then exit")
     return p
 
@@ -62,18 +65,26 @@ def list_rules(packs: Optional[List[str]]) -> str:
             flags.append("--runtime only")
         extra = f" ({', '.join(flags)})" if flags else ""
         out.append(f"  {r.id:45} {r.severity:5} {r.title}{extra}")
+        if r.source:
+            out.append(f"  {'':45} source: {r.source}")
     return "\n".join(out).lstrip("\n")
 
 
 def render_text(findings: List[core.Finding]) -> str:
     out = []
     for f in findings:
+        if f.rule_id == baseline_mod.STALE_ID:
+            out.append(f"{f.severity.upper():5} {f.rule_id}  {f.location()}\n      {f.message}")
+            continue
         r = core.rule_by_id(f.rule_id)
         out.append(f"{f.severity.upper():5} {f.rule_id}  {f.location()}\n      {f.message}\n      fix: {r.hint}")
     if findings:
         out.append("\nwhy (evidence from real projects):")
-        for rid in sorted({f.rule_id for f in findings}):
-            out.append(f"  {rid}: {core.rule_by_id(rid).evidence}")
+        for rid in sorted({f.rule_id for f in findings} - {baseline_mod.STALE_ID}):
+            r = core.rule_by_id(rid)
+            out.append(f"  {rid}: {r.evidence}")
+            if r.source:
+                out.append(f"    source: {r.source}")
         errors = sum(f.severity == core.ERROR for f in findings)
         out.append(f"\naura-check: {errors} error(s), {len(findings) - errors} warning(s)")
     return "\n".join(out)
@@ -121,9 +132,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     findings = core.run(ctx, packs)
 
+    accepted = 0
+    if args.baseline:
+        bpath = Path(args.baseline)
+        if not bpath.is_absolute():
+            bpath = root / bpath  # relative to --root, like every other path here
+        try:
+            entries = baseline_mod.load(bpath)
+        except baseline_mod.BaselineError as e:
+            print(f"aura-check: invalid baseline: {e}", file=sys.stderr)
+            return 2
+        selected = {r.id for r in core.select_rules(packs, ctx.runtime)}
+        # Absence is evidence only when every file was scanned.
+        full_scan = not args.changed and not message_only
+        findings, accepted, stale = baseline_mod.apply(ctx, findings, entries, selected, full_scan)
+        findings = stale + findings
+
     if args.format == "json":
         print(json.dumps([f.__dict__ for f in findings], ensure_ascii=False, indent=2))
     elif findings:
         print(render_text(findings))
+    if accepted and args.format == "text":
+        print(f"aura-check: {accepted} finding(s) accepted by the baseline ({args.baseline})")
     has_error = any(f.severity == core.ERROR for f in findings)
     return 1 if has_error or (args.strict and findings) else 0

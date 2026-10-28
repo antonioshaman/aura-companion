@@ -173,6 +173,20 @@ describe("council catalog canaries run in CI (uiux Task 4)", () => {
   });
 });
 
+// PLAN-aura-uiux-agent-enrichment Task 14: the UI/UX aura-check rules run over the
+// whole repo against the reviewed baseline. --strict makes every unbaselined
+// warning fail, and a full scan is what lets a stale baseline entry fail too, so
+// the step must keep both flags and must not be masked.
+describe("UI/UX aura-check rules run on the whole repo (uiux Task 14)", () => {
+  const UIUX_GATE = "packs/checks/bin/aura-check --pack uiux --strict --baseline .aura-check-baseline.json";
+  it("ci.yml runs the uiux pack strictly against the baseline, unmasked, as a full scan", () => {
+    const wf = loadWorkflow("ci.yml");
+    expect(gateMaskingErrors(wf, [UIUX_GATE])).toEqual([]);
+    const step = Object.values(wf.jobs).flatMap((j) => j.steps).find((st) => st.run?.includes(UIUX_GATE));
+    expect(step?.run).not.toMatch(/--changed/);
+  });
+});
+
 // Review 2026-10-27-2139 finding #18: the job that attests bytes must not run on a
 // floating toolchain — setup-python pinned to a commit SHA, pyyaml installed by hash.
 describe("council-skills job toolchain is pinned", () => {

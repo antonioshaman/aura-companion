@@ -262,4 +262,9 @@ jobs:
       # fail the job; warnings are printed for the reviewer.
       - name: aura-check on this change
         if: github.event_name == 'pull_request'
-        run: packs/checks/bin/aura-check --changed --base "origin/${{ github.base_ref }}"
+        run: packs/checks/bin/aura-check --changed --base "origin/${{ github.base_ref }}" --baseline .aura-check-baseline.json
+
+      # UI/UX rules over the whole repo: a finding not in the reviewed baseline
+      # fails, and so does a baseline entry that no longer fires (full scan only).
+      - name: aura-check UI/UX rules (whole repo, strict baseline)
+        run: packs/checks/bin/aura-check --pack uiux --strict --baseline .aura-check-baseline.json

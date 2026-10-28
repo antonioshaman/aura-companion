@@ -111,3 +111,141 @@ def balanced_call(lines: List[str], idx: int, col: int, max_lines: int = 15) -> 
                     return "".join(buf)
         buf.append("\n")
     return "".join(buf)
+
+
+# -- markup (JSX / HTML) open tags ----------------------------------------
+MARKUP_EXT = (".tsx", ".jsx", ".html", ".htm", ".vue", ".svelte")
+_TAG_START_RE = re.compile(r"<([a-zA-Z][\w.:-]*)")
+
+
+class Tag:
+    """One opening tag: ``name``, raw attribute text, 1-based ``line`` of the
+    ``<``, and character offsets of the tag in the file text."""
+
+    __slots__ = ("name", "attrs", "line", "start", "end", "self_closing")
+
+    def __init__(self, name: str, attrs: str, line: int, start: int, end: int, self_closing: bool):
+        self.name, self.attrs, self.line = name, attrs, line
+        self.start, self.end, self.self_closing = start, end, self_closing
+
+    def has(self, attr: str) -> bool:
+        return re.search(r"(?<![\w:-])" + re.escape(attr) + r"(?![\w:-])", self.top_level(), re.I) is not None
+
+    def value(self, attr: str) -> Optional[str]:
+        """Literal value of ``attr``: the string for ``a="x"`` / ``a={"x"}`` /
+        ``a={true}``; the raw expression for other ``{...}``; "" when bare."""
+        m = re.search(r"(?<![\w:-])" + re.escape(attr) + r"(?![\w:-])\s*(=\s*)?", self.attrs, re.I)
+        if not m:
+            return None
+        rest = self.attrs[m.end():]
+        if not m.group(1):
+            return ""
+        if rest[:1] in "\"'":
+            q = rest[0]
+            k = rest.find(q, 1)
+            return rest[1:k] if k > 0 else rest[1:]
+        if rest[:1] == "{":
+            depth, i = 0, 0
+            for i, ch in enumerate(rest):
+                depth += (ch == "{") - (ch == "}")
+                if depth == 0:
+                    break
+            inner = rest[1:i].strip()
+            lit = re.fullmatch(r"([\"'`])(.*)\1", inner, re.S)
+            return lit.group(2) if lit else inner
+        return rest.split()[0] if rest.split() else ""
+
+    def top_level(self) -> str:
+        """Attribute text with ``{...}`` expression bodies and string bodies
+        blanked, so ``has`` sees attribute names only."""
+        out, depth, quote = [], 0, ""
+        for ch in self.attrs:
+            if quote:
+                if ch == quote:
+                    quote = ""
+                    out.append(ch)
+                continue
+            if depth == 0 and ch in "\"'":
+                quote = ch
+                out.append(ch)
+                continue
+            if ch == "{":
+                depth += 1
+                out.append(ch if depth == 1 else " ")
+                continue
+            if ch == "}":
+                depth -= 1
+                out.append(ch if depth == 0 else " ")
+                continue
+            out.append(ch if depth == 0 else " ")
+        return "".join(out)
+
+    @property
+    def spread(self) -> bool:
+        return "{..." in self.attrs.replace(" ", "")
+
+
+def markup_tags(text: str, max_len: int = 4000) -> List[Tag]:
+    """Opening tags in JSX/HTML text, approximately. A ``<`` right after an
+    identifier character (``Array<T>``, ``a<b``) is a type or a comparison,
+    not a tag. Attribute values may hold ``{...}`` with nested braces, strings
+    and ``=>``; the tag ends at the first ``>`` outside both."""
+    tags: List[Tag] = []
+    line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    import bisect
+    for m in _TAG_START_RE.finditer(text):
+        s = m.start()
+        prev = text[s - 1] if s else ""
+        if prev and (prev.isalnum() or prev in "_$."):
+            continue
+        i, depth, quote, n = m.end(), 0, "", len(text)
+        limit = min(n, s + max_len)
+        end = -1
+        while i < limit:
+            ch = text[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+            elif ch in "\"'`" and (depth > 0 or ch != "`"):
+                quote = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            elif ch == ">" and depth == 0:
+                end = i
+                break
+            elif ch == "<" and depth == 0:
+                break  # a new tag started: this was not a tag
+            i += 1
+        if end < 0:
+            continue
+        attrs = text[m.end():end]
+        self_closing = attrs.rstrip().endswith("/")
+        line = bisect.bisect_right(line_starts, s)
+        tags.append(Tag(m.group(1), attrs.rstrip("/ \n\t"), line, s, end + 1, self_closing))
+    return tags
+
+
+def element_inner(text: str, tag: Tag, max_len: int = 4000) -> Optional[str]:
+    """Children of ``tag`` up to its matching close tag, or None if not found."""
+    if tag.self_closing:
+        return ""
+    name = re.escape(tag.name)
+    open_re = re.compile(r"<" + name + r"(?=[\s/>])")
+    close_re = re.compile(r"</" + name + r"\s*>")
+    depth, i, stop = 1, tag.end, min(len(text), tag.end + max_len)
+    while i < stop:
+        mo, mc = open_re.search(text, i, stop), close_re.search(text, i, stop)
+        if not mc:
+            return None
+        if mo and mo.start() < mc.start():
+            depth, i = depth + 1, mo.end()
+            continue
+        depth, i = depth - 1, mc.end()
+        if depth == 0:
+            return text[tag.end:mc.start()]
+    return None

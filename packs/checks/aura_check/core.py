@@ -60,17 +60,20 @@ class Rule:
     # re-reported on every commit).
     diff_scoped: bool = False
     runtime_only: bool = False
+    # Published guideline the rule enforces, as "catalog-id: criterion" pairs
+    # separated by ";" (ids from docs/research/uiux-sources/catalog.json).
+    source: str = ""
 
 
 RULES: List[Rule] = []
 
 
 def rule(*, id: str, pack: str, severity: str, title: str, evidence: str, hint: str,
-         diff_scoped: bool = False, runtime_only: bool = False):
+         diff_scoped: bool = False, runtime_only: bool = False, source: str = ""):
     def deco(fn):
         RULES.append(Rule(id=id, pack=pack, severity=severity, title=title,
                           evidence=evidence, hint=hint, fn=fn,
-                          diff_scoped=diff_scoped, runtime_only=runtime_only))
+                          diff_scoped=diff_scoped, runtime_only=runtime_only, source=source))
         return fn
     return deco
 
