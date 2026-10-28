@@ -353,7 +353,7 @@ attested:
   - path: _council-experts/watson/references/platform-android.md
     sha256: 172594578f36908001820e29b861c823dd52b3022df6652583182db974eed529
   - path: _council-experts/watson/references/platform-ios.md
-    sha256: 40f910b31c6f4dcd0025a0684233233fd75be68001d0b67480b58a4fc29a53ff
+    sha256: d18301edbe45a64a6ad74378948cdf76cac7e4b37de771e4356d0914e7f47e3b
   - path: _council-experts/watson/references/platform-telegram-mini-app.md
     sha256: b6330d3b7a8ad211305357c0a29de912a9d8850a2fb6bc319c5aab44d46543a3
   - path: _council-experts/watson/review-aura.md

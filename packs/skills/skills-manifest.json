@@ -23,7 +23,7 @@
         "status": "ship",
         "reasons": []
       },
-      "digest": "0d6d9dd75b18fcde85959db4aa08950f1421f1594e99954628b807ea9d8ac492",
+      "digest": "ef9e97603cc35fddf2531cda9d4466c6ee20916c37dd7055cf03962e7aef9813",
       "files": {
         ".verify/capability-vocabulary.json": "741f4b01d7f38a9e51c819a3b8bd0f57a0c8871236526f710ff3048b3fc23dbd",
         "README.md": "6d7b4df6c967f576bcae951614c289f733a3a66c8c0bde30193fcc3ea15dd64e",
@@ -130,7 +130,7 @@
         "watson/meta.yaml": "b6ca688b0c880b6b451e1e122e1f4b2a415d9f26e04b8f9431325d423c81e5d5",
         "watson/plan-aura.md": "dc9b205512c075fdcac9d5576dc5e4055a7b8761497e33f7d1784da2490dc38b",
         "watson/references/platform-android.md": "172594578f36908001820e29b861c823dd52b3022df6652583182db974eed529",
-        "watson/references/platform-ios.md": "40f910b31c6f4dcd0025a0684233233fd75be68001d0b67480b58a4fc29a53ff",
+        "watson/references/platform-ios.md": "d18301edbe45a64a6ad74378948cdf76cac7e4b37de771e4356d0914e7f47e3b",
         "watson/references/platform-telegram-mini-app.md": "b6330d3b7a8ad211305357c0a29de912a9d8850a2fb6bc319c5aab44d46543a3",
         "watson/references/quality-watson.md": "3bb7028e755a14a075731df1e33918ceeaabbf5ae5caab84c10e8f939163afad",
         "watson/review-aura.md": "ce7fe409e09eec1f532f5b6d2d777df0229f0527ff6e870f52a5dbf77f6651fc",

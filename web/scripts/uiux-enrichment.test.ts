@@ -5,7 +5,8 @@
 // tree, hermetically (no corpus, no network): CI's gate.
 
 import { describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import {
@@ -20,12 +21,14 @@ import {
   parseConflicts,
   platformCoverage,
   receiptErrors,
+  splitBlocks,
   runHermeticChecks,
   uncheckableCitations,
   verbatimRuns,
   type SourceVerdicts,
 } from "./uiux-enrichment.js";
 import { CORPUS_DIR, corpusItem, THIN_TEXT_BYTES } from "./uiux-sources.js";
+import { COUNCIL_SKILLS_DIR } from "./capability-catalog.js";
 
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 
@@ -313,5 +316,26 @@ describe("the committed pack passes every hermetic check (CI gate)", () => {
     for (const owner of ["packs/skills/aura-uiux/", "packs/skills/_council-experts/saarinen/", "packs/skills/_council-experts/friedman/", "packs/skills/_council-experts/watson/"]) {
       expect(Object.keys(doc.files).some((p) => p.startsWith(owner)), owner).toBe(true);
     }
+  });
+});
+
+// Observer WARN (checkpoint council-implement-187-31ae66f0): watson's iOS file let
+// any bold text pass at 3:1. WCAG counts bold as large text only from 14 pt (18 pt
+// regular); HIG's table says "all bold: 3:1". A real source conflict: it must be
+// ledgered, and the stricter WCAG threshold is the default.
+describe("bold-text contrast follows WCAG large-text thresholds and the HIG difference is ledgered", () => {
+  const ios = readFileSync(join(COUNCIL_SKILLS_DIR, "_council-experts/watson/references/platform-ios.md"), "utf8");
+
+  it("no rule grants 3:1 to bold text of any size", () => {
+    expect(ios).not.toMatch(/3:1 for larger or bold text/);
+    expect(ios).toMatch(/14 pt bold/);
+  });
+
+  it("the Source conflicts block records the HIG vs WCAG threshold with WCAG as the default", () => {
+    const { blocks } = splitBlocks(ios);
+    const ledger = blocks.find((b) => b.heading === "Source conflicts");
+    const entry = parseConflicts(ledger?.body.trim() ?? "", new Map([["apple-hig", "reference-only"], ["wcag-22", "reference-only"]])).entries.find((e) => /bold/i.test(e.claim));
+    expect(entry?.sources.sort()).toEqual(["apple-hig", "wcag-22"]);
+    expect(entry?.default).toMatch(/14 pt/);
   });
 });
