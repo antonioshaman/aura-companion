@@ -8,13 +8,13 @@ Only runs with verified project/local settings isolation are included; 18 earlie
 
 These regex markers describe generated answers, not human-confirmed usability or a causal quality gain. Native font-scaling markers are checked in code, excluding comments and surrounding prose. React Native also scales text by default: omission of an explicit marker is not proof of inaccessible code.
 
-The Telegram reference was tightened after this cohort; these results do not validate that revision. A fresh paired Telegram run is still required. The spec's 30% human-confirmed improvement target remains unverified.
+No paired Telegram N>=10 cohort records the current skill revision. The historical cohort does not validate the tightened reference. The spec's 30% human-confirmed improvement target remains unverified.
 
-| Fixture | Arm | Pass rate | Skill loaded | Marker hits (`!x` = anti-marker) |
-|---|---|---|---|---|
-| native-settings | with | 1/10 | 10/10 | safe-area 10/10, dynamic-type 1/10, touch-target-44-48 10/10, native-confirm 10/10, !browser-confirm 0/10, !web-hover 0/10, !font-scaling-disabled 2/10 |
-| native-settings | without | 0/10 | 0/10 | safe-area 10/10, dynamic-type 0/10, touch-target-44-48 10/10, native-confirm 9/10, !browser-confirm 0/10, !web-hover 0/10, !font-scaling-disabled 0/10 |
-| tma-checkout | with | 6/10 | 10/10 | safe-area 10/10, back-button 10/10, main-button 10/10, theme-params 10/10, touch-target-44-48 10/10, !browser-confirm 4/10, !bare-100vh 0/10 |
-| tma-checkout | without | 0/10 | 0/10 | safe-area 6/10, back-button 5/10, main-button 3/10, theme-params 10/10, touch-target-44-48 10/10, !browser-confirm 0/10, !bare-100vh 10/10 |
-| web-checkout | with | 10/10 | 0/10 | !telegram-api-leak 0/10, !native-api-leak 0/10 |
-| web-checkout | without | 10/10 | 0/10 | !telegram-api-leak 0/10, !native-api-leak 0/10 |
+| Cohort (time / model / skill SHA) | Fixture | Arm | Pass rate | Skill loaded | Marker hits (`!x` = anti-marker) |
+|---|---|---|---|---|---|
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | native-settings | with | 1/10 | 10/10 | safe-area 10/10, dynamic-type 1/10, touch-target-44-48 10/10, native-confirm 10/10, !browser-confirm 0/10, !web-hover 0/10, !font-scaling-disabled 2/10 |
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | native-settings | without | 0/10 | 0/10 | safe-area 10/10, dynamic-type 0/10, touch-target-44-48 10/10, native-confirm 9/10, !browser-confirm 0/10, !web-hover 0/10, !font-scaling-disabled 0/10 |
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | tma-checkout | with | 6/10 | 10/10 | safe-area 10/10, back-button 10/10, main-button 10/10, theme-params 10/10, touch-target-44-48 10/10, !browser-confirm 4/10, !bare-100vh 0/10 |
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | tma-checkout | without | 0/10 | 0/10 | safe-area 6/10, back-button 5/10, main-button 3/10, theme-params 10/10, touch-target-44-48 10/10, !browser-confirm 0/10, !bare-100vh 10/10 |
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | web-checkout | with | 10/10 | 0/10 | !telegram-api-leak 0/10, !native-api-leak 0/10 |
+| 2026-10-28T17:26:35Z / sonnet / legacy-unpinned | web-checkout | without | 10/10 | 0/10 | !telegram-api-leak 0/10, !native-api-leak 0/10 |

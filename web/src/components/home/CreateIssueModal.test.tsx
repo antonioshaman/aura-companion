@@ -97,18 +97,26 @@ describe("CreateIssueModal", () => {
     expect(screen.getByText("Create Issue")).toBeInTheDocument();
   });
 
+  it("contains focus, closes with Escape and returns focus to its opener", () => {
+    const opener = document.createElement("button"); document.body.append(opener); opener.focus();
+    const onClose = vi.fn(); const { unmount } = render(<CreateIssueModal onCreated={() => {}} onClose={onClose} />);
+    const dialog = screen.getByRole("dialog"); expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" }); expect(onClose).toHaveBeenCalledOnce();
+    unmount(); expect(document.activeElement).toBe(opener); opener.remove();
+  });
+
   it("passes axe accessibility checks", async () => {
     // Validates the modal meets WCAG accessibility standards.
     const onCreated = vi.fn();
     const onClose = vi.fn();
-    const { container } = render(<CreateIssueModal onCreated={onCreated} onClose={onClose} />);
+    render(<CreateIssueModal onCreated={onCreated} onClose={onClose} />);
 
     await waitFor(() => {
       expect(screen.getByLabelText("Title *")).toBeInTheDocument();
     });
 
     const { axe } = await import("vitest-axe");
-    const results = await axe(container);
+    const results = await axe(screen.getByRole("dialog", { name: "Create Linear issue" }));
     expect(results).toHaveNoViolations();
   });
 

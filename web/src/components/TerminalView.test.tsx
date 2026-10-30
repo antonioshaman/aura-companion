@@ -25,7 +25,7 @@ vi.mock("@xterm/xterm", () => ({
     lines: string[] = [];
     input?: (d: string) => void;
     disposed = false;
-    constructor() { h.xterms.push(this); }
+    constructor(options: Record<string, unknown>) { this.options = options; h.xterms.push(this); }
     loadAddon() {}
     open() {}
     write(d: string) { this.written.push(d); }
@@ -74,6 +74,17 @@ describe("TerminalView", () => {
     unmount();
     finish({ terminalId: "late-pty" });
     await waitFor(() => expect(api.killTerminal).toHaveBeenCalledWith("late-pty"));
+  });
+
+  it("names the dialog and shell, enables screen-reader mode and preserves shell Escape", async () => {
+    const onClose = vi.fn();
+    const { unmount } = render(<TerminalView cwd="/repo" title="Review shell" onClose={onClose} />);
+    expect(screen.getByRole("dialog", { name: "Review shell" })).toBeTruthy();
+    const region = screen.getByRole("region", { name: "Terminal: Review shell" });
+    await waitFor(() => expect(h.xterms.at(-1)?.options.screenReaderMode).toBe(true));
+    fireEvent.keyDown(region, { key: "Escape" }); expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Close terminal" }), { key: "Escape" }); expect(onClose).toHaveBeenCalledOnce();
+    unmount();
   });
 
   it("renders the header with the title", () => {

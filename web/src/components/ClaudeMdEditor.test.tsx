@@ -607,3 +607,13 @@ describe("ClaudeMdEditor accessible names", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+
+describe("editor keyboard semantics", () => {
+  it("is a named dialog and routes Escape through the existing close policy", () => {
+    const close = vi.fn(); const { unmount } = render(<ClaudeMdEditor cwd="/repo" open onClose={close} />);
+    expect(screen.getByRole("dialog", { name: "Project instructions" })).toHaveAttribute("aria-modal", "true");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" }); expect(close).toHaveBeenCalledOnce();
+    unmount();
+  });
+});

@@ -43,6 +43,10 @@ export function grade(output: string, f: Pick<Fixture, "markers" | "antiMarkers"
 export interface Transcript {
   fixture: string;
   settingsIsolation?: "project-local";
+  /** SHA-256 of the exact skill/reference content used by this experiment. */
+  skillRevision?: string;
+  /** Actual provider model from the CLI protocol, rather than a mutable alias. */
+  resolvedModel?: string;
   arm: "with" | "without";
   model: string;
   run: number;

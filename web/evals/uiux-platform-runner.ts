@@ -13,6 +13,7 @@
 // uiux-platform/transcripts/ with its grade, so CI can replay the verdicts, and
 // REPORT.md is rewritten with the pass rate per fixture × arm.
 
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +30,14 @@ function arg(name: string, fallback: string): string {
   return i >= 0 ? (process.argv[i + 1] ?? fallback) : fallback;
 }
 
+export function skillRevision(directory = SKILL_DIR): string {
+  const hash = createHash("sha256");
+  for (const name of readdirSync(directory, { recursive: true, encoding: "utf8" }).map(String).filter((name) => name.endsWith(".md")).sort()) {
+    hash.update(name).update("\0").update(readFileSync(join(directory, name))).update("\0");
+  }
+  return hash.digest("hex");
+}
+
 /** A throwaway plugin dir with the same layout as Aura's exposure: .claude-plugin/plugin.json + skills/<name>. */
 function makePlugin(): string {
   const dir = mkdtempSync(join(tmpdir(), "uiux-eval-plugin-"));
@@ -40,7 +49,7 @@ function makePlugin(): string {
 }
 
 /** One `claude -p` run; returns the final answer and the tool calls it made. */
-function runOnce(f: Fixture, arm: "with" | "without", model: string, plugin: string): Promise<{ output: string; tools: string[] }> {
+function runOnce(f: Fixture, arm: "with" | "without", model: string, plugin: string): Promise<{ output: string; tools: string[]; resolvedModel?: string }> {
   const cwd = mkdtempSync(join(tmpdir(), "uiux-eval-cwd-"));
   const args = ["-p", f.prompt, "--output-format", "stream-json", "--verbose", "--model", model, "--max-turns", "10", "--allowedTools", "Skill,Read,Glob,Grep",
     // Skip the operator's user settings: their Stop hooks (self-reflect, guards) fire in a
@@ -60,30 +69,49 @@ function runOnce(f: Fixture, arm: "with" | "without", model: string, plugin: str
     child.on("close", (code) => {
       clearTimeout(timer);
       rmSync(cwd, { recursive: true, force: true });
-      const tools: string[] = [];
-      let output = "";
-      for (const line of out.split("\n")) {
-        if (!line.trim()) continue;
-        let ev: { type?: string; result?: string; message?: { content?: { type: string; name?: string; input?: Record<string, unknown> }[] } };
-        try {
-          ev = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (ev.type === "assistant") {
-          for (const c of ev.message?.content ?? []) if (c.type === "tool_use") tools.push(`${c.name}:${String(c.input?.skill ?? c.input?.file_path ?? c.input?.pattern ?? "")}`);
-        }
-        if (ev.type === "result" && typeof ev.result === "string") output = ev.result;
-      }
-      if (!output) fail(new Error(`${f.id}/${arm}: no result (exit ${code}) ${err.slice(0, 300)}`));
-      else done({ output, tools });
+      const result = parseEvalOutput(out);
+      if (result.error) fail(new Error(`${f.id}/${arm}: ${result.error} (exit ${code}) ${err.slice(0, 300)}`));
+      else done(result);
+
     });
   });
 }
 
+/** Provider errors are failed runs, never model answers eligible for grading. */
+export function parseEvalOutput(stdout: string): { output: string; tools: string[]; error?: string; resolvedModel?: string } {
+  const tools: string[] = [];
+  let output = "";
+  let error: string | undefined;
+  let resolvedModel: string | undefined;
+  for (const line of stdout.split("\n")) {
+    let event: { type?: string; model?: string; is_error?: boolean; result?: string; message?: { model?: string; content?: { type: string; name?: string; input?: Record<string, unknown> }[] } };
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event.type === "system" && event.model) resolvedModel = event.model;
+    if (event.type === "assistant") {
+      resolvedModel = event.message?.model ?? resolvedModel;
+      for (const c of event.message?.content ?? []) if (c.type === "tool_use") tools.push(`${c.name}:${String(c.input?.skill ?? c.input?.file_path ?? c.input?.pattern ?? "")}`);
+    }
+    if (event.type === "result") {
+      if (event.is_error || /^API Error:/.test(event.result ?? "")) error = event.result || "provider rejected the run";
+      else if (typeof event.result === "string") output = event.result;
+    }
+  }
+  return { output, tools, ...(resolvedModel ? { resolvedModel } : {}), ...(error || !output ? { error: error || "no result" } : {}) };
+}
+
 export function renderReport(all: Transcript[]): string {
   const ts = isolatedTranscripts(all);
-  const rows = summarise(ts);
+  // Never pool experiments run against different revisions or on different dates.
+  const cohorts = new Map<string, Transcript[]>();
+  for (const t of ts) {
+    const key = `${t.startedAt} / ${t.resolvedModel ?? t.model} / ${t.skillRevision ?? "legacy-unpinned"}`;
+    cohorts.set(key, [...(cohorts.get(key) ?? []), t]);
+  }
+  const rows = [...cohorts].flatMap(([cohort, records]) => summarise(records).map((row) => ({ ...row, cohort })));
+  const currentRevision = skillRevision();
+  const hasFreshTelegramPair = [...cohorts.values()].some((records) =>
+    ["with", "without"].every((arm) => records.filter((t) => t.fixture === "tma-checkout" && t.arm === arm && t.skillRevision === currentRevision).length >= 10),
+  );
   const lines = [
     "# AC3.3 behavioural eval — report",
     "",
@@ -95,11 +123,13 @@ export function renderReport(all: Transcript[]): string {
     "",
     "These regex markers describe generated answers, not human-confirmed usability or a causal quality gain. Native font-scaling markers are checked in code, excluding comments and surrounding prose. React Native also scales text by default: omission of an explicit marker is not proof of inaccessible code.",
     "",
-    "The Telegram reference was tightened after this cohort; these results do not validate that revision. A fresh paired Telegram run is still required. The spec's 30% human-confirmed improvement target remains unverified.",
+    hasFreshTelegramPair
+      ? `A paired Telegram cohort (N>=10 per arm) records the current skill revision ${currentRevision}. This is a marker evaluation, not evidence of the spec's 30% human-confirmed usability target.`
+      : "No paired Telegram N>=10 cohort records the current skill revision. The historical cohort does not validate the tightened reference. The spec's 30% human-confirmed improvement target remains unverified.",
     "",
-    "| Fixture | Arm | Pass rate | Skill loaded | Marker hits (`!x` = anti-marker) |",
-    "|---|---|---|---|---|",
-    ...rows.map((r) => `| ${r.fixture} | ${r.arm} | ${r.passed}/${r.runs} | ${r.skillLoaded}/${r.runs} | ${Object.entries(r.markerHits).map(([k, v]) => `${k} ${v}/${r.runs}`).join(", ")} |`),
+    "| Cohort (time / model / skill SHA) | Fixture | Arm | Pass rate | Skill loaded | Marker hits (`!x` = anti-marker) |",
+    "|---|---|---|---|---|---|",
+    ...rows.map((r) => `| ${r.cohort} | ${r.fixture} | ${r.arm} | ${r.passed}/${r.runs} | ${r.skillLoaded}/${r.runs} | ${Object.entries(r.markerHits).map(([k, v]) => `${k} ${v}/${r.runs}`).join(", ")} |`),
     "",
   ];
   return lines.join("\n");
@@ -138,6 +168,7 @@ async function main(): Promise<number> {
   const arms = arg("--arm", "") ? [arg("--arm", "") as "with" | "without"] : (["with", "without"] as const);
   const fixtures = loadFixtures().filter((f) => !only || f.id === only);
   const plugin = makePlugin();
+  const revision = skillRevision();
   const queue = fixtures.flatMap((f) => arms.flatMap((arm) => Array.from({ length: runs }, (_, i) => ({ f, arm, i }))));
   mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -146,8 +177,8 @@ async function main(): Promise<number> {
     for (let job = queue.shift(); job; job = queue.shift()) {
       const { f, arm, i } = job;
       try {
-        const { output, tools } = await runOnce(f, arm, model, plugin);
-        const t: Transcript = { settingsIsolation: "project-local", fixture: f.id, arm, model, run: i, startedAt: stamp, tools, output, grade: grade(output, f) };
+        const { output, tools, resolvedModel } = await runOnce(f, arm, model, plugin);
+        const t: Transcript = { settingsIsolation: "project-local", skillRevision: revision, ...(resolvedModel ? { resolvedModel } : {}), fixture: f.id, arm, model, run: i, startedAt: stamp, tools, output, grade: grade(output, f) };
         writeFileSync(join(TRANSCRIPTS_DIR, `${stamp.replace(/[:]/g, "")}-${f.id}-${arm}-${i}.json`), `${JSON.stringify(t, null, 2)}\n`);
         console.log(`${f.id} ${arm} #${i}: ${t.grade.pass ? "PASS" : "fail"} tools=[${tools.join(" ")}]`);
       } catch (e) {

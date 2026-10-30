@@ -1257,10 +1257,14 @@ describe("Composer cache-rewrite hint", () => {
 // These controls had no accessible name or no keyboard path; the strict uiux
 // gate listed them as true problems. Each test pins the fix by role + name.
 describe("Composer focus indicator", () => {
-  it("the input container shows focus at every width (the textarea removes its own outline)", () => {
+  it("the keyboard-focused textarea has its own contrast-checked ring at every width", () => {
     const { container } = render(<Composer sessionId="s1" />);
     const textarea = container.querySelector("textarea")!;
-    expect(textarea.className).toContain("outline-none");
+    textarea.focus();
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea.className).not.toContain("outline-none");
+    expect(textarea.className).toContain("focus-visible:outline-cc-focus");
+    expect(textarea.className).toContain("focus-visible:outline-2");
     const box = textarea.closest("div.relative") as HTMLElement;
     expect(box.className).toMatch(/(^|\s)focus-within:border-cc-primary\/70(\s|$)/);
     expect(box.className).not.toContain("sm:focus-within:border-cc-primary/25");

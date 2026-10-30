@@ -1,3 +1,4 @@
+import { useModalDialog } from "../use-modal-dialog.js";
 import { useEffect, useRef, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -38,6 +39,7 @@ export function TerminalView({
   visible = true,
   hideHeader = false,
 }: TerminalViewProps) {
+  const dialogRef = useModalDialog<HTMLDivElement>(!embedded && visible, onClose);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -61,6 +63,7 @@ export function TerminalView({
 
       const xterm = new Terminal({
         cursorBlink: true,
+        screenReaderMode: true,
         fontSize: FONT_SIZE,
         fontFamily: FONT_FAMILY,
         theme: getTerminalTheme(useStore.getState().darkMode),
@@ -220,7 +223,7 @@ export function TerminalView({
       )}
 
       {/* Terminal container */}
-      <div ref={terminalRef} className={`flex-1 min-h-0 ${embedded ? "" : "p-1"}`} />
+      <div ref={terminalRef} data-terminal-input role="region" aria-label={title ? `Terminal: ${title}` : "Terminal output and input"} className={`flex-1 min-h-0 ${embedded ? "" : "p-1"}`} />
     </div>
   );
 
@@ -238,7 +241,7 @@ export function TerminalView({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title || "Terminal"} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       {terminalFrame}
       {accessoryBar}
     </div>

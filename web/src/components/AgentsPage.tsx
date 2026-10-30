@@ -1,3 +1,4 @@
+import { useModalDialog } from "../use-modal-dialog.js";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type AgentInfo, type AgentExport } from "../api.js";
 import { useStore } from "../store.js";
@@ -43,6 +44,7 @@ export function AgentsPage({ route }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [runInputAgent, setRunInputAgent] = useState<AgentInfo | null>(null);
+  const runDialogRef = useModalDialog<HTMLDivElement>(!!runInputAgent, () => setRunInputAgent(null));
   const [runInput, setRunInput] = useState("");
   const [copiedWebhook, setCopiedWebhook] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<AgentFilter>("all");
@@ -622,6 +624,7 @@ export function AgentsPage({ route }: Props) {
           onClick={() => setRunInputAgent(null)}
         >
           <div
+            ref={runDialogRef} role="dialog" aria-modal="true" aria-label={`Run ${runInputAgent.name}`} tabIndex={-1}
             className="bg-cc-card rounded-[14px] shadow-2xl p-6 w-full max-w-lg border border-cc-border"
             onClick={(e) => e.stopPropagation()}
           >
@@ -630,6 +633,7 @@ export function AgentsPage({ route }: Props) {
             <textarea
               value={runInput}
               onChange={(e) => setRunInput(e.target.value)}
+              aria-label="Agent input"
               placeholder="Enter input for the agent..."
               className="w-full px-3 py-2 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-sm resize-none h-24 focus:outline-none focus:ring-1 focus:ring-cc-primary"
               autoFocus
