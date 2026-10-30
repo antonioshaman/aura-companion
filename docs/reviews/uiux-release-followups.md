@@ -55,3 +55,26 @@ release gate.
 - Python checks: 103 passed, 30 subtests passed; strict UI/UX scan accepts only
   the 9 existing archived-landing rulings and reports no new findings.
 - Rendered scan rerun with onboarding completed: all 8 route/theme states pass.
+
+## Chat follow-up: ready for human acceptance
+
+The F8 engineering work is implemented: a shared modal focus policy (including
+React autofocus and nested dialogs), bounded incremental chat announcements,
+permission announcements with explicit Alt+Shift+P review, named screen-reader
+terminals, preserved shell Escape, visible keyboard actions and a contrast-checked
+Composer focus ring. The Playground now has a deterministic keyboard/streaming
+review fixture. Static permission galleries remain silent on mount.
+
+Validation: 11,310 Vitest tests passed (6 skipped), all changed source files exceed
+80% line coverage, and the three new UI/hook files have 100% line coverage.
+Rendered axe passes 8 states (4 routes × 2 themes). Real browser keyboard checks
+confirmed focus containment, focus restoration and draft preservation. Real
+screen-reader acceptance is still a human action; no automated pass claims it.
+
+The eval runner now rejects provider errors, records skill SHA/model snapshot,
+and separates experimental cohorts. The attempted Telegram pair on 2026-10-30
+was blocked by Anthropic account verification. Both API errors were quarantined
+outside the transcript corpus. No N=10 or +30% result is claimed.
+
+Owner decisions and the reproducible acceptance steps are in
+[the concise review sheet](uiux-owner-review.md).

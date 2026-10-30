@@ -1,4 +1,4 @@
-import { useState, type ComponentProps } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useId, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "../store.js";
@@ -26,11 +26,40 @@ function suggestionLabel(s: PermissionUpdate): string {
 export function PermissionBanner({
   permission,
   sessionId,
+  announce = true,
 }: {
   permission: PermissionRequest;
   sessionId: string;
+  /** Static galleries must not announce every example on page load. */
+  announce?: boolean;
 }) {
   const [loading, setLoading] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
+  const bannerRef = useRef<HTMLDivElement>(null);
+  const labelId = useId();
+  useLayoutEffect(() => {
+    const banner = bannerRef.current;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      if (banner?.contains(document.activeElement) && previous?.isConnected) previous.focus();
+    };
+  }, [permission.request_id]);
+  useEffect(() => {
+    if (!announce) { setAnnouncement(""); return; }
+    const banner = bannerRef.current;
+    setAnnouncement(`${permission.tool_name === "AskUserQuestion" ? "Question" : "Permission required"}: ${permission.display_name || permission.tool_name}. Press Alt+Shift+P to review.`);
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.altKey && event.shiftKey && event.code === "KeyP" && !event.repeat &&
+          banner === document.querySelector("[data-permission-review]")) {
+        event.preventDefault();
+        banner?.focus();
+      }
+    };
+    document.addEventListener("keydown", shortcut);
+    return () => {
+      document.removeEventListener("keydown", shortcut);
+    };
+  }, [announce, permission.request_id, permission.tool_name, permission.display_name]);
   const removePermission = useStore((s) => s.removePermission);
 
   function handleAllow(updatedInput?: Record<string, unknown>, updatedPermissions?: PermissionUpdate[]) {
@@ -60,7 +89,8 @@ export function PermissionBanner({
   const suggestions = permission.permission_suggestions;
 
   return (
-    <div className="px-2 sm:px-4 py-3 border-b border-cc-border animate-[fadeSlideIn_0.2s_ease-out]">
+    <div ref={bannerRef} data-permission-review={announce ? "" : undefined} role="region" aria-labelledby={labelId} aria-keyshortcuts="Alt+Shift+P" tabIndex={-1} className="px-2 sm:px-4 py-3 border-b border-cc-border animate-[fadeSlideIn_0.2s_ease-out]">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</p>
       <div className="max-w-3xl mx-auto">
         <div className="flex items-start gap-2 sm:gap-3">
           {/* Icon */}
@@ -83,7 +113,7 @@ export function PermissionBanner({
           {/* Content */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className={`text-xs font-semibold ${isAskUser ? "text-cc-primary" : "text-cc-warning"}`}>
+              <span id={labelId} className={`text-xs font-semibold ${isAskUser ? "text-cc-primary" : "text-cc-warning"}`}>
                 {isAskUser ? "Question" : "Permission Request"}
               </span>
               {!isAskUser && (

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useMemo, useState, useCallback } from "react";
+import { useChatAnnouncement } from "../use-chat-announcement.js";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { MessageBubble } from "./MessageBubble.js";
@@ -633,6 +634,7 @@ function SubagentContainer({ group }: { group: SubagentGroup }) {
 
 export function MessageFeed({ sessionId }: { sessionId: string }) {
   const messages = useStore((s) => s.messages.get(sessionId) ?? EMPTY_MESSAGES);
+  const announcement = useChatAnnouncement(sessionId, messages);
   const sdkSession = useStore((s) =>
     (s.sdkSessions || EMPTY_SDK_SESSIONS).find(
       (session) => session.sessionId === sessionId,
@@ -930,6 +932,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex-1 min-h-0 relative overflow-hidden">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</p>
       {/* Top fade — softens the scroll edge under the top bar */}
       <div className="pointer-events-none absolute top-0 inset-x-0 h-6 bg-gradient-to-b from-cc-bg to-transparent z-10" />
       <div

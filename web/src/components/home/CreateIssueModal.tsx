@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useModalDialog } from "../../use-modal-dialog.js";
 import { createPortal } from "react-dom";
 import { api, type LinearIssue, type LinearTeamStates } from "../../api.js";
 
@@ -14,6 +15,7 @@ interface CreateIssueModalProps {
 }
 
 export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, onClose }: CreateIssueModalProps) {
+  const dialogRef = useModalDialog<HTMLDivElement>(true, onClose);
   // Form fields
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -92,6 +94,7 @@ export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, on
       onClick={onClose}
     >
       <div
+        ref={dialogRef} role="dialog" aria-modal="true" aria-label="Create Linear issue" tabIndex={-1}
         className="mx-4 w-full max-w-md bg-cc-card border border-cc-border rounded-xl shadow-2xl p-5"
         onClick={(e) => e.stopPropagation()}
       >

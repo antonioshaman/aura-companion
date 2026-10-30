@@ -1,3 +1,4 @@
+import { ChatAccessibilityDemo } from "./ChatAccessibilityDemo.js";
 import { useState, useEffect, useMemo } from "react";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { MessageBubble } from "./MessageBubble.js";
@@ -1044,44 +1045,54 @@ export function Playground() {
 
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-12">
         {/* ─── Permission Banners ──────────────────────────────── */}
+        <Section title="Chat accessibility review" description="Keyboard, draft preservation and sampled screen-reader announcements. No live model calls."><ChatAccessibilityDemo /></Section>
         <Section
           title="Permission Banners"
           description="Tool approval requests shown above the composer"
         >
           <div className="border border-cc-border rounded-xl overflow-hidden bg-cc-card divide-y divide-cc-border">
             <PermissionBanner
+              announce={false}
               permission={PERM_BASH}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_EDIT}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_WRITE}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_READ}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_GLOB}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_GREP}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_GENERIC}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_DYNAMIC}
               sessionId={MOCK_SESSION_ID}
             />
             <PermissionBanner
+              announce={false}
               permission={PERM_ENRICHED}
               sessionId={MOCK_SESSION_ID}
             />
@@ -1108,6 +1119,7 @@ export function Playground() {
         >
           <div className="border border-cc-border rounded-xl overflow-hidden bg-cc-card">
             <PermissionBanner
+              announce={false}
               permission={PERM_EXIT_PLAN}
               sessionId={MOCK_SESSION_ID}
             />
@@ -1122,12 +1134,14 @@ export function Playground() {
           <div className="space-y-4">
             <Card label="Single question">
               <PermissionBanner
+              announce={false}
                 permission={PERM_ASK_SINGLE}
                 sessionId={MOCK_SESSION_ID}
               />
             </Card>
             <Card label="Multi-question">
               <PermissionBanner
+              announce={false}
                 permission={PERM_ASK_MULTI}
                 sessionId={MOCK_SESSION_ID}
               />
@@ -1143,18 +1157,21 @@ export function Playground() {
           <div className="space-y-4">
             <Card label="Permission with AI recommendation (uncertain)">
               <PermissionBanner
+              announce={false}
                 permission={PERM_AI_UNCERTAIN}
                 sessionId={MOCK_SESSION_ID}
               />
             </Card>
             <Card label="Permission with AI recommendation (safe)">
               <PermissionBanner
+              announce={false}
                 permission={PERM_AI_SAFE}
                 sessionId={MOCK_SESSION_ID}
               />
             </Card>
             <Card label="Permission with AI recommendation (dangerous)">
               <PermissionBanner
+              announce={false}
                 permission={PERM_AI_DANGEROUS}
                 sessionId={MOCK_SESSION_ID}
               />

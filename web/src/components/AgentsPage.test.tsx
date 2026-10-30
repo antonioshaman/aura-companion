@@ -1094,6 +1094,19 @@ describe("AgentsPage", () => {
     });
   });
 
+  it("run input modal has an accessible keyboard path and closes without running on Escape", async () => {
+    // Agent input must remain a labelled dialog instead of an unnamed overlay.
+    mockApi.listAgents.mockResolvedValue([makeAgent({ name: "Keyboard Runner", prompt: "{{input}}" })]);
+    render(<AgentsPage route={defaultRoute} />); await screen.findByText("Keyboard Runner");
+    const opener = screen.getByText("Run"); opener.focus(); fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Run Keyboard Runner" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    const { axe } = await import("vitest-axe"); expect(await axe(dialog)).toHaveNoViolations();
+    fireEvent.keyDown(screen.getByLabelText("Agent input"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull(); expect(document.activeElement).toBe(opener);
+    expect(mockApi.runAgent).not.toHaveBeenCalled();
+  });
+
   it("run input modal: clicking Cancel closes the modal without running", async () => {
     // Clicking Cancel in the run input modal should close it without
     // calling runAgent.

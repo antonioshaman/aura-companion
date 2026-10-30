@@ -736,3 +736,24 @@ describe("ExitPlanModeDisplay", () => {
     expect(screen.getByText("Plan approval requested")).toBeTruthy();
   });
 });
+
+
+describe("permission accessibility policy", () => {
+  it("keeps static gallery examples silent", () => {
+    const { container } = render(<PermissionBanner permission={makePermission()} sessionId="demo" announce={false} />);
+    expect(screen.getByRole("status").textContent).toBe("");
+    expect(container.querySelector("[data-permission-review]")).toBeNull();
+  });
+
+  it("announces a request without stealing draft focus and supports its review shortcut", () => {
+    // A request can arrive while the user types; reviewing it is deliberate.
+    const draft = document.createElement("textarea"); document.body.append(draft); draft.value = "unfinished draft"; draft.focus();
+    const { unmount } = render(<PermissionBanner permission={makePermission()} sessionId="s1" />);
+    expect(document.activeElement).toBe(draft);
+    expect(screen.getByRole("status").textContent).toContain("Permission required: Bash");
+    fireEvent.keyDown(document, { code: "KeyP", altKey: true, shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "Permission Request" }));
+    expect(draft.value).toBe("unfinished draft");
+    unmount(); expect(document.activeElement).toBe(draft); draft.remove();
+  });
+});

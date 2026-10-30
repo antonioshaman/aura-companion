@@ -456,7 +456,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                 <button
                   onClick={() => removeImage(i)}
                   aria-label="Remove image"
-                  className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer"
+                  className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity cursor-pointer"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
                     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
@@ -763,7 +763,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
 
           {/* Textarea row */}
           <div className="px-3 sm:px-3 pt-1 sm:pt-2.5">
-            <textarea // aura-check: ignore[uiux.outline-none-without-focus-style] (focus shows on the input container: focus-within border)
+            <textarea
               ref={textareaRef}
               value={text}
               onChange={handleInput}
@@ -781,7 +781,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
               aria-disabled={cliFailed ? true : undefined}
               aria-describedby={cliFailed ? `cli-failed-banner-${sessionId}` : undefined}
               rows={1}
-              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
+              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none rounded-sm focus-visible:outline-2 focus-visible:outline-cc-focus focus-visible:outline-offset-2 text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
               style={{ minHeight: "36px", maxHeight: "200px" }}
             />
           </div>

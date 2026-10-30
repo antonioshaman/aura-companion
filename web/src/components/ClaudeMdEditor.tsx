@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useModalDialog } from "../use-modal-dialog.js";
 import { api } from "../api.js";
 
 interface ClaudeMdFile {
@@ -95,6 +96,8 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
     onClose();
   };
 
+  const dialogRef = useModalDialog<HTMLDivElement>(open, handleClose);
+
   if (!open) return null;
 
   const relPath = (p: string) =>
@@ -115,7 +118,7 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
       />
 
       {/* Modal */}
-      <div className="fixed inset-4 sm:inset-8 md:inset-x-[10%] md:inset-y-[5%] z-50 flex flex-col bg-cc-bg border border-cc-border rounded-2xl shadow-2xl overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Project instructions" tabIndex={-1} className="fixed inset-4 sm:inset-8 md:inset-x-[10%] md:inset-y-[5%] z-50 flex flex-col bg-cc-bg border border-cc-border rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-4 sm:px-5 py-3 bg-cc-card border-b border-cc-border">
           <div className="flex items-center gap-2.5">
