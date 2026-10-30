@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { grade, loadFixtures, summarise, TRANSCRIPTS_DIR, type Transcript } from "./grade.js";
+import { grade, loadFixtures, summarise, isolatedTranscripts, TRANSCRIPTS_DIR, type Transcript } from "./grade.js";
 
 const fx = Object.fromEntries(loadFixtures().map((f) => [f.id, f]));
 
@@ -127,5 +127,20 @@ describe("replay — every stored live transcript re-grades to its stored verdic
   it("summarise counts passes per fixture and arm", () => {
     const s = summarise(ts);
     expect(s.reduce((n, r) => n + r.runs, 0)).toBe(ts.length);
+  });
+});
+
+
+describe("review regressions: evidence and cohort isolation", () => {
+  it("does not count Dynamic Type prose around code without scaling evidence", () => {
+    const answer = "Supports Dynamic Type.\n```tsx\n" + NATIVE_GOOD.replace("allowFontScaling maxFontSizeMultiplier={2}", "") + "\n```";
+    expect(grade(answer, fx["native-settings"]).markers["dynamic-type"]).toBe(false);
+  });
+  it("excludes unisolated probes and unknown cohorts", () => {
+    const base = { fixture: "web-checkout", arm: "with", model: "sonnet", run: 0, tools: [], output: "", grade: grade("", fx["web-checkout"]) } as const;
+    const old = { ...base, tools: [], startedAt: "2026-10-28T11:28:35Z" };
+    const known = { ...old, startedAt: "2026-10-28T17:26:35Z" };
+    const fresh = { ...old, startedAt: "2026-10-30T00:00:00Z", settingsIsolation: "project-local" as const };
+    expect(isolatedTranscripts([old, known, fresh])).toEqual([known, fresh]);
   });
 });

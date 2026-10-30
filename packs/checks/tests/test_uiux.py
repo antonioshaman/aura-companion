@@ -243,3 +243,23 @@ class FixtureDirsTest(RepoTestCase):
         self.repo.write("web/scripts/__fixtures__/a11y-scan/planted.html",
                         '<button id="close"><svg width="12" height="12" aria-hidden="true"></svg></button>\n')
         self.assertEqual(hits(self.repo), [])
+
+
+class ReviewRegressionTest(RepoTestCase):
+    # Attribute expressions and JSX comments are not accessible button labels.
+    def test_icon_attributes_and_comment_only_buttons(self):
+        self.repo.write("web/src/A.tsx", '<button><XIcon size={12}/></button>\n<button><svg className={cls}/></button>\n<button>{/* close */}</button>\n')
+        self.assertEqual(len(hits(self.repo, "uiux.icon-button-no-name")), 3)
+
+    def test_generic_adjacent_comments_do_not_justify_axe_exclusions(self):
+        self.repo.write("web/src/A.test.tsx", 'const result = axe(container, {\n// Arrange\nrules: { "button-name": { enabled: false } } // TODO\n});\n')
+        self.assertEqual(len(hits(self.repo, "uiux.axe-rule-disabled-unjustified")), 1)
+
+    def test_partial_keyboard_support_still_fires(self):
+        self.repo.write("web/src/A.tsx", '<div role="button" onClick={open}/>\n<div tabIndex={0} onClick={open}/>\n<div role="button" tabIndex={0} onClick={open}/>\n')
+        self.assertEqual(len(hits(self.repo, "uiux.clickable-non-interactive")), 3)
+
+    def test_managed_options_and_keyboard_table_rows_are_quiet(self):
+        # APG listboxes keep focus on the container, not each option.
+        self.repo.write("web/src/A.tsx", '<div role="listbox" tabIndex={0} aria-activedescendant={active} onKeyDown={keys}><div role="option" onClick={pick}>Model</div></div>\n<tr tabIndex={0} onClick={pick} onKeyDown={keys}><td>Run</td></tr>\n')
+        self.assertEqual(hits(self.repo, "uiux.clickable-non-interactive"), [])

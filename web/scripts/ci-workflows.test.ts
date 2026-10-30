@@ -307,11 +307,14 @@ describe("rendered a11y scan of the Playground runs in CI", () => {
     expect(serve!.env?.COMPANION_TELEMETRY).toBe("0");
     expect(serve!.env?.HOME).toBeDefined();
     expect(serve!.env?.HOST).toBe("127.0.0.1");
+    expect(serve!.run).toContain('"onboardingCompleted":true');
   });
 
   it("scans #/playground and never masks the exit code", () => {
     const scan = job.steps.find((s) => s.run?.includes("scripts/a11y-scan.ts"));
-    expect(scan?.run).toContain("#/playground");
+    for (const route of ["3999/\"", "#/agents", "#/runs", "#/playground"]) {
+      expect(scan?.run).toContain(route);
+    }
     expect(scan?.run).not.toMatch(/\|\|\s*(true|exit 0)/);
     expect(scan?.["continue-on-error"]).not.toBe(true);
     expect(job["continue-on-error"]).not.toBe(true);

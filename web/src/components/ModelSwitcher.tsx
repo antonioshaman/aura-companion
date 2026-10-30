@@ -417,7 +417,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
           // dropped `/40` opacity from the focus-ring to satisfy WCAG 2.4.11
           // (Focus Appearance AA — 3:1 contrast). Full-opacity `cc-primary`
           // over `cc-bg` measures ≥3:1; `cc-primary/40` measured 1.5:1.
-          className="max-h-[24rem] overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-primary"
+          className="max-h-[24rem] overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-focus"
           role="listbox"
           aria-label="Select model"
           aria-activedescendant={`${idPrefix}-option-${activeIndex}`}

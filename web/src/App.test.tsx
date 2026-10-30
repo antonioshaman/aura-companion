@@ -281,6 +281,16 @@ describe("App", () => {
       expect(screen.getByTestId("home-page")).toBeInTheDocument();
     });
 
+    // Closed animated panels must leave both the Tab order and the accessibility tree.
+    it("makes the closed sidebar inert and restores it when opened", () => {
+      const { unmount } = render(<App />);
+      expect(screen.getByTestId("sidebar").parentElement).toHaveAttribute("inert");
+      unmount();
+      setStoreValues({ sidebarOpen: true });
+      render(<App />);
+      expect(screen.getByTestId("sidebar").parentElement).not.toHaveAttribute("inert");
+    });
+
     it("renders ChatView when a session is active", () => {
       (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "s1" });
       setStoreValues({ currentSessionId: "s1" });
@@ -332,6 +342,15 @@ describe("App", () => {
       render(<App />);
 
       expect(screen.getByTestId("task-panel")).toBeInTheDocument();
+      expect(screen.getByTestId("task-panel").parentElement).not.toHaveAttribute("inert");
+    });
+
+    it("makes the closed task panel inert while preserving its state", () => {
+      // The panel stays mounted for its animation but must not retain keyboard targets.
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "s1" });
+      setStoreValues({ currentSessionId: "s1", taskPanelOpen: false });
+      render(<App />);
+      expect(screen.getByTestId("task-panel").parentElement).toHaveAttribute("inert");
     });
 
     it("renders SessionLaunchOverlay during session creation", () => {

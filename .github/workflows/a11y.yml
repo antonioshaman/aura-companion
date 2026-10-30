@@ -30,7 +30,7 @@ jobs:
         working-directory: web
         run: bun run test:a11y
 
-  # Rendered axe scan of #/playground (web/scripts/a11y-scan.ts) on a throwaway
+  # Rendered axe scan of home, Agents, Runs and Playground (web/scripts/a11y-scan.ts) on a throwaway
   # production build. jsdom has no layout, so rules like scrollable-region-focusable
   # and color-contrast are only caught here. fail (exit 1) and skipped (exit 3)
   # both turn the job red: a scan that could not run never reads as a pass.
@@ -70,14 +70,18 @@ jobs:
           mkdir -p "$HOME" "$TMPDIR"
           nohup bun server/index.ts > "${{ runner.temp }}/scan-server.log" 2>&1 &
           for i in $(seq 1 60); do
-            curl -fsS -o /dev/null http://127.0.0.1:3999/ && exit 0
+            if curl -fsS -o /dev/null http://127.0.0.1:3999/; then
+              # Exercise the real routes, rather than covering them with first-run setup.
+              curl -fsS -X PUT http://127.0.0.1:3999/api/settings -H 'Content-Type: application/json' --data '{"onboardingCompleted":true}' -o /dev/null
+              exit 0
+            fi
             sleep 1
           done
           echo "::error::throwaway server did not come up"; cat "${{ runner.temp }}/scan-server.log"; exit 1
 
-      - name: Scan #/playground (light + dark, 375x812)
+      - name: Scan home, agents, runs and playground (light + dark, 375x812)
         working-directory: web
-        run: bun scripts/a11y-scan.ts --url "http://127.0.0.1:3999/#/playground" --out "${{ runner.temp }}/a11y-scan" --settle-ms 3000 --browser-args=--no-sandbox
+        run: bun scripts/a11y-scan.ts --url "http://127.0.0.1:3999/" --url "http://127.0.0.1:3999/#/agents" --url "http://127.0.0.1:3999/#/runs" --url "http://127.0.0.1:3999/#/playground" --out "${{ runner.temp }}/a11y-scan" --settle-ms 3000 --browser-args=--no-sandbox
 
       - name: Upload the scan artifact
         if: always()

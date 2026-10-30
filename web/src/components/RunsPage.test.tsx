@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import type { AgentExecution } from "../api.js";
 
@@ -64,6 +64,32 @@ beforeEach(() => {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("RunsPage", () => {
+  // Polling must refresh the open details, even for multiple runs of one session.
+  it("derives expanded details from the refreshed execution key", async () => {
+    const first = makeExecution({ sessionId: "same", startedAt: 1000 });
+    const second = makeExecution({ sessionId: "same", startedAt: 2000 });
+    mockApi.listExecutions.mockResolvedValue({ executions: [first, second], total: 2 });
+    let poll!: () => void;
+    const nativeInterval = globalThis.setInterval;
+    const interval = vi.spyOn(globalThis, "setInterval").mockImplementation(((cb: () => void, ms: number) => {
+      if (ms === 5000) { poll = cb; return 1; }
+      return nativeInterval(cb, ms);
+    }) as typeof setInterval);
+    const { container, unmount } = render(<RunsPage />);
+    await waitFor(() => expect(container.querySelectorAll("tbody tr")).toHaveLength(2));
+    const rows = container.querySelectorAll("tbody tr");
+    fireEvent.click(rows[1]);
+    expect(rows[0].querySelector("button")).toHaveAttribute("aria-expanded", "false");
+    expect(rows[1].querySelector("button")).toHaveAttribute("aria-expanded", "true");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+    mockApi.listExecutions.mockResolvedValue({ executions: [first, { ...second, error: "updated failure" }], total: 2 });
+    await act(async () => { poll(); });
+    await waitFor(() => expect(screen.getByText("updated failure")).toBeInTheDocument());
+    unmount();
+    interval.mockRestore();
+  });
+
   it("shows loading state initially", () => {
     // Never resolve the API call to keep loading state
     mockApi.listExecutions.mockReturnValue(new Promise(() => {}));

@@ -32,7 +32,9 @@ export function loadFixtures(path = FIXTURES_FILE): Fixture[] {
 const hit = (pattern: string, text: string) => new RegExp(pattern, "i").test(text);
 
 export function grade(output: string, f: Pick<Fixture, "markers" | "antiMarkers">): Grade {
-  const markers = Object.fromEntries(Object.entries(f.markers).map(([k, p]) => [k, hit(p, output)]));
+  const fenced = [...output.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1]);
+  const code = (fenced.length ? fenced.join("\n") : output).replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  const markers = Object.fromEntries(Object.entries(f.markers).map(([k, p]) => [k, hit(p, k === "dynamic-type" ? code : output)]));
   const antiMarkers = Object.fromEntries(Object.entries(f.antiMarkers).map(([k, p]) => [k, hit(p, output)]));
   const pass = Object.values(markers).every(Boolean) && !Object.values(antiMarkers).some(Boolean);
   return { markers, antiMarkers, pass };
@@ -40,6 +42,7 @@ export function grade(output: string, f: Pick<Fixture, "markers" | "antiMarkers"
 
 export interface Transcript {
   fixture: string;
+  settingsIsolation?: "project-local";
   arm: "with" | "without";
   model: string;
   run: number;
@@ -62,4 +65,11 @@ export function summarise(ts: Transcript[]): { fixture: string; arm: string; run
       for (const t of g) for (const [m, v] of Object.entries({ ...t.grade.markers, ...Object.fromEntries(Object.entries(t.grade.antiMarkers).map(([a, x]) => [`!${a}`, x])) })) markerHits[m] = (markerHits[m] ?? 0) + (v ? 1 : 0);
       return { fixture, arm, runs: g.length, passed: g.filter((t) => t.grade.pass).length, markerHits, skillLoaded: g.filter((t) => t.tools.some((x) => /aura-uiux/.test(x))).length };
     });
+}
+
+/** Historical N=10 cohort was verified against the isolated runner in #442.
+ * Older probes remain replayable, but cannot be pooled into the report.
+ */
+export function isolatedTranscripts(ts: Transcript[]): Transcript[] {
+  return ts.filter((t) => t.settingsIsolation === "project-local" || t.startedAt === "2026-10-28T17:26:35Z");
 }

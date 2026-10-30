@@ -5,6 +5,7 @@
  * then the React root inside the error boundary, then the lazy SW register.
  * App, analytics and the SW are mocked: only the wiring is under test here.
  */
+import { render as mount, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 const calls = vi.hoisted(() => [] as string[]);
@@ -34,6 +35,8 @@ describe("main.tsx", () => {
     await import("./main.js");
     expect(calls.slice(0, 3)).toEqual(["analytics", "zoom-guard", "root:root"]);
     expect(render).toHaveBeenCalledTimes(1);
+    mount(render.mock.calls[0][0]);
+    expect(screen.getByTestId("boundary").contains(screen.getByText("app"))).toBe(true);
     await vi.waitFor(() => expect(calls).toContain("sw-register"));
   });
 });

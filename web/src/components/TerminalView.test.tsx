@@ -65,14 +65,25 @@ beforeAll(() => {
 });
 
 describe("TerminalView", () => {
+  // A PTY can arrive after unmount (including StrictMode's initial cleanup).
+  it("kills a terminal whose spawn resolves after unmount", async () => {
+    let finish!: (value: { terminalId: string }) => void;
+    vi.mocked(api.spawnTerminal).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { unmount } = render(<TerminalView cwd="/repo" onClose={() => {}} embedded />);
+    await waitFor(() => expect(finish).toBeDefined());
+    unmount();
+    finish({ terminalId: "late-pty" });
+    await waitFor(() => expect(api.killTerminal).toHaveBeenCalledWith("late-pty"));
+  });
+
   it("renders the header with the title", () => {
     render(<TerminalView cwd="/repo" title="build shell" onClose={() => {}} />);
     expect(screen.getByText("build shell")).toBeInTheDocument();
   });
 
-  it("passes axe with the header and close button", async () => {
+  it.each([false, true])("passes axe with the header and close button (embedded=%s)", async (embedded) => {
     const { axe } = await import("vitest-axe");
-    const { container } = render(<TerminalView cwd="/repo" title="build shell" onClose={() => {}} embedded />);
+    const { container } = render(<TerminalView cwd="/repo" title="build shell" onClose={() => {}} embedded={embedded} />);
     expect(await axe(container)).toHaveNoViolations();
   });
 

@@ -56,7 +56,9 @@ export function RunsPage() {
   const [triggerFilter, setTriggerFilter] = useState<TriggerFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [agentFilter, setAgentFilter] = useState<string>("");
-  const [selectedExec, setSelectedExec] = useState<AgentExecution | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const executionKey = (exec: AgentExecution) => `${exec.sessionId}-${exec.startedAt}`;
+  const selectedExec = executions.find((exec) => executionKey(exec) === selectedKey);
 
   const fetchExecutions = useCallback(async () => {
     try {
@@ -193,21 +195,21 @@ export function RunsPage() {
             <tbody className="divide-y divide-cc-border/50">
               {executions.map((exec) => {
                 const status = statusIndicator(exec);
-                const isSelected = selectedExec?.sessionId === exec.sessionId;
+                const isSelected = selectedKey === executionKey(exec);
                 return (
                   <tr
                     key={`${exec.sessionId}-${exec.startedAt}`}
-                    onClick={() => setSelectedExec(isSelected ? null : exec)}
+                    onClick={() => setSelectedKey(isSelected ? null : executionKey(exec))}
                     tabIndex={0}
                     onKeyDown={(e) => {
                       // Only the row itself: Enter on the nested Open link must follow the link.
                       if (e.target !== e.currentTarget) return;
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
-                        setSelectedExec(isSelected ? null : exec);
+                        setSelectedKey(isSelected ? null : executionKey(exec));
                       }
                     }}
-                    className={`cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-cc-primary focus-visible:-outline-offset-2 ${
+                    className={`cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-cc-focus focus-visible:-outline-offset-2 ${
                       isSelected
                         ? "bg-cc-active"
                         : "hover:bg-cc-hover"
@@ -215,9 +217,9 @@ export function RunsPage() {
                   >
                     <td className="px-6 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="text-cc-fg font-medium">
+                        <button type="button" aria-expanded={isSelected} className="text-cc-fg font-medium cursor-pointer">
                           {agentName(exec.agentId)}
-                        </span>
+                        </button>
                       </div>
                     </td>
                     <td className="px-4 py-3">
@@ -262,11 +264,11 @@ export function RunsPage() {
       {selectedExec && (
         <div className="shrink-0 border-t border-cc-border bg-cc-card px-6 py-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-cc-fg">
+            <h2 className="text-sm font-semibold text-cc-fg">
               Execution Details
-            </h3>
+            </h2>
             <button
-              onClick={() => setSelectedExec(null)}
+              onClick={() => setSelectedKey(null)}
               className="text-cc-muted hover:text-cc-fg text-sm transition-colors"
               aria-label="Close details"
             >

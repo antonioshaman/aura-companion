@@ -858,21 +858,8 @@ describe("AgentsPage", () => {
 
   // ── Accessibility ──────────────────────────────────────────────────────────
 
-  // Known pre-existing accessibility issues in AgentsPage component:
-  // - Hidden file input for Import lacks an explicit label (the visible "Import"
-  //   button triggers it programmatically, so it's functionally accessible but
-  //   axe flags the hidden <input type="file"> without a <label>).
-  // - Editor select elements whose visible <label> siblings are not associated
-  //   via htmlFor/id.
-  // These are excluded so the axe scan still catches any *new* violations.
-  const axeRules = {
-    rules: {
-      // Hidden file input has no explicit label; "Import" button acts as trigger
-      label: { enabled: false },
-      // Select elements in editor have visible labels but not programmatically linked
-      "select-name": { enabled: false },
-    },
-  };
+  // No exclusions: import and editor controls must have accessible names.
+  const axeRules = {};
 
   it("passes axe accessibility checks on empty state", async () => {
     // The empty state (no agents) should have no accessibility violations
