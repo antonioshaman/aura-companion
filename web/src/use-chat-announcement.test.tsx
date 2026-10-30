@@ -52,6 +52,9 @@ describe("chat announcements", () => {
 
   it("ignores tool/thinking and subagent messages; announces new complete prose once", () => {
     const view = render(<Feed messages={[]} />);
+    // The transport can mark reasoning by phase without a contentBlocks array.
+    view.rerender(<Feed messages={[message({ id: "reasoning-phase", content: "private reasoning", isStreaming: true, streamingPhase: "thinking" })]} />);
+    expect(screen.getByRole("status").textContent).toBe("");
     view.rerender(<Feed messages={[message({ contentBlocks: [{ type: "thinking", thinking: "private" }] })]} />);
     expect(screen.getByRole("status").textContent).toBe("");
     view.rerender(<Feed messages={[message({ id: "sub", parentToolUseId: "task" })]} />);
