@@ -737,6 +737,7 @@ export function AgentEditor({
                   </div>
                 ) : (
                   <input
+                    aria-label="Scheduled date and time"
                     type="datetime-local"
                     value={form.scheduleExpression}
                     onChange={(e) => updateField("scheduleExpression", e.target.value)}

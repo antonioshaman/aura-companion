@@ -77,13 +77,8 @@ function renderEditor(formOverrides: Partial<AgentFormData> = {}, propsOverrides
   return { ...result, setForm, onSave, onCancel, getForm: () => currentForm };
 }
 
-// ─── Axe rules (matching AgentsPage.test.tsx known exclusions) ───────────────
-const axeRules = {
-  rules: {
-    label: { enabled: false },
-    "select-name": { enabled: false },
-  },
-};
+// All axe rules remain enabled, including labels on the schedule controls.
+const axeRules = {};
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 

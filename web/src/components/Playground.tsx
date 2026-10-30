@@ -1886,7 +1886,7 @@ export function Playground() {
                   </div>
                 </div>
                 {/* Comments */}
-                <div role="region" aria-label="Issue comments" tabIndex={0} className="px-4 py-2 border-t border-cc-border space-y-1.5 max-h-36 overflow-y-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
+                <div role="region" aria-label="Issue comments" tabIndex={0} className="px-4 py-2 border-t border-cc-border space-y-1.5 max-h-36 overflow-y-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-focus">
                   <span className="text-[10px] text-cc-muted uppercase tracking-wider">
                     Comments
                   </span>

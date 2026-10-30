@@ -35,12 +35,13 @@
 // Exit: 0 pass · 1 fail · 3 skipped · 2 usage error.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cleanupScanProcesses, SCAN_OWNER_ENV } from "./a11y-process-cleanup.js";
 import { redactSecretsInText } from "../server/secret-redaction.js";
 
 // ─── Policy ──────────────────────────────────────────────────────────────────
@@ -346,7 +347,7 @@ function which(bin: string): string | null {
   return null;
 }
 
-function runGrouped(cmd: string, args: string[], opts: { timeoutMs: number; stdin?: string; env?: NodeJS.ProcessEnv }): Promise<RunResult> {
+export function runGrouped(cmd: string, args: string[], opts: { timeoutMs: number; stdin?: string; env?: NodeJS.ProcessEnv }): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { detached: true, stdio: ["pipe", "pipe", "pipe"], env: opts.env ?? process.env });
     let stdout = "";
@@ -355,7 +356,13 @@ function runGrouped(cmd: string, args: string[], opts: { timeoutMs: number; stdi
     const killGroup = () => {
       try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
     };
-    const timer = setTimeout(() => { timedOut = true; killGroup(); }, opts.timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve({ code: null, stdout, stderr, timedOut });
+    }, opts.timeoutMs);
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("error", (e) => { clearTimeout(timer); resolve({ code: null, stdout, stderr: stderr + String(e), timedOut }); });
@@ -374,41 +381,12 @@ async function probe(url: string, timeoutMs: number): Promise<string | null> {
 }
 
 /**
- * agent-browser runs one daemon per session; the daemon is a session leader and
- * Chrome lives in that session. Kill every process group of THAT session only —
- * never by command line (a shared box runs other browsers and servers).
+ * Reclaim only marker-owned processes after graceful close, including orphan
+ * Chrome processes. Identity is rechecked immediately before signalling a PID.
  */
 function killSession(session: string): void {
-  const pidFile = join(process.env.HOME ?? "", ".agent-browser", `${session}.pid`);
-  let leader: number;
-  try {
-    leader = Number(readFileSync(pidFile, "utf-8").trim());
-  } catch {
-    return; // closed cleanly: the daemon removed its pid file
-  }
-  if (!Number.isInteger(leader) || leader <= 1) return;
-  try {
-    if (!readFileSync(`/proc/${leader}/cmdline`, "utf-8").includes("agent-browser")) return; // pid reused
-  } catch {
-    return;
-  }
-  const groups = new Set<number>([leader]);
-  for (const name of readdirSync("/proc")) {
-    if (!/^\d+$/.test(name)) continue;
-    try {
-      const stat = readFileSync(`/proc/${name}/stat`, "utf-8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (Number(fields[3]) === leader) groups.add(Number(fields[2])); // fields: state ppid pgrp session
-    } catch { /* exited */ }
-  }
-  for (const g of groups) {
-    try { process.kill(-g, "SIGKILL"); } catch { /* gone */ }
-  }
-  // A killed daemon cannot remove its own socket/pid files; they are named by our unique session id.
-  for (const ext of SESSION_FILE_EXTS) rmSync(join(dirname(pidFile), `${session}.${ext}`), { force: true });
+  cleanupScanProcesses(session, process.env.AGENT_BROWSER_SOCKET_DIR || join(homedir(), ".agent-browser"));
 }
-
-const SESSION_FILE_EXTS = ["pid", "sock", "engine", "version", "stream"] as const;
 
 export const realDeps: ScanDeps = { which, run: runGrouped, axe: resolveAxe, probe, killSession, now: () => new Date() };
 
@@ -512,12 +490,16 @@ export async function runScan(opts: ScanOptions, deps: ScanDeps = realDeps): Pro
   ];
   const left = () => Math.max(0, deadline - Date.now());
   const call = async (args: string[], stdin?: string): Promise<RunResult | string> => {
+    if (abort) return abort;
     if (left() <= 0) return `timed out after ${opts.timeoutMs} ms`;
-    const r = await deps.run(ab, args, { timeoutMs: Math.min(left(), 60_000), stdin });
+    const r = await deps.run(ab, args, { timeoutMs: Math.min(left(), 60_000), stdin, env: { ...process.env, [SCAN_OWNER_ENV]: session } });
     if (r.timedOut) return `timed out after ${opts.timeoutMs} ms (agent-browser ${args.find((a) => !a.startsWith("-") && a !== session) ?? ""})`;
     return r;
   };
 
+  const interrupted = () => { abort = "scan interrupted by a signal"; deps.killSession(session); };
+  process.once("SIGINT", interrupted);
+  process.once("SIGTERM", interrupted);
   try {
     const first = await call([...launch, "set", "viewport", String(opts.viewport.width), String(opts.viewport.height)]);
     if (typeof first === "string") { abort = first; return artifact(); }
@@ -546,6 +528,8 @@ export async function runScan(opts: ScanOptions, deps: ScanDeps = realDeps): Pro
     }
     return artifact();
   } finally {
+    process.removeListener("SIGINT", interrupted);
+    process.removeListener("SIGTERM", interrupted);
     await deps.run(ab, ["--session", session, "close"], { timeoutMs: 10_000 }).catch(() => undefined);
     deps.killSession(session);
     rmSync(work, { recursive: true, force: true });

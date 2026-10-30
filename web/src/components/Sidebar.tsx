@@ -996,7 +996,7 @@ export function Sidebar() {
                       }}
                       title={item.label}
                       aria-current={isActive ? "page" : undefined}
-                      className={`group flex min-h-[44px] md:min-h-[34px] w-full items-center gap-2 rounded-md px-2 py-1 md:py-0.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-primary/60 ${
+                      className={`group flex min-h-[44px] md:min-h-[34px] w-full items-center gap-2 rounded-md px-2 py-1 md:py-0.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-focus/60 ${
                         isActive
                           ? "bg-cc-active text-cc-fg"
                           : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"

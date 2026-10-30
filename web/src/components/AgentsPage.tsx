@@ -508,6 +508,7 @@ export function AgentsPage({ route }: Props) {
           <div className="flex gap-2">
             <input
               ref={fileInputRef}
+              aria-label="Import agent configuration"
               type="file"
               accept=".json"
               onChange={handleImport}

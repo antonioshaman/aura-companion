@@ -43,6 +43,21 @@ class BaselineTest(RepoTestCase):
         self.assertEqual(rc, 0, out + err)
         self.assertIn("1 finding(s) accepted by the baseline", out)
 
+    def test_line_drift_preserves_the_same_accepted_finding(self):
+        # Baselines key by code context, not an absolute line number.
+        self.write_baseline(entry())
+        self.repo.write("web/src/Form.tsx", "// unrelated insertion\n\n" + ALERT)
+        rc, out, err = self.run_cli()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("1 finding(s) accepted", out)
+
+    def test_message_only_does_not_mark_unscanned_files_stale(self):
+        self.write_baseline(entry(), entry(path="web/src/Gone.tsx"))
+        self.repo.write("COMMIT_MSG", "fix(ui): improve labels\n")
+        rc, out, err = self.run_cli("--commit-msg-file", str(self.repo.root / "COMMIT_MSG"))
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("STALE", out)
+
     def test_new_finding_next_to_a_baselined_one_fails(self):
         # Same file, same text: the count, not the path, decides.
         self.write_baseline(entry())

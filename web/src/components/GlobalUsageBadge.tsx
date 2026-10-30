@@ -80,7 +80,7 @@ export function GlobalUsageBadge() {
     return (
       <a
         href="#/diagnostics"
-        className="mt-1.5 rounded-lg border border-cc-border/30 px-2 py-1 flex items-center gap-2 text-[11px] leading-tight text-cc-muted hover:text-cc-fg transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-primary/60"
+        className="mt-1.5 rounded-lg border border-cc-border/30 px-2 py-1 flex items-center gap-2 text-[11px] leading-tight text-cc-muted hover:text-cc-fg transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-focus/60"
         title="The global usage counter did not answer. Open Diagnostics → Usage upstream to see why."
       >
         <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="w-3 h-3 shrink-0 text-cc-muted/60">

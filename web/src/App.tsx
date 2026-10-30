@@ -354,6 +354,7 @@ export default function App() {
 
       {/* Sidebar — overlay on mobile, inline on desktop */}
       <div
+        inert={!sidebarOpen}
         className={`
           fixed inset-y-0 left-0 md:relative md:inset-auto z-40 md:z-auto
           h-full shrink-0 transition-all duration-200 pt-safe md:pt-0
@@ -524,6 +525,7 @@ export default function App() {
           )}
 
           <div
+            inert={!taskPanelOpen}
             className={`
               fixed inset-y-0 right-0 lg:relative lg:inset-auto z-40 lg:z-auto
               h-full shrink-0 transition-all duration-200 pt-safe lg:pt-0

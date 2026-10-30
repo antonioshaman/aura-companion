@@ -14,7 +14,7 @@
   "grade": {
     "markers": {
       "safe-area": true,
-      "dynamic-type": true,
+      "dynamic-type": false,
       "touch-target-44-48": true,
       "native-confirm": true
     },

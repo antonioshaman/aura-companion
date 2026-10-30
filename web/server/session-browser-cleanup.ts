@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
 import { lstat, readFile, readdir, readlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { log } from "./logger.js";
+
+import { isAgentBrowserExecutable, processStartTicks } from "./agent-browser-process.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,12 +33,12 @@ export async function readSessionBrowser(
     const processDir = join(procRoot, String(pid));
     if ((await lstat(processDir)).uid !== metadata.uid) return null;
     const executable = await readlink(join(processDir, "exe"));
-    if (!/^agent-browser(?:-[a-zA-Z0-9_-]+)?$/.test(basename(executable.replace(/ \(deleted\)$/, "")))) return null;
+    if (!isAgentBrowserExecutable(executable)) return null;
     const environment = (await readFile(join(processDir, "environ"), "utf8")).split("\0");
     const sessionId = environment.find((entry) => entry.startsWith("AURA_BROWSER_SESSION_ID="))?.split("=")[1];
     if (!sessionId || !/^[a-f0-9-]{36}$/.test(sessionId)) return null;
     const stat = await readFile(join(processDir, "stat"), "utf8");
-    const startTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+    const startTicks = processStartTicks(stat);
     if (!startTicks || !/^\d+$/.test(startTicks)) return null;
     return { name, pid, sessionId, executable, startTicks, registeredAt: metadata.mtimeMs };
   } catch {

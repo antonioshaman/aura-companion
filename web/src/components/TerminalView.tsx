@@ -77,7 +77,10 @@ export function TerminalView({
       api
         .spawnTerminal(cwd, xterm.cols, xterm.rows, { containerId })
         .then(({ terminalId }) => {
-          if (cancelled) return;
+          if (cancelled) {
+            void api.killTerminal(terminalId).catch(() => {});
+            return;
+          }
           useStore.getState().setTerminalId(terminalId);
           terminalIdRef.current = terminalId;
 

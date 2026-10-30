@@ -422,7 +422,7 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
                       </span>
                     </div>
                   )}
-                  <pre tabIndex={0} className="px-3 sm:px-4 py-2.5 sm:py-3 bg-cc-code-bg text-cc-code-fg text-[12px] sm:text-[13px] font-mono-code leading-relaxed overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
+                  <pre tabIndex={0} className="px-3 sm:px-4 py-2.5 sm:py-3 bg-cc-code-bg text-cc-code-fg text-[12px] sm:text-[13px] font-mono-code leading-relaxed overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-focus">
                     <code>{children}</code>
                   </pre>
                 </div>
@@ -437,7 +437,7 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
           },
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
-            <div tabIndex={0} className="overflow-x-auto my-2 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-primary">
+            <div tabIndex={0} className="overflow-x-auto my-2 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cc-focus">
               <table className="min-w-full text-sm border border-cc-border rounded-lg overflow-hidden">
                 {children}
               </table>

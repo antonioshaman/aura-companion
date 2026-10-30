@@ -147,11 +147,19 @@ def clickable_non_interactive(ctx: Context):
         for tag in markup_tags(text):
             if tag.name.lower() not in NON_INTERACTIVE_TAGS or not tag.has("onClick"):
                 continue
-            if tag.spread or tag.has("role") or tag.value("tabindex") is not None:
+            if tag.spread:
                 continue
             if PROPAGATION_ONLY_RE.match((tag.value("onClick") or "").strip()):
                 continue
-            if KEY_HANDLER_RE.search(tag.top_level()) or _truthy(tag.value("aria-hidden")):
+            # Native table rows already have a role; listbox options can use
+            # the APG aria-activedescendant keyboard path on their container.
+            if tag.value("role") == "option" and any(
+                parent.value("role") == "listbox" and parent.has("aria-activedescendant")
+                and KEY_HANDLER_RE.search(parent.top_level()) for parent in markup_tags(text)
+            ):
+                continue
+            if ((tag.has("role") or tag.name.lower() == "tr") and _tabindex(tag) is not None and _tabindex(tag) >= 0
+                    and KEY_HANDLER_RE.search(tag.top_level())) or _truthy(tag.value("aria-hidden")):
                 continue
             cls = tag.value("className") or tag.value("class") or ""
             if BACKDROP_RE.search(cls):
@@ -182,11 +190,14 @@ def icon_button_no_name(ctx: Context):
             if any(tag.has(a) for a in ("aria-label", "aria-labelledby", "title")):
                 continue
             inner = element_inner(text, tag)
-            if inner is None or "{" in inner or not ICON_CHILD_RE.search(inner):
+            if inner is None or (not ICON_CHILD_RE.search(inner) and "{/*" not in inner):
                 continue
             if NAME_CHILD_RE.search(inner):
                 continue
-            visible = re.sub(r"<[^>]*>", "", inner).replace("&nbsp;", "").strip()
+            visible = re.sub(r"\{/\*.*?\*/\}", "", inner, flags=re.S)
+            visible = re.sub(r"<[^>]*>", "", visible).replace("&nbsp;", "").strip()
+            if "{" in visible:
+                continue  # dynamic child may supply the accessible name
             if not visible:
                 yield path, tag.line, "button has only an icon and no aria-label"
 
@@ -229,8 +240,6 @@ def axe_rule_disabled(ctx: Context):
                            if k >= 1 and "axe" in lines[k - 1].lower()), None)
             if anchor is None:
                 continue
-            if TRAILING_COMMENT_RE.search(line[m.end():]):
-                continue
             # A reason counts when it is tied to this override (observer WARN,
             # checkpoint 189: a stray "// Arrange" inside the test is not one):
             #  1. the comment block right above the override line;
@@ -245,10 +254,14 @@ def axe_rule_disabled(ctx: Context):
                     j -= 1
                 return out
 
-            if block_above(n):
-                continue
             ids = [m.group(1)] if m.group(1) else re.findall(r"[a-z][a-z0-9-]+", m.group(2) or "")
             names_rule = lambda l: any(re.search(r"(?<![\w-])" + re.escape(i) + r"(?![\w-])", l) for i in ids)
+            adjacent = block_above(n)
+            trailing = TRAILING_COMMENT_RE.search(line[m.end():])
+            if trailing:
+                adjacent.append(line[m.end():][trailing.start():])
+            if any(REASON_RE.search(l) or names_rule(l) for l in adjacent):
+                continue
             test_open = next((k for k in range(n - 1, max(0, n - TEST_LOOKBACK), -1)
                               if TEST_OPEN_RE.match(lines[k - 1])), None)
             start = test_open or anchor

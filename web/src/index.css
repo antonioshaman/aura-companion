@@ -22,6 +22,7 @@
   --color-cc-fg: #141413;
   --color-cc-card: #ffffff;
   --color-cc-primary: #d97757;
+  --color-cc-focus: #ad5535;
   --color-cc-primary-hover: #e08b6b;
   --color-cc-user-bubble: #f0efe8;
   --color-cc-border: rgba(31,30,29,0.12);
@@ -195,6 +196,7 @@
   --color-cc-fg: #faf9f5;
   --color-cc-card: #141413;
   --color-cc-primary: #d97757;
+  --color-cc-focus: #d97757;
   --color-cc-primary-hover: #e08b6b;
   --color-cc-user-bubble: #30302e;
   --color-cc-border: rgba(222,220,209,0.15);
@@ -350,7 +352,7 @@
    Wrapped in @layer base so Tailwind utilities (e.g. outline-none) can override it. */
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--color-cc-primary);
+    outline: 2px solid var(--color-cc-focus);
     outline-offset: 2px;
   }
 }
