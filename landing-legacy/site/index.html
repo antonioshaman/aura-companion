@@ -1094,48 +1094,48 @@
 
       <div class="faq-list">
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Зачем надстройка, если можно просто пользоваться Claude Code и Codex?</button>
-          <div class="faq-a">Если вам хватает терминала — пользуйтесь терминалом, это честный ответ. Aura нужна, когда мешает трение вокруг агента: работа встала на лимите ночью, ответ потерялся при зависании, сервер перезапустился, вы отошли от ноутбука, а хочется, чтобы код проверила вторая модель. Внутри при этом тот же официальный CLI. <a href="#why">Три конкретные задачи →</a></div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-1" onclick="toggleFaq(this)">Зачем надстройка, если можно просто пользоваться Claude Code и Codex?</button>
+          <div class="faq-a" id="faq-answer-1" inert aria-hidden="true">Если вам хватает терминала — пользуйтесь терминалом, это честный ответ. Aura нужна, когда мешает трение вокруг агента: работа встала на лимите ночью, ответ потерялся при зависании, сервер перезапустился, вы отошли от ноутбука, а хочется, чтобы код проверила вторая модель. Внутри при этом тот же официальный CLI. <a href="#why">Три конкретные задачи →</a></div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Обёртки и чужие фреймворки ухудшают агента. Aura не такая же?</button>
-          <div class="faq-a">Опасение справедливое — многие обёртки переписывают системный промпт и ломают поведение модели. Aura запускает официальные <code>claude</code> и <code>codex</code> без изменений: ваши CLAUDE.md, навыки, MCP и модель остаются как есть. Скрытых промптов по умолчанию нет — база знаний подключается только по запросу. Аудит prompt-cache показывает 97,5% попаданий в кэш, то есть начало промпта мы не трогаем. Практики Anthropic и OpenAI работают так же, как в терминале.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-2" onclick="toggleFaq(this)">Обёртки и чужие фреймворки ухудшают агента. Aura не такая же?</button>
+          <div class="faq-a" id="faq-answer-2" inert aria-hidden="true">Опасение справедливое — многие обёртки переписывают системный промпт и ломают поведение модели. Aura запускает официальные <code>claude</code> и <code>codex</code> без изменений: ваши CLAUDE.md, навыки, MCP и модель остаются как есть. Скрытых промптов по умолчанию нет — база знаний подключается только по запросу. Аудит prompt-cache показывает 97,5% попаданий в кэш, то есть начало промпта мы не трогаем. Практики Anthropic и OpenAI работают так же, как в терминале.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Выглядит слишком сказочно. Где подвох? Нужна регистрация?</button>
-          <div class="faq-a">Регистрации нет. Запуск у себя: <code>bunx aura-companion</code> → <code>localhost:3456</code>, работает на вашей подписке Claude или Codex, удаляется одной командой. Подвоха нет, но и чудес тоже: Aura не делает модель умнее и не даёт подписку. Она продолжает работу после лимита, даёт второе мнение от другой модели и не теряет работу при рестартах. Весь код открыт под MIT — проверить можно самому.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-3" onclick="toggleFaq(this)">Выглядит слишком сказочно. Где подвох? Нужна регистрация?</button>
+          <div class="faq-a" id="faq-answer-3" inert aria-hidden="true">Регистрации нет. Запуск у себя: <code>bunx aura-companion</code> → <code>localhost:3456</code>, работает на вашей подписке Claude или Codex, удаляется одной командой. Подвоха нет, но и чудес тоже: Aura не делает модель умнее и не даёт подписку. Она продолжает работу после лимита, даёт второе мнение от другой модели и не теряет работу при рестартах. Весь код открыт под MIT — проверить можно самому.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Не проще ли настроить Claude под себя самому?</button>
-          <div class="faq-a">Возможно, и проще — если у вас есть время. Aura — это то, что получилось бы у вас месяца за три: мы уже наступили на грабли с потерянными ответами, зависаниями, лимитами и рестартами. Код под MIT: можно взять только методологию (навыки, Council Mode, базу знаний) и встроить в свою настройку, а можно — всё целиком.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-4" onclick="toggleFaq(this)">Не проще ли настроить Claude под себя самому?</button>
+          <div class="faq-a" id="faq-answer-4" inert aria-hidden="true">Возможно, и проще — если у вас есть время. Aura — это то, что получилось бы у вас месяца за три: мы уже наступили на грабли с потерянными ответами, зависаниями, лимитами и рестартами. Код под MIT: можно взять только методологию (навыки, Council Mode, базу знаний) и встроить в свою настройку, а можно — всё целиком.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Нужен ли VPN для работы?</button>
-          <div class="faq-a">Нет. Сайт работает напрямую из России, Беларуси, Казахстана и других стран СНГ. Мы держим инфраструктуру так, чтобы доступ был стабильным без обходных путей.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-5" onclick="toggleFaq(this)">Нужен ли VPN для работы?</button>
+          <div class="faq-a" id="faq-answer-5" inert aria-hidden="true">Нет. Сайт работает напрямую из России, Беларуси, Казахстана и других стран СНГ. Мы держим инфраструктуру так, чтобы доступ был стабильным без обходных путей.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Сколько это стоит?</button>
-          <div class="faq-a">Нисколько. Это благотворительный проект — тарифов и подписок нет. Весь код открыт под MIT, берите и пользуйтесь. Если захотите поддержать развитие — ниже есть донаты (<a href="#support">картой/СБП или криптой</a>), но это по желанию.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-6" onclick="toggleFaq(this)">Сколько это стоит?</button>
+          <div class="faq-a" id="faq-answer-6" inert aria-hidden="true">Нисколько. Это благотворительный проект — тарифов и подписок нет. Весь код открыт под MIT, берите и пользуйтесь. Если захотите поддержать развитие — ниже есть донаты (<a href="#support">картой/СБП или криптой</a>), но это по желанию.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Это правда программирует «домохозяйка»?</button>
-          <div class="faq-a">Да. По-русски вы описываете задачу — например, «сделай мне систему учёта расходов». Aura уточнит детали и соберёт работающее решение. Вам не нужно знать код.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-7" onclick="toggleFaq(this)">Это правда программирует «домохозяйка»?</button>
+          <div class="faq-a" id="faq-answer-7" inert aria-hidden="true">Да. По-русски вы описываете задачу — например, «сделай мне систему учёта расходов». Aura уточнит детали и соберёт работающее решение. Вам не нужно знать код.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Чем это отличается от ChatGPT?</button>
-          <div class="faq-a">Aura — это не один диалог, а целая платформа: 29 инженерных навыков, Council Mode для проверки качества, самообучающаяся база знаний. И всё это доступно из СНГ без VPN.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-8" onclick="toggleFaq(this)">Чем это отличается от ChatGPT?</button>
+          <div class="faq-a" id="faq-answer-8" inert aria-hidden="true">Aura — это не один диалог, а целая платформа: 29 инженерных навыков, Council Mode для проверки качества, самообучающаяся база знаний. И всё это доступно из СНГ без VPN.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Что такое MetaPersonaGPT?</button>
-          <div class="faq-a">Это флагманский советник проекта <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a> — отдельной платформы, построенной на Aura Companion. Из одной беседы он типирует вас по 27+ психологическим системам. Aura это инструмент-основа, Razumai это пример того, что на ней можно создать.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-9" onclick="toggleFaq(this)">Что такое MetaPersonaGPT?</button>
+          <div class="faq-a" id="faq-answer-9" inert aria-hidden="true">Это флагманский советник проекта <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a> — отдельной платформы, построенной на Aura Companion. Из одной беседы он типирует вас по 27+ психологическим системам. Aura это инструмент-основа, Razumai это пример того, что на ней можно создать.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">А если я разработчик и хочу свой инстанс?</button>
-          <div class="faq-a">Берите код по MIT-лицензии на GitHub и разверните свой инстанс — без оплат и ограничений. Claude может настроить всё локально за вас, если дать ему ссылку на репозиторий.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-10" onclick="toggleFaq(this)">А если я разработчик и хочу свой инстанс?</button>
+          <div class="faq-a" id="faq-answer-10" inert aria-hidden="true">Берите код по MIT-лицензии на GitHub и разверните свой инстанс — без оплат и ограничений. Claude может настроить всё локально за вас, если дать ему ссылку на репозиторий.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Безопасны ли мои данные?</button>
-          <div class="faq-a">Сессии хранятся зашифрованными. Голосовые данные не используются для обучения. Можно удалить историю в один клик. Self-hosted версия — полный контроль над данными.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-11" onclick="toggleFaq(this)">Безопасны ли мои данные?</button>
+          <div class="faq-a" id="faq-answer-11" inert aria-hidden="true">Сессии хранятся зашифрованными. Голосовые данные не используются для обучения. Можно удалить историю в один клик. Self-hosted версия — полный контроль над данными.</div>
         </div>
       </div>
     </div>
@@ -1256,6 +1256,9 @@
   function toggleFaq(el) {
     var open = el.parentElement.classList.toggle('open');
     el.setAttribute('aria-expanded', open ? 'true' : 'false');
+    var answer = document.getElementById(el.getAttribute('aria-controls'));
+    answer.inert = !open;
+    answer.setAttribute('aria-hidden', open ? 'false' : 'true');
   }
 </script>
 <script>
