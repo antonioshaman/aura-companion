@@ -1094,48 +1094,48 @@
 
       <div class="faq-list">
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Why add a layer on top, when I can just use Claude Code and Codex?</button>
-          <div class="faq-a">If the terminal is enough for you, keep using the terminal — that's the honest answer. Aura helps when the friction around the agent gets in the way: work stalls on a usage limit overnight, a reply is lost when something hangs, the server restarts, you're away from your laptop, or you want a second model to check the code. Underneath it's the same official CLI. <a href="#why">Three concrete jobs →</a></div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-1" onclick="toggleFaq(this)">Why add a layer on top, when I can just use Claude Code and Codex?</button>
+          <div class="faq-a" id="faq-answer-1" inert aria-hidden="true">If the terminal is enough for you, keep using the terminal — that's the honest answer. Aura helps when the friction around the agent gets in the way: work stalls on a usage limit overnight, a reply is lost when something hangs, the server restarts, you're away from your laptop, or you want a second model to check the code. Underneath it's the same official CLI. <a href="#why">Three concrete jobs →</a></div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Wrappers and personal frameworks make agents worse. Isn't Aura the same?</button>
-          <div class="faq-a">A fair worry — plenty of wrappers rewrite the system prompt and break the model's behaviour. Aura runs the official <code>claude</code> and <code>codex</code> unchanged: your CLAUDE.md, skills, MCP servers and model stay as they are. There are no hidden prompts by default — the knowledge base loads only on request. Our prompt-cache audit shows a 97.5% cache hit rate, meaning we don't touch the start of your prompt. Anthropic's and OpenAI's own best practices apply exactly as in the terminal.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-2" onclick="toggleFaq(this)">Wrappers and personal frameworks make agents worse. Isn't Aura the same?</button>
+          <div class="faq-a" id="faq-answer-2" inert aria-hidden="true">A fair worry — plenty of wrappers rewrite the system prompt and break the model's behaviour. Aura runs the official <code>claude</code> and <code>codex</code> unchanged: your CLAUDE.md, skills, MCP servers and model stay as they are. There are no hidden prompts by default — the knowledge base loads only on request. Our prompt-cache audit shows a 97.5% cache hit rate, meaning we don't touch the start of your prompt. Anthropic's and OpenAI's own best practices apply exactly as in the terminal.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">This sounds too good. What's the catch? Do I need to sign up?</button>
-          <div class="faq-a">There's no sign-up. To run it yourself: <code>bunx aura-companion</code> → <code>localhost:3456</code>; it uses your own Claude or Codex subscription and is removed with one command. No catch, but no miracles either: Aura doesn't make the model smarter and doesn't include a subscription. It resumes work after a limit, gets a second opinion from another model, and keeps your work across restarts. All the code is open under MIT — check it yourself.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-3" onclick="toggleFaq(this)">This sounds too good. What's the catch? Do I need to sign up?</button>
+          <div class="faq-a" id="faq-answer-3" inert aria-hidden="true">There's no sign-up. To run it yourself: <code>bunx aura-companion</code> → <code>localhost:3456</code>; it uses your own Claude or Codex subscription and is removed with one command. No catch, but no miracles either: Aura doesn't make the model smarter and doesn't include a subscription. It resumes work after a limit, gets a second opinion from another model, and keeps your work across restarts. All the code is open under MIT — check it yourself.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Isn't it easier to tune Claude to my own taste?</button>
-          <div class="faq-a">Maybe — if you have the time. Aura is roughly what you'd have after three months: we've already hit the lost replies, hangs, usage limits and restarts. It's MIT, so you can lift just the methodology (skills, Council Mode, knowledge base) into your own setup, or take the whole thing.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-4" onclick="toggleFaq(this)">Isn't it easier to tune Claude to my own taste?</button>
+          <div class="faq-a" id="faq-answer-4" inert aria-hidden="true">Maybe — if you have the time. Aura is roughly what you'd have after three months: we've already hit the lost replies, hangs, usage limits and restarts. It's MIT, so you can lift just the methodology (skills, Council Mode, knowledge base) into your own setup, or take the whole thing.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">I'm in Russia or the CIS. Do I need a VPN?</button>
-          <div class="faq-a">No. The site works directly from Russia, Belarus, Kazakhstan and other CIS countries. We run the infrastructure so access stays stable without workarounds.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-5" onclick="toggleFaq(this)">I'm in Russia or the CIS. Do I need a VPN?</button>
+          <div class="faq-a" id="faq-answer-5" inert aria-hidden="true">No. The site works directly from Russia, Belarus, Kazakhstan and other CIS countries. We run the infrastructure so access stays stable without workarounds.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">How much does it cost?</button>
-          <div class="faq-a">Nothing. It's a non-profit project — no plans, no subscriptions. All the code is open under MIT; take it and use it. You still need your own Claude or Codex plan for the models themselves. If you'd like to support development, there are <a href="#support">donation options below</a> — entirely optional.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-6" onclick="toggleFaq(this)">How much does it cost?</button>
+          <div class="faq-a" id="faq-answer-6" inert aria-hidden="true">Nothing. It's a non-profit project — no plans, no subscriptions. All the code is open under MIT; take it and use it. You still need your own Claude or Codex plan for the models themselves. If you'd like to support development, there are <a href="#support">donation options below</a> — entirely optional.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Can someone who doesn't code really use it?</button>
-          <div class="faq-a">Yes. You describe the task in plain words — say, "build me an expense tracker". Aura asks for the details and assembles a working solution. You don't need to know how to code.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-7" onclick="toggleFaq(this)">Can someone who doesn't code really use it?</button>
+          <div class="faq-a" id="faq-answer-7" inert aria-hidden="true">Yes. You describe the task in plain words — say, "build me an expense tracker". Aura asks for the details and assembles a working solution. You don't need to know how to code.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">How is this different from ChatGPT?</button>
-          <div class="faq-a">Aura isn't a single chat but a working environment for coding agents: 29 engineering skills, Council Mode for quality checks, and a self-learning knowledge base — on top of the real Claude Code and Codex.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-8" onclick="toggleFaq(this)">How is this different from ChatGPT?</button>
+          <div class="faq-a" id="faq-answer-8" inert aria-hidden="true">Aura isn't a single chat but a working environment for coding agents: 29 engineering skills, Council Mode for quality checks, and a self-learning knowledge base — on top of the real Claude Code and Codex.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">What is MetaPersonaGPT?</button>
-          <div class="faq-a">The flagship advisor of <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a> — a separate, Russian-language platform built on Aura Companion. From one conversation it types you across 27+ psychological systems. Aura is the foundation; Razumai is an example of what you can build on it.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-9" onclick="toggleFaq(this)">What is MetaPersonaGPT?</button>
+          <div class="faq-a" id="faq-answer-9" inert aria-hidden="true">The flagship advisor of <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a> — a separate, Russian-language platform built on Aura Companion. From one conversation it types you across 27+ psychological systems. Aura is the foundation; Razumai is an example of what you can build on it.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">I'm a developer — can I run my own instance?</button>
-          <div class="faq-a">Yes. Take the code from GitHub under MIT and run your own instance, with no fees or limits. Claude can set it all up locally for you if you give it the repo link.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-10" onclick="toggleFaq(this)">I'm a developer — can I run my own instance?</button>
+          <div class="faq-a" id="faq-answer-10" inert aria-hidden="true">Yes. Take the code from GitHub under MIT and run your own instance, with no fees or limits. Claude can set it all up locally for you if you give it the repo link.</div>
         </div>
         <div class="faq-item">
-          <button type="button" class="faq-q" aria-expanded="false" onclick="toggleFaq(this)">Is my data safe?</button>
-          <div class="faq-a">Sessions are stored encrypted. Voice data isn't used for training. You can delete your history in one click. The self-hosted version gives you full control over your data.</div>
+          <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-11" onclick="toggleFaq(this)">Is my data safe?</button>
+          <div class="faq-a" id="faq-answer-11" inert aria-hidden="true">Sessions are stored encrypted. Voice data isn't used for training. You can delete your history in one click. The self-hosted version gives you full control over your data.</div>
         </div>
       </div>
     </div>
@@ -1258,6 +1258,9 @@
   function toggleFaq(el) {
     var open = el.parentElement.classList.toggle('open');
     el.setAttribute('aria-expanded', open ? 'true' : 'false');
+    var answer = document.getElementById(el.getAttribute('aria-controls'));
+    answer.inert = !open;
+    answer.setAttribute('aria-hidden', open ? 'false' : 'true');
   }
 </script>
 <script>
