@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.9.0...aura-companion-v2.9.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **a11y:** complete chat keyboard and announcement flows ([#445](https://github.com/antonioshaman/aura-companion/issues/445)) ([7be358d](https://github.com/antonioshaman/aura-companion/commit/7be358dd31475277b5bb0484a5bf2c3aa7b89ddc))
+
 ## [2.9.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.8.0...aura-companion-v2.9.0) (2026-10-30)
 
 
