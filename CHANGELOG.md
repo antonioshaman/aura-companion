@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.9.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.8.0...aura-companion-v2.9.0) (2026-10-30)
+
+
+### Features
+
+* **checks:** UI/UX aura-check rules with a strict baseline and a rendered axe scan in council reviews (phase D) ([#437](https://github.com/antonioshaman/aura-companion/issues/437)) ([a6fc32c](https://github.com/antonioshaman/aura-companion/commit/a6fc32c86e0f7346b8492025b195e48f7276eb5f))
+
+
+### Bug Fixes
+
+* **a11y:** close the true findings of the uiux baseline and the rendered scan ([#440](https://github.com/antonioshaman/aura-companion/issues/440)) ([42bed03](https://github.com/antonioshaman/aura-companion/commit/42bed03ce595899243c5b0cdedcbdbcb1973ff53))
+* **a11y:** keyboard-scrollable regions, no alerts in the Playground, and the rendered scan in CI ([#443](https://github.com/antonioshaman/aura-companion/issues/443)) ([fdf78bd](https://github.com/antonioshaman/aura-companion/commit/fdf78bde3a1d1f1db01e300f5ed660785a5e579c))
+* **ci:** smoke boots stop registering as installs on the stats Worker ([#438](https://github.com/antonioshaman/aura-companion/issues/438)) ([484c2d5](https://github.com/antonioshaman/aura-companion/commit/484c2d5353085506f989aadb19dcac3b1187d2de))
+* **uiux:** close release review findings and verify rendered routes ([#444](https://github.com/antonioshaman/aura-companion/issues/444)) ([f148fe4](https://github.com/antonioshaman/aura-companion/commit/f148fe4ba168d70c9c365f7381adae56e4901467))
+
 ## [2.8.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.2...aura-companion-v2.8.0) (2026-10-28)
 
 
