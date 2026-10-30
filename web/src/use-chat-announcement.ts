@@ -3,7 +3,7 @@ import type { ChatMessage } from "./types.js";
 
 const INTERVAL_MS = 1500;
 const MAX_CHARS = 240;
-const spokenText = (message: ChatMessage) => message.contentBlocks
+const spokenText = (message: ChatMessage) => message.streamingPhase === "thinking" ? "" : message.contentBlocks
   ? message.contentBlocks.filter((block) => block.type === "text").map((block) => block.type === "text" ? block.text : "").join("\n")
   : message.content;
 
