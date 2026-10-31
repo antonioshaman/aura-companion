@@ -380,3 +380,46 @@ describe("RunsPage row keys do not hijack nested controls", () => {
   });
 });
 
+
+it("shows unavailable and retries instead of a false empty runs list", async () => {
+  mockApi.listExecutions.mockRejectedValueOnce(new Error("offline"));
+  render(<RunsPage />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Runs could not be loaded");
+  expect(screen.queryByText("No executions found")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("No executions found")).toBeInTheDocument();
+});
+it("ignores late results and failures from an obsolete filter", async () => {
+  let finish!: (v: { executions: AgentExecution[]; total: number }) => void;
+  mockApi.listExecutions.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+  const { container } = render(<RunsPage />);
+  mockApi.listExecutions.mockResolvedValueOnce({ executions: [makeExecution({ error: "current filter" })], total: 1 });
+  fireEvent.click(screen.getByRole("button", { name: "Error" }));
+  await waitFor(() => expect(container.querySelectorAll("tbody tr")).toHaveLength(1));
+  await act(async () => finish({ executions: [], total: 0 }));
+  expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+});
+
+// Same-filter polling also has ordering: newest response owns rows/count/error.
+it("retains last good rows on a failed poll and rejects older overlapping results", async () => {
+  let poll!: () => void;
+  const nativeInterval = globalThis.setInterval;
+  const timer = vi.spyOn(globalThis, "setInterval").mockImplementation(((cb: () => void, ms: number) => {
+    if (ms === 5000) { poll = cb; return 1; }
+    return nativeInterval(cb, ms);
+  }) as typeof setInterval);
+  mockApi.listExecutions.mockResolvedValueOnce({ executions: [makeExecution()], total: 1 });
+  const view = render(<RunsPage />);
+  await waitFor(() => expect(view.container.querySelectorAll("tbody tr")).toHaveLength(1));
+  let stale!: (v: { executions: AgentExecution[]; total: number }) => void;
+  mockApi.listExecutions.mockReturnValueOnce(new Promise((r) => { stale = r; }));
+  await act(async () => { poll(); });
+  mockApi.listExecutions.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => { poll(); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("Showing last loaded data");
+  await act(async () => stale({ executions: [], total: 99 }));
+  expect(view.container.querySelectorAll("tbody tr")).toHaveLength(1);
+  expect(screen.getByText("1 total")).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Showing last loaded data");
+  view.unmount(); timer.mockRestore();
+});

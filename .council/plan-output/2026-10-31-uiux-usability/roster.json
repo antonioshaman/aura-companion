@@ -1,0 +1,369 @@
+{
+  "catalog": "/home/auracomp/.companion/skill-pack/versions/59704fb494ae548d/_council-experts",
+  "domains": [
+    "security",
+    "refactoring",
+    "llm-pipeline",
+    "test-quality",
+    "ux-flow",
+    "ui-visual-quality",
+    "accessibility",
+    "filesystem-persistence",
+    "frontend-architecture"
+  ],
+  "fp": {
+    "kind": "fingerprint",
+    "signals": [
+      "browser-spa",
+      "docker",
+      "drizzle",
+      "github-actions",
+      "hono",
+      "javascript",
+      "json-rpc",
+      "ndjson",
+      "react",
+      "stdio-subprocess",
+      "typescript",
+      "websocket"
+    ],
+    "byDimension": {
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "runtimes": [],
+      "frameworks": [
+        "hono",
+        "react"
+      ],
+      "datastores": [],
+      "orm-migrations": [
+        "drizzle"
+      ],
+      "infra": [
+        "docker",
+        "github-actions"
+      ],
+      "surfaces": [
+        "browser-spa",
+        "json-rpc",
+        "ndjson",
+        "stdio-subprocess",
+        "websocket"
+      ]
+    },
+    "provenance": [
+      {
+        "token": "docker",
+        "dimension": "infra",
+        "prefix": "",
+        "evidenceFile": "Dockerfile"
+      },
+      {
+        "token": "github-actions",
+        "dimension": "infra",
+        "prefix": "",
+        "evidenceFile": ".github/workflows"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "",
+        "evidenceFile": "package.json"
+      },
+      {
+        "token": "browser-spa",
+        "dimension": "surfaces",
+        "prefix": "landing",
+        "evidenceFile": "landing/package.json"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "landing",
+        "evidenceFile": "landing/package.json"
+      },
+      {
+        "token": "react",
+        "dimension": "frameworks",
+        "prefix": "landing",
+        "evidenceFile": "landing/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "landing",
+        "evidenceFile": "landing/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "landing",
+        "evidenceFile": "landing/tsconfig.json"
+      },
+      {
+        "token": "browser-spa",
+        "dimension": "surfaces",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "docker",
+        "dimension": "infra",
+        "prefix": "platform",
+        "evidenceFile": "platform/Dockerfile"
+      },
+      {
+        "token": "drizzle",
+        "dimension": "orm-migrations",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "hono",
+        "dimension": "frameworks",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "react",
+        "dimension": "frameworks",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "platform",
+        "evidenceFile": "platform/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "platform",
+        "evidenceFile": "platform/tsconfig.json"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "relay",
+        "evidenceFile": "relay/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "relay",
+        "evidenceFile": "relay/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "relay",
+        "evidenceFile": "relay/tsconfig.json"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "stats",
+        "evidenceFile": "stats/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "stats",
+        "evidenceFile": "stats/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "stats",
+        "evidenceFile": "stats/tsconfig.json"
+      },
+      {
+        "token": "browser-spa",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "hono",
+        "dimension": "frameworks",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "javascript",
+        "dimension": "languages",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "json-rpc",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/server/ws-bridge.ts"
+      },
+      {
+        "token": "ndjson",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/server/ws-bridge.ts"
+      },
+      {
+        "token": "react",
+        "dimension": "frameworks",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "stdio-subprocess",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/server/ws-bridge.ts"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "typescript",
+        "dimension": "languages",
+        "prefix": "web",
+        "evidenceFile": "web/tsconfig.json"
+      },
+      {
+        "token": "websocket",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/package.json"
+      },
+      {
+        "token": "websocket",
+        "dimension": "surfaces",
+        "prefix": "web",
+        "evidenceFile": "web/server/ws-bridge.ts"
+      }
+    ],
+    "scanTruncated": false,
+    "failures": [
+      {
+        "path": "<workspace>/AGENTS.md",
+        "reason": "symlink"
+      }
+    ]
+  },
+  "economy": {
+    "seated": [
+      {
+        "advisorId": "beck",
+        "score": 4,
+        "matchedSignals": [],
+        "matchedDomains": [
+          "test-quality"
+        ],
+        "crossStack": true
+      },
+      {
+        "advisorId": "fowler",
+        "score": 4,
+        "matchedSignals": [],
+        "matchedDomains": [
+          "refactoring"
+        ],
+        "crossStack": true
+      },
+      {
+        "advisorId": "hunt",
+        "score": 4,
+        "matchedSignals": [],
+        "matchedDomains": [
+          "security"
+        ],
+        "crossStack": true
+      },
+      {
+        "advisorId": "willison",
+        "score": 4,
+        "matchedSignals": [],
+        "matchedDomains": [
+          "llm-pipeline"
+        ],
+        "crossStack": true
+      }
+    ],
+    "dropped": [
+      {
+        "advisorId": "abramov",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "dahl",
+        "reason": "no-domain-match"
+      },
+      {
+        "advisorId": "saarinen",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "watson",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "friedman",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "ritchie",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "hashimoto",
+        "reason": "no-domain-match"
+      },
+      {
+        "advisorId": "durov",
+        "reason": "over-budget"
+      },
+      {
+        "advisorId": "brandur",
+        "reason": "no-domain-match"
+      }
+    ],
+    "budget": 3,
+    "overBudget": true
+  },
+  "selected": [
+    "hunt",
+    "fowler",
+    "willison",
+    "beck",
+    "friedman",
+    "saarinen",
+    "watson",
+    "ritchie",
+    "abramov"
+  ],
+  "validation": {
+    "ok": true,
+    "roster": [
+      "abramov",
+      "saarinen",
+      "watson",
+      "friedman",
+      "ritchie",
+      "beck",
+      "fowler",
+      "hunt",
+      "willison"
+    ]
+  }
+}

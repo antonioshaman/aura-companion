@@ -2442,3 +2442,14 @@ describe("AgentsPage", () => {
   });
 
 });
+
+// Network failure must not masquerade as a successfully empty account.
+it("shows unavailable with Retry on initial agents failure", async () => {
+  mockApi.listAgents.mockRejectedValueOnce(new Error("offline"));
+  render(<AgentsPage route={{ page: "agents" }} />);
+  expect(await screen.findByText("Agents could not be loaded.")).toBeInTheDocument();
+  expect(screen.queryByText("No agents yet")).not.toBeInTheDocument();
+  mockApi.listAgents.mockResolvedValueOnce([makeAgent()]);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("Test Agent")).toBeInTheDocument();
+});

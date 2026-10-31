@@ -2296,7 +2296,19 @@ export function Playground() {
           description="Message input bar with mode toggle, image upload, saved prompts (@), and send/stop buttons"
         >
           <div className="max-w-3xl">
-            <Card label="Connected — code mode">
+            <Card label="Codex — truthful mode labels">
+              <p className="text-xs text-cc-muted">Auto / Plan: automatic approvals and full file access. Plan changes collaboration, not the sandbox.</p>
+            </Card>
+            <Card label="Reconnect — draft editing remains available">
+              <p className="text-xs text-cc-muted mb-2">Connection interrupted. Prepare a draft; sending resumes after reconnect.</p>
+              <textarea aria-label="Reconnect draft example" defaultValue="Continue after reconnect" className="w-full p-3 rounded-lg bg-cc-input-bg text-cc-fg" />
+              <button type="button" disabled className="text-xs text-cc-muted">Send — waiting for connection</button>
+            </Card>
+            <Card label="Draft restored after navigation">
+              <p className="text-xs text-cc-muted mb-2">Text and attachments stay with their session while navigating. Drafts live in this tab's memory.</p>
+              <textarea aria-label="Restored session draft" readOnly value="Continue reviewing the editor on mobile" className="w-full p-3 rounded-lg bg-cc-input-bg text-cc-fg" />
+            </Card>
+            <Card label="Connected — Auto edits (Claude)">
               <div className="border-t border-cc-border bg-cc-card px-4 py-3">
                 <div className="relative bg-cc-input-bg/95 border border-cc-border rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible">
                   <div className="flex items-end gap-2 px-2.5 py-2">
@@ -2323,7 +2335,7 @@ export function Playground() {
                           fill="none"
                         />
                       </svg>
-                      <span>code</span>
+                      <span>Auto edits</span>
                     </div>
                     <textarea aria-label="Message input"
                       readOnly

@@ -1,3 +1,4 @@
+import { useDraftStore } from "./drafts.js";
 import { create } from "zustand";
 import { createAuthSlice, type AuthSlice } from "./auth-slice.js";
 import { createSessionsSlice, type SessionsSlice } from "./sessions-slice.js";
@@ -39,6 +40,7 @@ export const useStore = create<AppState>((...args) => ({
   ...createCliStatusSlice(...args),
 
   reset: () => {
+    useDraftStore.getState().reset();
     const [set] = args;
     set({
       // Sessions — note: collapsedProjects is intentionally preserved across

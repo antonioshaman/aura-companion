@@ -18,7 +18,7 @@
  *  - 8/12 px internal spacing matches existing grouped controls.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useId } from "react";
 
 export type CouncilPairing = "claude+claude" | "claude+codex";
 
@@ -92,6 +92,7 @@ export function coerceCouncilPairing(
 }
 
 function PairingDropdownItem({
+  id,
   option,
   selected,
   isActive,
@@ -99,6 +100,7 @@ function PairingDropdownItem({
   unavailableReason,
   onSelect,
 }: {
+  id: string;
   option: PairingOption;
   selected: boolean;
   isActive: boolean;
@@ -124,7 +126,7 @@ function PairingDropdownItem({
   return (
     <button
       type="button"
-      id={`pairing-option-${option.value}`}
+      id={id}
       role="option"
       aria-selected={selected}
       aria-disabled={disabled || undefined}
@@ -171,6 +173,10 @@ export function CouncilToggle({
   codexObserverReviewAvailable = codexAvailable,
   codexUnavailableReason = "Codex CLI not detected — install or sign in.",
 }: CouncilToggleProps) {
+  const instanceId = useId();
+  const helpId = `${instanceId}-council-help`;
+  const listboxId = `${instanceId}-pairings`;
+  const optionId = (value: string) => `${instanceId}-pairing-option-${value}`;
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -290,7 +296,7 @@ export function CouncilToggle({
           role="switch"
           aria-checked={enabled}
           aria-label="Toggle Council Mode"
-          aria-describedby="council-toggle-help"
+          aria-describedby={helpId}
           onClick={() => onEnabledChange(!enabled)}
           className={`mt-0.5 shrink-0 w-9 h-5 rounded-full transition-colors cursor-pointer relative ${
             enabled ? "bg-cc-primary" : "bg-cc-muted/30"
@@ -305,7 +311,7 @@ export function CouncilToggle({
         </button>
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-cc-fg">Council Mode</div>
-          <p id="council-toggle-help" className="text-xs text-cc-muted mt-0.5 leading-snug">
+          <p id={helpId} className="text-xs text-cc-muted mt-0.5 leading-snug">
             Pair this session with an independent observer LLM that reviews each checkpoint.{" "}
             <span data-testid="council-toggle-when">
               Worth it for risky changes — payments, auth, DB migrations — and plan review.
@@ -347,7 +353,7 @@ export function CouncilToggle({
               onKeyDown={handleListboxKeyDown}
               aria-haspopup="listbox"
               aria-expanded={open}
-              aria-controls="council-pairing-listbox"
+              aria-controls={listboxId}
               data-testid="pairing-trigger"
               className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-cc-fg bg-cc-card border border-cc-border rounded-[10px] hover:bg-cc-hover transition-colors cursor-pointer"
               disabled={!enabled}
@@ -372,10 +378,10 @@ export function CouncilToggle({
 
         {open && (
           <div
-            id="council-pairing-listbox"
+            id={listboxId}
             role="listbox"
             aria-label="Select pairing"
-            aria-activedescendant={`pairing-option-${PAIRING_OPTIONS[activeIndex]?.value ?? ""}`}
+            aria-activedescendant={optionId(PAIRING_OPTIONS[activeIndex]?.value ?? "")}
             onKeyDown={handleListboxKeyDown}
             tabIndex={-1}
             // Saarinen council review #14: dropdown radius snapped
@@ -391,6 +397,7 @@ export function CouncilToggle({
               return (
                 <PairingDropdownItem
                   key={opt.value}
+                  id={optionId(opt.value)}
                   option={opt}
                   selected={opt.value === pairing}
                   isActive={idx === activeIndex}

@@ -1,3 +1,4 @@
+import { assertKbArchiveAvailable, KbArchiveUnavailableError } from "../knowledge/archive-availability.js";
 /**
  * Owner decisions on KB-analysis findings (spec §3.4/§3.5; plan Task 12;
  * ritchie B4/B7, fowler 4/14, hunt 3/5, dahl).
@@ -7,9 +8,9 @@
  * capability: only ids it flagged can be decided, on the runId it was built
  * for (a stale tab gets 409).
  *
- * Application: the decision lines are appended first (durable intent), then
- * `archive` decisions go through `archiveEntries` — the single function that
- * rewrites a KB store. keep / merge / seen write nothing but the ledger;
+ * Archive application is temporarily fail-closed until external writers share
+ * a synchronization protocol. The quiescent archive algorithm below retains
+ * sentinel-before-move ordering; keep / merge / seen write only the ledger;
  * `reviewedAt` / `mergePending` are folded from it, never stamped into the KB.
  * Memory findings accept only "seen" and never touch the memory dir.
  */
@@ -114,6 +115,7 @@ const COMPLETED: ReadonlySet<ArchiveOutcome["status"]> = new Set(["archived", "c
  *   what the sentinel proves was interrupted.
  */
 export function applyDecisions(v: { runId: string; items: ValidDecision[] }, deps: ApplyDeps): ApplyResult {
+  if (v.items.some((i) => i.decision === "archive")) assertKbArchiveAvailable();
   const ts = deps.now();
   const line = (i: ValidDecision): DecisionLine => ({
     v: DECISION_LINE_VERSION,
@@ -183,7 +185,8 @@ function archiveWithRetry(kbRoot: string, requests: { id: string; reason: string
 }
 
 /**
- * Boot reconcile: finish an archive the pending sentinel proves was
+ * Boot reconcile: currently paused with sentinel preserved. Once a common
+ * writer protocol exists, finish an archive the pending sentinel proves was
  * interrupted (crash, kill, unwritable KB), then write its decision lines and
  * clear the sentinel. Without a sentinel nothing happens — a restored entry
  * is the owner's choice, never undone at boot.
@@ -191,6 +194,11 @@ function archiveWithRetry(kbRoot: string, requests: { id: string; reason: string
 export function reconcileArchivePending(kbRoot: string, reportsRoot: string, append: (lines: DecisionLine[]) => void): string[] {
   const p = readArchivePending(reportsRoot);
   if (!p) return [];
+  try { assertKbArchiveAvailable(); } catch (err) {
+    if (!(err instanceof KbArchiveUnavailableError)) throw err;
+    log.warn("kb-analysis", "pending archive paused; sentinel retained", { event: "kb_analysis.archive_paused", runId: p.runId });
+    return [];
+  }
   const outcomes = archiveEntries(kbRoot, p.ids.map((id) => ({ id, reason: `owner decision (diagnostics report ${p.runId}, finished at boot)` })));
   const done = outcomes.filter((o) => COMPLETED.has(o.status)).map((o) => o.id);
   if (done.length > 0) {

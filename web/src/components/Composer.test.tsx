@@ -1,3 +1,4 @@
+import { useDraftStore } from "../store/drafts.js";
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -139,6 +140,7 @@ function setupMockStore(overrides: {
 }
 
 beforeEach(() => {
+  useDraftStore.getState().reset();
   vi.clearAllMocks();
   mockListPrompts.mockResolvedValue([]);
   mockCreatePrompt.mockResolvedValue({
@@ -476,12 +478,12 @@ describe("Composer slash menu", () => {
 // ─── Disabled state ──────────────────────────────────────────────────────────
 
 describe("Composer disabled state", () => {
-  it("textarea is disabled when CLI is not connected", () => {
+  it("textarea stays editable while CLI is not connected", () => {
     setupMockStore({ isConnected: false });
     const { container } = render(<Composer sessionId="s1" />);
     const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
 
-    expect(textarea.disabled).toBe(true);
+    expect(textarea.disabled).toBe(false);
   });
 
   it("textarea shows correct placeholder when connected", () => {
@@ -1148,11 +1150,11 @@ function withCliFailure(failure: Partial<CliFailure> = {}) {
 }
 
 describe("Composer cli-failed gate (Phase G)", () => {
-  it("textarea carries aria-disabled=true when cliFailures has an entry for this session", () => {
+  it("textarea stays locally editable when cliFailures has an entry for this session", () => {
     withCliFailure();
     const { container } = render(<Composer sessionId="s1" />);
     const textarea = container.querySelector("textarea")!;
-    expect(textarea.getAttribute("aria-disabled")).toBe("true");
+    expect(textarea.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("textarea carries aria-describedby pointing at the banner id when cliFailed", () => {
@@ -1269,4 +1271,53 @@ describe("Composer focus indicator", () => {
     expect(box.className).toMatch(/(^|\s)focus-within:border-cc-primary\/70(\s|$)/);
     expect(box.className).not.toContain("sm:focus-within:border-cc-primary/25");
   });
+});
+
+// Ordinary navigation must preserve a draft per session, including attachments.
+it.each(["claude", "codex"] as const)("isolates and restores %s session drafts", async (backend_type) => {
+  setupMockStore({ session: { backend_type } });
+  (mockStoreState.sessions as Map<string, SessionState>).set("s2", makeSession({ backend_type }));
+  (mockStoreState.cliConnected as Map<string, boolean>).set("s2", true);
+  const view = render(<Composer sessionId="s1" />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "draft A" } });
+  mockReadFileAsBase64.mockResolvedValue({ base64: "imageA", mediaType: "image/png" });
+  fireEvent.change(view.container.querySelector('input[type="file"]')!, { target: { files: [new File(["A"], "A.png", { type: "image/png" })] } });
+  await waitFor(() => expect(screen.getByAltText("A.png")).toBeTruthy());
+  view.rerender(<Composer sessionId="s2" />);
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+  expect(screen.queryByAltText("A.png")).toBeNull();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "draft B" } });
+  view.rerender(<Composer sessionId="s1" />);
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("draft A");
+  expect(screen.getByAltText("A.png")).toBeTruthy();
+  view.unmount();
+  render(<Composer sessionId="s2" />);
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("draft B");
+});
+
+// Display-only labels must not silently alter approvals or sandbox policy.
+it.each([
+  ["claude", "default", "Ask permissions"], ["claude", "acceptEdits", "Auto edits"],
+  ["claude", "bypassPermissions", "Agent"], ["claude", "plan", "Plan"],
+  ["codex", "default", "Auto"], ["codex", "acceptEdits", "Auto"],
+  ["codex", "bypassPermissions", "Auto"], ["codex", "plan", "Plan"],
+  ["codex", "unknown", "Mode unavailable"], ["claude", "", "Loading mode"],
+] as const)("labels %s/%s without policy writes", (backend_type, permissionMode, label) => {
+  setupMockStore({ session: { backend_type, permissionMode } });
+  render(<Composer sessionId="s1" />);
+  const toggles = screen.getAllByTitle("Toggle mode (Shift+Tab)");
+  expect(toggles.length).toBe(2); // mobile and desktop
+  for (const toggle of toggles) expect(toggle.textContent).toBe(label);
+  expect(mockSendToSession).not.toHaveBeenCalled();
+});
+it("retains reconnect typing without dispatching on Enter or Send", () => {
+  setupMockStore({ isConnected: false });
+  render(<Composer sessionId="s1" />);
+  const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+  expect(input.disabled).toBe(false);
+  fireEvent.change(input, { target: { value: "offline draft" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  for (const send of screen.getAllByTitle("Send message")) fireEvent.click(send);
+  expect(mockSendToSession).not.toHaveBeenCalled();
+  expect(input.value).toBe("offline draft");
 });

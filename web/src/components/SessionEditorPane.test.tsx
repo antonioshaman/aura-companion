@@ -539,3 +539,18 @@ describe("SessionEditorPane", () => {
     expect(cleanBtns[0].className).not.toContain("text-cc-success");
   });
 });
+
+// A failed background tree refresh is not consent to discard a dirty document.
+it("retains selected file and unsaved content on tree refresh failure", async () => {
+  getFileTreeMock.mockResolvedValue({ tree: [{ name: "a.ts", path: "/repo/a.ts", type: "file" }] });
+  readFileMock.mockResolvedValue({ path: "/repo/a.ts", content: "original" });
+  const view = render(<SessionEditorPane sessionId="s1" />);
+  await clickFile("a.ts");
+  const editor = (await screen.findAllByLabelText("Code editor"))[0];
+  fireEvent.change(editor, { target: { value: "unsaved" } });
+  getFileTreeMock.mockRejectedValueOnce(new Error("tree unavailable"));
+  storeState.changedFilesTick.set("s1", 1);
+  view.rerender(<SessionEditorPane sessionId="s1" />);
+  await screen.findAllByText("tree unavailable");
+  expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("unsaved");
+});

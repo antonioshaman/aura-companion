@@ -1,3 +1,4 @@
+import * as archiveAvailability from "../knowledge/archive-availability.js";
 // Tests for owner decisions (spec §3.4/§3.5; AC7, AC8, AC9; plan Task 12).
 //
 // What is validated:
@@ -51,6 +52,8 @@ const REPORT: KbAnalysisReport = {
 };
 
 beforeEach(() => {
+  // Existing move/recovery tests exercise the quiescent algorithm in temp dirs only.
+  vi.spyOn(archiveAvailability, "assertKbArchiveAvailable").mockImplementation(() => {});
   base = realpathSync(mkdtempSync(join(tmpdir(), "kb-decisions-")));
   kb = join(base, "kb");
   reports = join(base, "reports");
@@ -58,6 +61,7 @@ beforeEach(() => {
   writeFileSync(join(kb, "gotchas.jsonl"), [line("got-001"), line("got-017"), line("got-040"), line("got-041")].join("\n") + "\n");
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -267,3 +271,25 @@ describe("reconcileArchivePending", () => {
     expect(readFileSync(join(kb, "archive", "gotchas.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
   });
 });
+
+// Unlike the offline regressions above, these use the real production boundary.
+describe("archive safety boundary", () => {
+  it("refuses a mixed batch before ledger, pending or KB writes", () => {
+    vi.mocked(archiveAvailability.assertKbArchiveAvailable).mockRestore();
+    const before = snapshot(kb);
+    expect(() => apply([{ entryId: "got-040", decision: "keep" }, { entryId: "got-017", decision: "archive" }])).toThrow(/temporarily unavailable/);
+    expect(snapshot(kb)).toEqual(before);
+    expect(existsSync(reports)).toBe(false);
+  });
+  it("leaves interrupted archive intent and data untouched at boot", () => {
+    vi.mocked(archiveAvailability.assertKbArchiveAvailable).mockRestore();
+    const pending = { v: 1 as const, runId: REPORT.runId, ts: 777, ids: ["got-017"] };
+    writeArchivePending(reports, pending);
+    const before = snapshot(kb);
+    expect(reconcileArchivePending(kb, reports, ledgerForSafety)).toEqual([]);
+    expect(snapshot(kb)).toEqual(before);
+    expect(readArchivePending(reports)).toEqual(pending);
+    expect(readDecisions(reports).lines).toEqual([]);
+  });
+});
+function ledgerForSafety(lines: DecisionLine[]) { appendDecisions(reports, lines); }

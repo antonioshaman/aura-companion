@@ -1,3 +1,4 @@
+import { KbArchiveUnavailableError } from "../knowledge/archive-availability.js";
 import type { Hono } from "hono";
 import type { DiagnosticsOverview, KbAnalysisReport, KbAnalysisStatus } from "../diagnostics/diagnostics-types.js";
 import type { RunRequestResult } from "../diagnostics/kb-analysis-runner.js";
@@ -61,12 +62,15 @@ export function registerDiagnosticsRoutes(api: Hono, deps: DiagnosticsRoutesDeps
       return c.json({ error: "conflict", message: "An analysis is running; decide after it finishes." }, 409);
     }
     const body = await c.req.json().catch(() => undefined);
+    // Reading the body yields; analysis may have started since the first check.
+    if (deps.isRunning()) return c.json({ error: "conflict", message: "An analysis is running; decide after it finishes." }, 409);
     const v = deps.validate(body, deps.currentReport());
     if (!v.ok) return c.json({ error: v.status === 409 ? "conflict" : "validation_failed", message: v.error }, v.status);
     let result: ApplyResult;
     try {
       result = deps.apply(v);
     } catch (err) {
+      if (err instanceof KbArchiveUnavailableError) return c.json({ error: "archive_unavailable", message: err.message }, 409);
       log.warn("diagnostics-routes", "decision apply failed", {
         event: "kb_analysis.decision_failed",
         error: err instanceof Error ? err.message : String(err),

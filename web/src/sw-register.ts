@@ -1,50 +1,61 @@
-/**
- * Announce a waiting PWA update; apply it only on an explicit Update action.
- * Automatic reloads destroy the new-session form and unsaved editor content,
- * especially when a phone resumes after a deployment. Existing sessions remain
- * on the server; the visible notice lets the user choose when to reload.
- */
-import { registerSW } from "virtual:pwa-register";
-
+/** Register the existing Workbox worker, but let each tab choose when to reload. */
 type UpdateListener = (ready: boolean) => void;
-
 let updateReady = false;
+let registration: ServiceWorkerRegistration | undefined;
+let reloadRequested = false;
+let reloading = false;
 const listeners = new Set<UpdateListener>();
 
-const updateSW = registerSW({
-  onRegisteredSW(_swUrl: string, registration: ServiceWorkerRegistration | undefined) {
-    if (registration) {
-      // Check for SW updates every 60 minutes while the app is open.
-      // Catches deployments that happen while a user has the app open.
-      setInterval(() => {
-        registration.update();
-      }, 60 * 60 * 1000);
-    }
-  },
-  onNeedRefresh() {
-    updateReady = true;
-    for (const listener of listeners) listener(true);
-    // Do not reload while the user is selecting a project or editing a file.
-  },
-  onOfflineReady() {
-    console.log("[SW] Offline-ready: all assets precached");
-  },
-});
-
-/** Whether a new SW version is installed and waiting to activate. */
-export function isUpdateReady(): boolean {
-  return updateReady;
+function announceUpdate(): void {
+  updateReady = true;
+  for (const listener of listeners) listener(true);
 }
 
-/** Subscribe to update-ready transitions. Returns an unsubscribe function. */
+function reloadOnce(): void {
+  if (reloading) return;
+  reloading = true;
+  window.location.reload();
+}
+
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  const serviceWorker = navigator.serviceWorker;
+  // Workbox-window captures isUpdate at registration. On a first-install tab
+  // it stays false, so its prompt helper may activate an update without a reload.
+  // Native controllerchange also lets another tab update WITHOUT discarding
+  // this tab's editor/draft. Only this tab's explicit Update grants reload.
+  serviceWorker.addEventListener("controllerchange", () => {
+    if (reloadRequested) reloadOnce();
+  });
+  void serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then((reg) => {
+    registration = reg;
+    if (reg.waiting) announceUpdate();
+    const observeInstalling = () => {
+      const worker = reg.installing;
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        if (worker.state !== "installed") return;
+        if (serviceWorker.controller) announceUpdate();
+        else console.log("[SW] Offline-ready: all assets precached");
+      });
+    };
+    observeInstalling();
+    reg.addEventListener("updatefound", observeInstalling);
+    setInterval(() => { void reg.update().catch(() => { /* retry at the next interval */ }); }, 60 * 60 * 1000);
+  }).catch((error: unknown) => console.warn("[SW] Registration failed", error));
+}
+
+export function isUpdateReady(): boolean { return updateReady; }
 export function subscribeUpdateReady(listener: UpdateListener): () => void {
   listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
+  return () => { listeners.delete(listener); };
 }
 
-/** Activate the waiting SW and reload the page onto the new bundle. */
+/** The worker activates only after explicit consent; this tab then reloads once. */
 export function applyUpdate(): void {
-  void updateSW(true);
+  if (!updateReady || reloading) return;
+  reloadRequested = true;
+  if (registration?.waiting) registration.waiting.postMessage({ type: "SKIP_WAITING" });
+  // Another tab may have activated the worker already. The notice remains an
+  // explicit invitation to load its new document, never an automatic reload.
+  else reloadOnce();
 }

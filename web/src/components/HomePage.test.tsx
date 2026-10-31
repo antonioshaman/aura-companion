@@ -1,3 +1,4 @@
+import { useDraftStore } from "../store/drafts.js";
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -130,6 +131,7 @@ function buildStoreMock(overrides: Record<string, unknown> = {}) {
 
 describe("HomePage", () => {
   beforeEach(() => {
+  useDraftStore.getState().reset();
     vi.clearAllMocks();
     window.localStorage.clear();
     mockStoreGetState.mockReturnValue(buildStoreMock());
@@ -731,6 +733,22 @@ describe("HomePage", () => {
   });
 
   // ─── Folder picker ──────────────────────────────────────────────────────────
+
+  it("retains text, selected project and attachments across ordinary unmount", async () => {
+    const first = render(<HomePage />);
+    await screen.findByText("repo");
+    fireEvent.click(screen.getByText("repo").closest("button")!);
+    fireEvent.click(screen.getByText("Select Folder"));
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "unfinished task" } });
+    const file = new File(["image"], "draft.png", { type: "image/png" });
+    await act(async () => { fireEvent.change(first.container.querySelector('input[type="file"]')!, { target: { files: [file] } }); });
+    await screen.findByRole("button", { name: "Remove draft.png" });
+    first.unmount();
+    render(<HomePage />);
+    expect(screen.getByRole("button", { name: "Remove draft.png" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...")).toHaveValue("unfinished task");
+    expect(await screen.findByText("new-project")).toBeInTheDocument();
+  });
 
   it("keeps a selected folder when the slow server default arrives", async () => {
     // Phone: the picker can finish before the /fs/home request does.

@@ -8,7 +8,7 @@
  *   check already started it) → the button shows "running…" with no error.
  * - A decision rejected with 409 (report changed) shows the reason on that
  *   card and refetches the status.
- * - An archive decision that succeeds refetches and announces "got-017: archived."
+ * - An archive decision that succeeds refetches and announces "got-017: kept."
  * - A failed refresh keeps the last good data with a stale note instead of
  *   blanking the cards.
  * - Sequence guard: a slow response that arrives after a newer one is ignored.
@@ -93,23 +93,23 @@ describe("DiagnosticsPage", () => {
 
   it("a decision rejected with 409 shows the reason on that card and reloads the status", async () => {
     render(<DiagnosticsPage />);
-    const archive = await screen.findByRole("button", { name: "Archive got-017" });
+    const archive = await screen.findByRole("button", { name: "Keep got-017" });
     mocks.kbAnalysisDecide.mockResolvedValue({ status: 409, body: { error: "conflict", message: "the report changed" } });
     const callsBefore = mocks.kbAnalysisLatest.mock.calls.length;
     fireEvent.click(archive);
     expect(await screen.findByRole("alert")).toHaveTextContent("the report changed — reloading.");
-    expect(mocks.kbAnalysisDecide).toHaveBeenCalledWith("run-1", [{ entryId: "got-017", decision: "archive" }]);
+    expect(mocks.kbAnalysisDecide).toHaveBeenCalledWith("run-1", [{ entryId: "got-017", decision: "keep" }]);
     await waitFor(() => expect(mocks.kbAnalysisLatest.mock.calls.length).toBeGreaterThan(callsBefore));
   });
 
-  it("a successful archive refetches and announces it", async () => {
+  it("a successful Keep refetches and announces it", async () => {
     render(<DiagnosticsPage />);
-    const archive = await screen.findByRole("button", { name: "Archive got-017" });
-    mocks.kbAnalysisDecide.mockResolvedValue({ status: 200, body: { applied: [{ entryId: "got-017", decision: "archive", archive: "archived" }] } });
-    mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ decisions: { "got-017": { decision: "archive", ts: Date.now() } } }));
+    const archive = await screen.findByRole("button", { name: "Keep got-017" });
+    mocks.kbAnalysisDecide.mockResolvedValue({ status: 200, body: { applied: [{ entryId: "got-017", decision: "keep", archive: "archived" }] } });
+    mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ decisions: { "got-017": { decision: "keep", ts: Date.now() } } }));
     fireEvent.click(archive);
-    expect(await screen.findByText(/archived → \.agents\/knowledge\/archive\//)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("got-017: archived."));
+    expect(await screen.findByText(/kept/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("got-017: kept."));
   });
 
   it("a failed refresh keeps the last good data with a stale note", async () => {

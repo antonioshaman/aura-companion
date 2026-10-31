@@ -1,3 +1,4 @@
+import { KB_ARCHIVE_UNAVAILABLE } from "../../../server/knowledge/archive-availability.js";
 import { useState } from "react";
 import type { Decision, KbAnalysisStatus, KbFinding, MemoryFinding } from "../../api.js";
 import { ago, clock, dateTime } from "./format.js";
@@ -225,7 +226,7 @@ function FindingCard({
           <button type="button" className={posting ? btnInert : btnSecondary} aria-disabled={posting || undefined} onClick={() => act("keep")}>
             Keep <span className="sr-only">{f.entryId}</span>
           </button>
-          <button type="button" className={posting ? btnInert : btnSecondary} aria-disabled={posting || undefined} onClick={() => act("archive")}>
+          <button type="button" className={posting ? btnInert : btnSecondary} disabled title={KB_ARCHIVE_UNAVAILABLE} onClick={() => act("archive")}>
             {posting && ui.decision === "archive" ? "archiving…" : "Archive"} <span className="sr-only">{f.entryId}</span>
           </button>
           {partners.length > 0 && (
@@ -269,7 +270,7 @@ function FindingCard({
           </div>
         )}
         <p className="mt-2 text-[11px] text-cc-muted">
-          Keep hides it for 90 days unless it changes. Archive moves this line to .agents/knowledge/archive/{f.entry.file}; nothing is deleted.
+          Keep hides it for 90 days unless it changes. {KB_ARCHIVE_UNAVAILABLE}
           {partners.length > 0 ? " Mark for merge only records the pair — no text is changed." : ""}
         </p>
         {ui?.tag === "rejected" && (

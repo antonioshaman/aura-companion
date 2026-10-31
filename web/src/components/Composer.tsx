@@ -1,14 +1,13 @@
+import { permissionModeLabel } from "../utils/permission-mode-label.js";
+import { useDraftField } from "../store/drafts.js";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useStore } from "../store.js";
 import { createClientMessageId, sendToSession } from "../ws.js";
 import {
-  CLAUDE_MODES,
-  CODEX_MODES,
   detectInteractiveDiscoverySkill,
   pickRestoreMode,
 } from "../utils/backends.js";
 import { api, type SavedPrompt } from "../api.js";
-import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { CacheRewriteHint } from "./CacheRewriteHint.js";
@@ -37,8 +36,8 @@ export interface ComposerProps {
 }
 
 export function Composer({ sessionId, onTextChange }: ComposerProps) {
-  const [text, setText] = useState("");
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [text, setText] = useDraftField(sessionId, "text");
+  const [images, setImages] = useDraftField(sessionId, "images");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [savePromptOpen, setSavePromptOpen] = useState(false);
@@ -99,11 +98,10 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   // typeable (Friedman R4) but submit is gated.
   // React/UI finding #10 — per-session boolean selector, not the whole Map.
   const cliFailed = useStore((s) => s.cliFailures.has(sessionId));
-  const currentMode = sessionData?.permissionMode || "acceptEdits";
+  const currentMode = sessionData?.permissionMode;
   const isPlan = currentMode === "plan";
   const isCodex = sessionData?.backend_type === "codex";
-  const modes: ModeOption[] = isCodex ? CODEX_MODES : CLAUDE_MODES;
-  const modeLabel = modes.find((m) => m.value === currentMode)?.label?.toLowerCase() || currentMode;
+  const modeView = permissionModeLabel(isCodex ? "codex" : "claude", currentMode);
 
   // Derived (ephemeral, NOT stored): which discovery-skill the user is
   // currently typing, if any. Drives BOTH the refuse-affordance render
@@ -372,7 +370,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   }
 
   function toggleMode() {
-    if (!isConnected) return;
+    if (!isConnected || !currentMode) return;
     const store = useStore.getState();
     if (!isPlan) {
       store.setPreviousPermissionMode(sessionId, currentMode);
@@ -656,6 +654,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                     : "text-cc-muted border-cc-border"
               }`}
               title="Toggle mode (Shift+Tab)"
+              aria-description={modeView.description}
             >
               {isPlan ? (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
@@ -668,7 +667,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                   <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                 </svg>
               )}
-              <span>{modeLabel}</span>
+              <span>{modeView.label}</span>
             </button>
 
             <ModelSwitcher sessionId={sessionId} />
@@ -777,8 +776,6 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                   ? "This session has ended - start a new one to send messages"
                   : "Type a message... (/ + @)")
                 : "Waiting for CLI connection..."}
-              disabled={!isConnected}
-              aria-disabled={cliFailed ? true : undefined}
               aria-describedby={cliFailed ? `cli-failed-banner-${sessionId}` : undefined}
               rows={1}
               className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none rounded-sm focus-visible:outline-2 focus-visible:outline-cc-focus focus-visible:outline-offset-2 text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
@@ -868,6 +865,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                     : "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
               }`}
               title="Toggle mode (Shift+Tab)"
+              aria-description={modeView.description}
             >
               {isPlan ? (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
@@ -880,7 +878,7 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                   <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                 </svg>
               )}
-              <span>{modeLabel}</span>
+              <span>{modeView.label}</span>
             </button>
 
             {/* Spacer */}

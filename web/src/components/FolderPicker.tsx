@@ -1,3 +1,4 @@
+import { useModalDialog } from "../use-modal-dialog.js";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { api, type DirEntry } from "../api.js";
@@ -53,7 +54,6 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   const [closing, setClosing] = useState(false);
   const [recentDirs, setRecentDirs] = useState<string[]>(() => getRecentDirs());
 
-  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -85,64 +85,22 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
     loadDirs(initialPath || undefined);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Focus trap ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    const panel = panelRef.current;
-    if (!panel) return;
-
-    function handleTab(e: KeyboardEvent) {
-      if (e.key !== "Tab") return;
-      const focusable = panel!.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", handleTab);
-    // Auto-focus the filter input or first focusable on open
-    const timer = setTimeout(() => {
-      filterRef.current?.focus();
-    }, 80);
-    return () => {
-      document.removeEventListener("keydown", handleTab);
-      clearTimeout(timer);
-    };
-  }, []);
-
   const animateClose = useCallback(() => {
     if (closing) return;
     setClosing(true);
     setTimeout(onClose, 150);
   }, [onClose, closing]);
 
-  // ── Global keyboard shortcuts ───────────────────────────────────────────
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        if (showDirInput) {
-          // Let the input's own Escape handler fire first
-          return;
-        }
-        animateClose();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [showDirInput, animateClose]);
+  // The shared modal contract traps focus, owns Escape and restores the opener.
+  // Manual-path Escape first returns to browsing, rather than closing the picker.
+  const panelRef = useModalDialog<HTMLDivElement>(true, () => {
+    if (!showDirInput) animateClose();
+  });
 
   // ── Arrow-key navigation in directory list ──────────────────────────────
   useEffect(() => {
     function handleNav(e: KeyboardEvent) {
-      if (showDirInput) return;
+      if (showDirInput || e.defaultPrevented || !panelRef.current?.contains(document.activeElement)) return;
 
       // Backspace: go to parent directory (works even with empty dir list)
       if (e.key === "Backspace" && document.activeElement !== filterRef.current) {
@@ -410,6 +368,7 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
                 </svg>
                 <input
                   ref={filterRef}
+                  data-dialog-initial-focus
                   type="text"
                   aria-label="Filter directories"
                   value={filter}

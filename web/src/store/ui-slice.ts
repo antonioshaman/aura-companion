@@ -1,3 +1,4 @@
+import { HOME_DRAFT, useDraftStore } from "./drafts.js";
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
 
@@ -152,6 +153,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
     set({ taskPanelConfig: config });
   },
   newSession: () => {
+    useDraftStore.getState().clear(HOME_DRAFT);
     localStorage.removeItem("cc-current-session");
     // Cross-slice write: clears currentSessionId (owned by SessionsSlice)
     // alongside the homeResetKey bump to return the user to the home page.

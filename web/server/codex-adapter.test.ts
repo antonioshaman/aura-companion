@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CodexAdapter, StdioTransport } from "./codex-adapter.js";
 import type { ICodexTransport } from "./codex-adapter.js";
@@ -4639,6 +4640,34 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(messages.some((m) => m.type === "error" && `${m.message}`.includes("protocol drift"))).toBe(false);
 
     warnSpy.mockRestore();
+  });
+
+  // EC-6: replay the actual first-turn frame that broke a live phone-style launch.
+  it("accepts captured moderation metadata without interrupting the next reply", async () => {
+    const { mock, messages } = await initAdapter();
+    const frame = JSON.parse(readFileSync(new URL("./__fixtures__/codex-moderation/notification.jsonl", import.meta.url), "utf8"));
+    mock.pushNotification(frame.method, frame.params);
+    mock.pushNotification("item/agentMessage/delta", { itemId: "reply-after-metadata", delta: "OK" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(messages.some((m) => m.type === "error")).toBe(false);
+    expect(JSON.stringify(messages)).toContain("OK");
+  });
+  it.each([
+    {}, { threadId: "t", turnId: "u" }, { threadId: 1, turnId: "u", metadata: {} },
+    { threadId: "t", turnId: null, metadata: {} }, [],
+  ])("rejects a malformed moderation notification envelope: %j", async (params) => {
+    const { mock, messages } = await initAdapter();
+    // Deliberately bypass the typed transport with malformed captured-wire shapes.
+    mock.pushNotification("turn/moderationMetadata", params as unknown as Record<string, unknown>);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(messages.some((m) => m.type === "error")).toBe(true);
+  });
+  // Upstream schema deliberately permits ANY JSON value, including null.
+  it.each([null, [], "opaque", 1])("preserves opaque moderation metadata compatibility: %j", async (metadata) => {
+    const { mock, messages } = await initAdapter();
+    mock.pushNotification("turn/moderationMetadata", { threadId: "t", turnId: "u", metadata });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(messages.some((m) => m.type === "error")).toBe(false);
   });
 
   it("logs and surfaces unknown notification methods as protocol drift", async () => {

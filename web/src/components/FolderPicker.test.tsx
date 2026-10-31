@@ -1,3 +1,4 @@
+import { useState } from "react";
 // @vitest-environment jsdom
 /**
  * Tests for FolderPicker component.
@@ -563,4 +564,22 @@ describe("repo URL helpers", () => {
   ])("repoNameFromUrl(%s) → %s", (url, name) => {
     expect(repoNameFromUrl(url)).toBe(name);
   });
+});
+
+// The real opener remains mounted; dialog cleanup must return focus to it.
+it.each(["Escape", "Close", "Select", "Backdrop"])("restores opener focus after %s", async (action) => {
+  function Harness() {
+    const [open, setOpen] = useState(false);
+    return <><button onClick={() => setOpen(true)}>Choose project</button>{open && <FolderPicker initialPath="/home/user/project" onSelect={() => {}} onClose={() => setOpen(false)} />}</>;
+  }
+  render(<Harness />);
+  const opener = screen.getByRole("button", { name: "Choose project" });
+  opener.focus(); fireEvent.click(opener);
+  await screen.findByRole("dialog");
+  if (action === "Backdrop") fireEvent.click(screen.getByRole("dialog").parentElement!);
+  else if (action === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+  else if (action === "Close") fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  else fireEvent.click(await screen.findByRole("button", { name: /Select.*project/ }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(document.activeElement).toBe(opener);
 });

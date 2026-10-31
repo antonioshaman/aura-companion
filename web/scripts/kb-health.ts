@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { KB_ARCHIVE_UNAVAILABLE } from "../server/knowledge/archive-availability.js";
 // Knowledge-base lifecycle CLI (spec `aura-meta-diet.md`, Story A2):
 //   report / record / prune. The engine itself lives in
 //   `web/server/knowledge/kb-store.ts` (the diagnostics analyzer imports it from
@@ -83,6 +84,7 @@ export function runCli(argv: string[], io: { out: (s: string) => void; err: (s: 
     return 0;
   }
   if (cmd === "prune") {
+    if (!dryRun) { io.err(KB_ARCHIVE_UNAVAILABLE + " Use --dry-run to preview."); return 2; }
     const r = pruneKb(kbDir, { threshold, dryRun });
     const verb = r.dryRun ? "would archive" : "archived";
     io.out(`${verb} ${r.archived.length} entries${r.archived.length ? ":" : ""}`);

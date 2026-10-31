@@ -38,6 +38,9 @@ export function AgentsPage({ route }: Props) {
   const publicUrl = useStore((s) => s.publicUrl);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const listRequest = useRef(0);
   const [view, setView] = useState<"list" | "edit" | "edit-linear" | "setup-linear">("list");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AgentFormData>(EMPTY_FORM);
@@ -80,9 +83,14 @@ export function AgentsPage({ route }: Props) {
 
   // Load agents
   const loadAgents = useCallback(async () => {
+    const request = ++listRequest.current;
+    setLoading(true);
     try {
       const list = await api.listAgents();
+      if (request !== listRequest.current) return;
       setAgents(list);
+      setHasLoaded(true);
+      setListError(false);
       // Check if any OAuth connections exist (so the Linear trigger toggle is shown)
       const hasLinearAgent = list.some(a => a.triggers?.linear?.enabled && a.triggers?.linear?.hasAccessToken);
       if (hasLinearAgent) {
@@ -91,20 +99,21 @@ export function AgentsPage({ route }: Props) {
         // Also check if standalone OAuth connections exist
         try {
           const { connections } = await api.listLinearOAuthConnections();
-          setLinearOAuthConfigured(connections.length > 0);
+          if (request === listRequest.current) setLinearOAuthConfigured(connections.length > 0);
         } catch {
-          setLinearOAuthConfigured(false);
+          if (request === listRequest.current) setLinearOAuthConfigured(false);
         }
       }
     } catch {
-      // ignore
+      if (request === listRequest.current) setListError(true);
     } finally {
-      setLoading(false);
+      if (request === listRequest.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadAgents();
+    return () => { listRequest.current++; };
   }, [loadAgents]);
 
   // Handle route-based navigation to agent detail
@@ -559,9 +568,13 @@ export function AgentsPage({ route }: Props) {
         )}
 
         {/* Agent Cards */}
-        {loading ? (
+        {listError && <div role="alert" className="mb-3 text-sm text-cc-error">
+          {hasLoaded ? "Agents refresh failed. Showing last loaded data." : "Agents could not be loaded."}
+          <button type="button" onClick={loadAgents} disabled={loading} className="ml-2 underline">Retry</button>
+        </div>}
+        {loading && !hasLoaded ? (
           <div className="text-sm text-cc-muted">Loading...</div>
-        ) : agents.length === 0 ? (
+        ) : listError && !hasLoaded ? null : agents.length === 0 ? (
           <div className="text-center py-16">
             <div className="mb-3 flex justify-center text-cc-muted">
               <AgentIcon icon="bot" className="w-8 h-8" />

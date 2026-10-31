@@ -1,0 +1,16 @@
+[
+  {
+    "route": "agents",
+    "failure": "injected HTTP 503, SW disabled on this isolated preview origin",
+    "shown": "Agents could not be loaded.",
+    "retry": "PASS",
+    "scope": "local readonly API mirror, no production mutation"
+  },
+  {
+    "route": "runs",
+    "failure": "injected HTTP 503, SW disabled on this isolated preview origin",
+    "shown": "Runs could not be loaded.",
+    "retry": "PASS",
+    "scope": "local readonly API mirror, no production mutation"
+  }
+]

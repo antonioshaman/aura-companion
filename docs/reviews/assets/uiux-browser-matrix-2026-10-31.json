@@ -1,0 +1,242 @@
+[
+  {
+    "href": "http://127.0.0.1:5199/",
+    "incomplete": [
+      {
+        "count": 1,
+        "id": "aria-valid-attr-value",
+        "targets": [
+          [
+            "button[aria-haspopup=\"listbox\"]"
+          ]
+        ]
+      }
+    ],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/settings",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/agents",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/runs",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/diagnostics",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/prompts",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/environments",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/sandboxes",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/sweep",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/integrations",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/playground",
+    "incomplete": [
+      {
+        "count": 5,
+        "id": "aria-valid-attr-value",
+        "targets": [
+          [
+            "button[aria-controls=\"_r_s_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_t_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_u_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_v_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_10_-pairings\"]"
+          ]
+        ]
+      }
+    ],
+    "overflow": false,
+    "theme": "light",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#",
+    "incomplete": [
+      {
+        "count": 1,
+        "id": "aria-valid-attr-value",
+        "targets": [
+          [
+            ".rounded-\\[10px\\]"
+          ]
+        ]
+      }
+    ],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/settings",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/agents",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/runs",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/diagnostics",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/prompts",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/environments",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/sandboxes",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/sweep",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/integrations",
+    "incomplete": [],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/playground",
+    "incomplete": [
+      {
+        "count": 5,
+        "id": "aria-valid-attr-value",
+        "targets": [
+          [
+            "button[aria-controls=\"_r_2s_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_2t_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_2u_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_2v_-pairings\"]"
+          ],
+          [
+            "button[aria-controls=\"_r_30_-pairings\"]"
+          ]
+        ]
+      }
+    ],
+    "overflow": false,
+    "theme": "dark",
+    "violations": [],
+    "width": 390
+  }
+]

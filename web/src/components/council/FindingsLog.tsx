@@ -169,6 +169,7 @@ function DowngradedChip({ reason }: { reason: NonNullable<ObserverFinding["downg
     <span
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
       title={`Server downgraded this STOP — ${human}`}
+      role="note"
       aria-label={`Server downgraded this STOP — ${human}`}
     >
       downgraded
@@ -202,6 +203,7 @@ function WeakEvidenceChip({ reason }: { reason: NonNullable<ObserverFinding["wea
     <span
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
       title={`Weak evidence, not raised as a blocker — ${human}`}
+      role="note"
       aria-label={`Weak evidence, not raised as a blocker — ${human}`}
     >
       weak evidence
@@ -217,6 +219,7 @@ function DisputedChip({ via }: { via: NonNullable<ObserverFinding["disputed"]> }
     <span
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
       title={`Disputed earlier, not raised as a blocker — ${human}`}
+      role="note"
       aria-label={`Disputed earlier, not raised as a blocker — ${human}`}
     >
       disputed earlier
@@ -267,6 +270,7 @@ function ReviewerBadge({ finding }: { finding: ObserverFinding }) {
           : "bg-cc-muted/10 text-cc-muted border-cc-border"
       }`}
       title={`${who}: ${label}`}
+      role="note"
       aria-label={`${who}: ${label}`}
     >
       {finding.secondOpinion ? "2nd · " : ""}
@@ -283,6 +287,7 @@ function AlsoFlaggedChip({ by }: { by: readonly ObserverFinding[] }) {
       data-testid="finding-also-flagged-chip"
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-success/10 text-cc-success border border-cc-success/25 shrink-0"
       title={`Also flagged by ${labels}`}
+      role="note"
       aria-label={`Also flagged by ${labels}`}
     >
       also flagged
@@ -297,6 +302,7 @@ function HoldsAutoProceedChip() {
     <span
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-error/10 text-cc-error border border-cc-error/25"
       title="Holds auto-proceed until you dismiss or dispute it"
+      role="note"
       aria-label="Holds auto-proceed until you dismiss or dispute it"
     >
       holds auto-proceed
@@ -311,6 +317,7 @@ function DismissedChip() {
       data-testid="finding-dismissed-chip"
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
       title="Dismissed — not a blocker, kept in the log"
+      role="note"
       aria-label="Dismissed — not a blocker, kept in the log"
     >
       dismissed

@@ -161,3 +161,47 @@ describe("state + reconcile", () => {
     expect(readdirSync(root)).toContain(".fedcba9876543210.tmp");
   });
 });
+
+// Unknown JSON must be rejected at disk boundary before cards/decisions touch it.
+it.each([
+  { findings: [{ entryId: "x", signals: [null] }] },
+  { findings: [{ entryId: "x", signals: [] }] },
+  { memory: { fileCount: 1, truncated: false, findings: null } },
+  { mergeTasks: [null] },
+  { trigger: "unknown" },
+  { kbEntryCount: "1" },
+])("nested malformed report is unavailable: %j", (patch) => {
+  const valid = report(1, "aaaaaaaa");
+  writeReport(root, valid);
+  writeFileSync(join(root, listReports(root)[0]), JSON.stringify({ ...valid, ...patch }));
+  expect(readLatestReport(root)).toMatchObject({ status: "unavailable", reason: "report-invalid" });
+});
+
+// Full v1 fixture exercises every nested consumer field, including optional links.
+const nestedReport = () => ({ ...report(1, "aaaaaaaa"), findings: [{
+  entryId: "x", suggested: "merge", signals: [{ signal: "duplicate", criterion: "same fact", partnerId: "y", similarity: 0.9 }],
+  entry: { id: "x", file: "gotchas.jsonl", type: "gotcha", fact: "fact", recommendation: "check", confidence: "high", tags: ["ui"],
+    affectedFiles: [{ path: "a.ts", exists: false }], provenance: [{ source: "agent", reference: "test", date: "2026-10-31" }],
+    createdAt: null, usage: 0, helpfulCount: 0, outdatedReports: 0, promoted: false },
+}], mergeTasks: [{ entryId: "x", mergeInto: "y", decidedAt: 1 }],
+  memory: { fileCount: 1, truncated: false, findings: [{ findingId: "mem:a", file: "a", name: "A", description: "D", signals: [{ signal: "duplicate", criterion: "same", partnerFile: "b" }] }] } });
+it("accepts the complete supported report shape", () => {
+  const fixture = nestedReport();
+  writeReport(root, fixture as KbAnalysisReport);
+  expect(readLatestReport(root)).toMatchObject({ status: "available", data: fixture });
+});
+it.each([
+  "entry.tags", "entry.affectedFiles", "entry.provenance", "entry.createdAt", "entry.usage", "entry.promoted", "signals.criterion", "signals.partnerId", "signals.similarity", "memory.findings", "memory.signals",
+])("rejects malformed %s before rendering", (field) => {
+  const fixture = nestedReport();
+  const f = fixture.findings[0];
+  if (field.startsWith("entry.")) (f.entry as Record<string, unknown>)[field.slice(6)] = null;
+  else if (field.startsWith("signals.")) (f.signals[0] as Record<string, unknown>)[field.slice(8)] = {};
+  else if (field === "memory.findings") (fixture.memory as Record<string, unknown>).findings = [null];
+  else (fixture.memory.findings[0] as Record<string, unknown>).signals = [null];
+  // createdAt permits null; use an object to test the invalid alternative.
+  if (field === "entry.createdAt") (f.entry as Record<string, unknown>).createdAt = {};
+  writeReport(root, report(1, "aaaaaaaa"));
+  writeFileSync(join(root, listReports(root)[0]), JSON.stringify(fixture));
+  expect(readLatestReport(root)).toMatchObject({ status: "unavailable", reason: "report-invalid" });
+});

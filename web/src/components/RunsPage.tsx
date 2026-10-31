@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type AgentExecution, type AgentInfo, type ExecutionListResult } from "../api.js";
 import { timeAgo } from "../utils/time-ago.js";
 
@@ -53,14 +53,22 @@ export function RunsPage() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(false);
+  const [dataKey, setDataKey] = useState<string | null>(null);
+  const requestId = useRef(0);
   const [triggerFilter, setTriggerFilter] = useState<TriggerFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [agentFilter, setAgentFilter] = useState<string>("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const filterKey = JSON.stringify([triggerFilter, statusFilter, agentFilter]);
+  const hasData = dataKey === filterKey;
+  const shownExecutions = hasData ? executions : [];
   const executionKey = (exec: AgentExecution) => `${exec.sessionId}-${exec.startedAt}`;
-  const selectedExec = executions.find((exec) => executionKey(exec) === selectedKey);
+  const selectedExec = shownExecutions.find((exec) => executionKey(exec) === selectedKey);
 
   const fetchExecutions = useCallback(async () => {
+    const request = ++requestId.current;
+    setLoading(true);
     try {
       const opts: Record<string, string | number> = { limit: 100 };
       if (triggerFilter !== "all") opts.triggerType = triggerFilter;
@@ -68,14 +76,17 @@ export function RunsPage() {
       if (agentFilter) opts.agentId = agentFilter;
 
       const result: ExecutionListResult = await api.listExecutions(opts);
+      if (request !== requestId.current) return;
+      setDataKey(filterKey);
+      setFetchError(false);
       setExecutions(result.executions);
       setTotal(result.total);
     } catch (err) {
-      console.error("[runs] Failed to fetch executions:", err);
+      if (request === requestId.current) setFetchError(true);
     } finally {
-      setLoading(false);
+      if (request === requestId.current) setLoading(false);
     }
-  }, [triggerFilter, statusFilter, agentFilter]);
+  }, [triggerFilter, statusFilter, agentFilter, filterKey]);
 
   const fetchAgents = useCallback(async () => {
     try {
@@ -91,10 +102,11 @@ export function RunsPage() {
   }, [fetchAgents]);
 
   useEffect(() => {
+    setFetchError(false);
     fetchExecutions();
     // Auto-refresh every 5 seconds
     const interval = setInterval(fetchExecutions, 5000);
-    return () => clearInterval(interval);
+    return () => { clearInterval(interval); requestId.current++; };
   }, [fetchExecutions]);
 
   const agentName = (agentId: string) => {
@@ -162,15 +174,19 @@ export function RunsPage() {
         </div>
 
         <span className="text-xs text-cc-muted ml-auto">
-          {total} total
+          {hasData ? total : "—"} total
         </span>
       </div>
 
       {/* Table */}
       <div className="flex-1 overflow-auto">
-        {loading ? (
+        {fetchError && <div role="alert" className="p-4 text-sm text-cc-error">
+          {hasData ? "Runs refresh failed. Showing last loaded data." : "Runs could not be loaded."}
+          <button type="button" onClick={fetchExecutions} disabled={loading} className="ml-2 underline">Retry</button>
+        </div>}
+        {loading && !hasData ? (
           <div className="text-sm text-cc-muted text-center py-12">Loading...</div>
-        ) : executions.length === 0 ? (
+        ) : fetchError && !hasData ? null : shownExecutions.length === 0 ? (
           <div className="text-center py-16">
             <div className="mb-3 flex justify-center text-cc-muted">
               <svg viewBox="0 0 16 16" fill="currentColor" className="w-8 h-8">
@@ -193,7 +209,7 @@ export function RunsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-cc-border/50">
-              {executions.map((exec) => {
+              {shownExecutions.map((exec) => {
                 const status = statusIndicator(exec);
                 const isSelected = selectedKey === executionKey(exec);
                 return (
