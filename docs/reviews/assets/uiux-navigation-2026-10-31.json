@@ -7,5 +7,9 @@
   "folderEscape": {
     "dialog": false,
     "focus": "web"
+  },
+  "folderBackdrop": {
+    "dialog": false,
+    "focus": "web"
   }
 }

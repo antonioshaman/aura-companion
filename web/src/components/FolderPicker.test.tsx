@@ -581,5 +581,7 @@ it.each(["Escape", "Close", "Select", "Backdrop"])("restores opener focus after 
   else if (action === "Close") fireEvent.click(screen.getByRole("button", { name: "Close" }));
   else fireEvent.click(await screen.findByRole("button", { name: /Select.*project/ }));
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-  expect(document.activeElement).toBe(opener);
+  // DOM removal can precede React passive-effect cleanup under CI load.
+  // Assert the promised focus return itself, not only the removed portal.
+  await waitFor(() => expect(document.activeElement).toBe(opener));
 });

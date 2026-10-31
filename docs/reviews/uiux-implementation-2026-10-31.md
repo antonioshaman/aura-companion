@@ -148,3 +148,6 @@ Implementation/self-review by AI; nine AI advisors planned the work. Human code 
 - `web/src/sw-register.test.ts`
 - `web/src/sw-register.ts`
 - `web/src/utils/permission-mode-label.ts`
+
+CI b190987f: coverage/a11y/rendered scan passed; Ubuntu caught a timing assumption in the new backdrop test (portal removed before passive cleanup restored focus). Change the assertion to wait for the actual promised focus return, retaining both portal removal and correct opener assertions. macOS full tests passed in the log; no production change/skip added. Re-run targeted repeat and full CI before delivery.
+The corrected focus expectation passed all 49 picker/modal tests and five parallel repetitions (20 close scenarios). Real agent-browser backdrop click also closed the dialog and returned focus to the project button; recorded in navigation evidence. Vitest 4 has no --repeat flag, so repetitions used five separate processes. macOS CI conclusion was cancelled by matrix fail-fast after Ubuntu; its tests had passed. No failing test was removed or skipped.
