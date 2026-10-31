@@ -9,6 +9,7 @@ describe("UpdateAvailableBanner", () => {
   it("renders the update notice", () => {
     render(<UpdateAvailableBanner onUpdate={() => {}} />);
     expect(screen.getByText(/A new version is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/copy unsent drafts before updating/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Update/i })).toBeInTheDocument();
   });
 

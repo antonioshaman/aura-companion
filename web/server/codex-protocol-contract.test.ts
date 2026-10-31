@@ -94,3 +94,11 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
     expect(responseType).toContain("success: boolean");
   });
 });
+
+it("pins the observed moderation envelope without inventing a metadata shape", () => {
+  const schema = JSON.parse(readSnapshot("server/protocol/codex-upstream/v2/TurnModerationMetadataNotification.json"));
+  expect(schema.required).toEqual(["metadata", "threadId", "turnId"]);
+  expect(schema.properties.threadId).toEqual({ type: "string" });
+  expect(schema.properties.turnId).toEqual({ type: "string" });
+  expect(schema.properties.metadata).toBe(true);
+});

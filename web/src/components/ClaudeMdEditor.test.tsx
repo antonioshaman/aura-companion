@@ -11,7 +11,7 @@
  * - Has close confirmation when dirty (via window.confirm)
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // ─── Mock api module ────────────────────────────────────────────────────────
@@ -616,4 +616,29 @@ describe("editor keyboard semantics", () => {
     fireEvent.keyDown(document.activeElement!, { key: "Escape" }); expect(close).toHaveBeenCalledOnce();
     unmount();
   });
+});
+
+// Saving one revision must not bless edits made while its request is pending.
+it("keeps later typing dirty when an earlier save resolves", async () => {
+  let finish!: (v: { ok: boolean }) => void;
+  mockSaveClaudeMd.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+  render(<ClaudeMdEditor {...defaultProps} />);
+  const editor = await screen.findByRole("textbox");
+  fireEvent.change(editor, { target: { value: "submitted" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.change(editor, { target: { value: "new unsaved" } });
+  await act(async () => finish({ ok: true }));
+  expect(editor).toHaveValue("new unsaved");
+  expect(screen.getByText("Unsaved")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+});
+it("ignores a late load from the previous project", async () => {
+  let finish!: (v: typeof twoFiles) => void;
+  mockGetClaudeMdFiles.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+  const view = render(<ClaudeMdEditor {...defaultProps} />);
+  mockGetClaudeMdFiles.mockResolvedValueOnce({ files: [{ path: "/B/CLAUDE.md", content: "B" }] });
+  view.rerender(<ClaudeMdEditor {...defaultProps} cwd="/B" />);
+  expect(await screen.findByRole("textbox")).toHaveValue("B");
+  await act(async () => finish(twoFiles));
+  expect(screen.getByRole("textbox")).toHaveValue("B");
 });

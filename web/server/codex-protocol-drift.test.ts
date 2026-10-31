@@ -66,6 +66,8 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
       // "ignoring 1 unrecognized configuration setting") — informational
       // no-op in the adapter, same treatment as skills/changed.
       "warning",
+      // Observed and schema-verified in installed codex-cli 0.162.1 (2026-10-31).
+      "turn/moderationMetadata",
       "codex/event/stream_error",
       "codex/event/error",
       "codex/event/token_count",

@@ -1,3 +1,4 @@
+import { useId } from "react";
 /**
  * UiuxToolkitSettings — the "UI/UX toolkit" row of Settings → Session defaults
  * (PLAN Task 8, spec `uiux-agent-enrichment.md` AC2.2 / AC2.5).
@@ -58,6 +59,7 @@ function Status({ cli, item }: { cli: string; item: Item }) {
 }
 
 export function UiuxToolkitSettings({ enabled, onEnabledChange, view, disabled = false }: UiuxToolkitSettingsProps) {
+  const helpId = useId();
   return (
     <div className="space-y-2" data-testid="uiux-toolkit-settings">
       <button
@@ -65,7 +67,7 @@ export function UiuxToolkitSettings({ enabled, onEnabledChange, view, disabled =
         role="switch"
         aria-checked={enabled}
         aria-label="UI/UX toolkit"
-        aria-describedby="uiux-toolkit-help"
+        aria-describedby={helpId}
         disabled={disabled}
         onClick={() => onEnabledChange(!enabled)}
         className="w-full flex items-center justify-between px-3 py-3 min-h-[44px] rounded-lg text-sm bg-cc-hover text-cc-fg hover:bg-cc-active transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
@@ -73,7 +75,7 @@ export function UiuxToolkitSettings({ enabled, onEnabledChange, view, disabled =
         <span>UI/UX toolkit</span>
         <span className={`text-xs font-medium ${enabled ? "text-cc-success" : "text-cc-muted"}`}>{enabled ? "On" : "Off"}</span>
       </button>
-      <p id="uiux-toolkit-help" className="text-xs text-cc-muted px-1">
+      <p id={helpId} className="text-xs text-cc-muted px-1">
         UI/UX and Council skills shipped with Aura. Applies to new sessions. In Claude Code they are
         invoked as <code>/aura-toolkit:&lt;name&gt;</code>. A skill of your own with the same name is never
         changed and is the one used.

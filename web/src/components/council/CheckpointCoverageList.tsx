@@ -1,3 +1,4 @@
+import { useId } from "react";
 /**
  * CheckpointCoverageList — observer rigor (2026-10-16).
  *
@@ -26,6 +27,7 @@ export interface CheckpointCoverageListProps {
 }
 
 export function CheckpointCoverageList({ gaps }: CheckpointCoverageListProps) {
+  const titleId = useId();
   const [expanded, setExpanded] = useState(false);
   if (gaps.length === 0) return null;
   const newestFirst = [...gaps].reverse();
@@ -41,10 +43,10 @@ export function CheckpointCoverageList({ gaps }: CheckpointCoverageListProps) {
   return (
     <section
       data-testid="checkpoint-coverage"
-      aria-labelledby="checkpoint-coverage-title"
+      aria-labelledby={titleId}
       className="shrink-0 px-3 py-2 border-b border-cc-border"
     >
-      <h2 id="checkpoint-coverage-title" className="text-[11px] font-medium text-cc-fg">
+      <h2 id={titleId} className="text-[11px] font-medium text-cc-fg">
         Чекпоинты без проверенного ревью
         <span className="ml-1.5 font-normal text-cc-muted">{summary}</span>
       </h2>

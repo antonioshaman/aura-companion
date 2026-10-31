@@ -70,7 +70,10 @@ describe("KbFindingsCard", () => {
     expect(screen.getByText(/109 days ≥ 30/)).toBeInTheDocument();
     expect(screen.getByText(/web\/gone\.ts \(missing\)/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Archive got-017" }));
-    expect(onDecide).toHaveBeenCalledWith("got-017", "archive", undefined);
+    expect(onDecide).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Archive got-017" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Keep got-017" }));
+    expect(onDecide).toHaveBeenCalledWith("got-017", "keep", undefined);
     expect(await axe(container)).toHaveNoViolations();
   });
 

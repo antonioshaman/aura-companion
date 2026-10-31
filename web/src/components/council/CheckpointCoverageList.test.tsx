@@ -53,3 +53,18 @@ describe("CheckpointCoverageList", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+// Repeated gallery instances must resolve descriptions/titles inside their own root.
+it("keeps relationship IDs local to each instance", () => {
+  const { container } = render(<><CheckpointCoverageList gaps={gaps} /><CheckpointCoverageList gaps={gaps} /></>);
+  const roots = [...container.querySelectorAll('[data-testid="checkpoint-coverage"]')];
+  expect(roots).toHaveLength(2);
+  const ids = [...container.querySelectorAll("[id]")].map((el) => el.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  for (const root of roots) {
+    const source = root.matches('[aria-labelledby]') ? root : root.querySelector('[aria-labelledby]')!;
+    const target = document.getElementById(source.getAttribute('aria-labelledby')!);
+    expect(target).not.toBeNull();
+    expect(root.contains(target)).toBe(true);
+  }
+});

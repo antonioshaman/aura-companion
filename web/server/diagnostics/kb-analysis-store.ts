@@ -19,6 +19,7 @@ import {
   DECISION_LINE_VERSION,
   KB_REPORT_SCHEMA_VERSION,
   KB_SIGNALS,
+  MEMORY_SIGNALS,
   type AnalysisTrigger,
   type CardSource,
   type DecisionLine,
@@ -77,24 +78,33 @@ export function pruneReports(root: string, keep = REPORTS_KEPT): string[] {
   return doomed;
 }
 
+const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
+const optionalString = (v: unknown) => v === undefined || typeof v === "string";
+
+/** Total boundary validation: no consumer may assume nested disk JSON is typed. */
 function isReport(v: unknown): v is KbAnalysisReport {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
-  return (
-    r.schemaVersion === KB_REPORT_SCHEMA_VERSION &&
-    typeof r.runId === "string" &&
-    typeof r.generatedAt === "number" &&
-    Array.isArray(r.findings) &&
-    r.findings.every(
-      (f) =>
-        typeof f === "object" &&
-        f !== null &&
-        typeof (f as { entryId?: unknown }).entryId === "string" &&
-        Array.isArray((f as { signals?: unknown }).signals) &&
-        (f as { signals: { signal?: unknown }[] }).signals.every((s) => (KB_SIGNALS as readonly unknown[]).includes(s.signal)),
-    ) &&
-    Array.isArray(r.mergeTasks)
-  );
+  if (!object(v)) return false;
+  const entry = (e: unknown): boolean => object(e) &&
+    ["id", "file", "type", "fact", "recommendation", "confidence"].every((k) => typeof e[k] === "string") &&
+    strings(e.tags) && Array.isArray(e.affectedFiles) && e.affectedFiles.every((a) => object(a) && typeof a.path === "string" && typeof a.exists === "boolean") &&
+    Array.isArray(e.provenance) && e.provenance.every((p) => object(p) && ["source", "reference", "date"].every((k) => typeof p[k] === "string")) &&
+    (e.createdAt === null || typeof e.createdAt === "string") &&
+    ["usage", "helpfulCount", "outdatedReports"].every((k) => finite(e[k])) && typeof e.promoted === "boolean";
+  const signal = (s: unknown): boolean => object(s) && (KB_SIGNALS as readonly unknown[]).includes(s.signal) &&
+    typeof s.criterion === "string" && optionalString(s.partnerId) && (s.similarity === undefined || finite(s.similarity));
+  const memory = (m: unknown): boolean => m === null || (object(m) && finite(m.fileCount) && typeof m.truncated === "boolean" &&
+    Array.isArray(m.findings) && m.findings.every((f) => object(f) &&
+      ["findingId", "file", "name", "description"].every((k) => typeof f[k] === "string") &&
+      Array.isArray(f.signals) && f.signals.every((s) => object(s) && (MEMORY_SIGNALS as readonly unknown[]).includes(s.signal) &&
+        typeof s.criterion === "string" && optionalString(s.partnerFile))));
+  return v.schemaVersion === KB_REPORT_SCHEMA_VERSION && typeof v.runId === "string" && finite(v.generatedAt) &&
+    ["entries", "sessions", "age", "manual"].includes(v.trigger as string) && finite(v.kbEntryCount) && finite(v.kbParseErrors) &&
+    Array.isArray(v.findings) && v.findings.every((f) => object(f) && typeof f.entryId === "string" &&
+      Array.isArray(f.signals) && f.signals.every(signal) && [null, "archive", "merge"].includes(f.suggested as null | string) && entry(f.entry)) &&
+    Array.isArray(v.mergeTasks) && v.mergeTasks.every((t) => object(t) && typeof t.entryId === "string" && typeof t.mergeInto === "string" && finite(t.decidedAt)) &&
+    memory(v.memory);
 }
 
 /** The newest report, validated. null = no report yet; unavailable = present but unusable. */

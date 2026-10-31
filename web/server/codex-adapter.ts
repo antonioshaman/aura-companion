@@ -2176,6 +2176,16 @@ export class CodexAdapter implements IBackendAdapter {
       case "turn/plan/updated":
         this.handleTurnPlanUpdated(params);
         break;
+      case "turn/moderationMetadata":
+        // Codex 0.162.1 emits this before the first reply. Its schema requires
+        // IDs + metadata, but metadata is ANY JSON value, not an object schema.
+        // It is informational: never turn it into an approval or lifecycle change.
+        if (typeof params !== "object" || params === null || Array.isArray(params) ||
+            typeof params.threadId !== "string" || typeof params.turnId !== "string" ||
+            !Object.prototype.hasOwnProperty.call(params, "metadata")) {
+          this.reportProtocolDrift("notification", method, { payload: params });
+        }
+        break;
       case "turn/diff/updated":
         // Could show diff, but not needed for MVP
         break;

@@ -476,3 +476,10 @@ describe("formatClockTime", () => {
     expect(formatClockTime(new Date(2026, 9, 18, 23, 59).getTime(), now)).toBe("18 Oct 23:59");
   });
 });
+
+// The two plain-string annotations also need supported name semantics.
+it("exposes held and dismissed explanations as notes", () => {
+  render(<FindingsLog findings={[finding({ id: "held", holdsAutoProceed: true }), finding({ id: "dismissed", severity: "STOP" })]} dismissedStopIds={new Set(["dismissed"])} />);
+  expect(screen.getByRole("note", { name: "Holds auto-proceed until you dismiss or dispute it" })).toBeInTheDocument();
+  expect(screen.getByRole("note", { name: "Dismissed — not a blocker, kept in the log" })).toBeInTheDocument();
+});

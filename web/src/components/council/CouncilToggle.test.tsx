@@ -397,9 +397,9 @@ describe("CouncilToggle", () => {
     );
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     const listbox = screen.getByRole("listbox");
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+claude");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+claude").id);
     fireEvent.keyDown(listbox, { key: "ArrowDown" });
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+codex");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+codex").id);
   });
 
   it("ArrowUp wraps the active option around the list", () => {
@@ -410,7 +410,7 @@ describe("CouncilToggle", () => {
     const listbox = screen.getByRole("listbox");
     fireEvent.keyDown(listbox, { key: "ArrowUp" });
     // Two options → ArrowUp from index 0 wraps to index 1.
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+codex");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+codex").id);
   });
 
   it("Home jumps the active option to the first row", () => {
@@ -420,7 +420,7 @@ describe("CouncilToggle", () => {
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     const listbox = screen.getByRole("listbox");
     fireEvent.keyDown(listbox, { key: "Home" });
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+claude");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+claude").id);
   });
 
   it("End jumps the active option to the last row", () => {
@@ -430,7 +430,7 @@ describe("CouncilToggle", () => {
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     const listbox = screen.getByRole("listbox");
     fireEvent.keyDown(listbox, { key: "End" });
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+codex");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+codex").id);
   });
 
   // ArrowDown over a disabled (codex unavailable) option skips it — single
@@ -449,7 +449,7 @@ describe("CouncilToggle", () => {
     const listbox = screen.getByRole("listbox");
     // Only claude+claude is enabled, so ArrowDown wraps back to itself.
     fireEvent.keyDown(listbox, { key: "ArrowDown" });
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+claude");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+claude").id);
   });
 
   // Enter / Space activates the currently-active option, firing onPairingChange.
@@ -509,9 +509,9 @@ describe("CouncilToggle", () => {
     );
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     const listbox = screen.getByRole("listbox");
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+claude");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+claude").id);
     fireEvent.keyDown(listbox, { key: "PageDown" });
-    expect(listbox).toHaveAttribute("aria-activedescendant", "pairing-option-claude+claude");
+    expect(listbox).toHaveAttribute("aria-activedescendant", screen.getByTestId("pairing-option-claude+claude").id);
   });
 
   // Outside-click closes — covers the `useEffect` outside-click handler at
@@ -537,4 +537,19 @@ describe("CouncilToggle", () => {
     fireEvent.pointerDown(screen.getByRole("listbox"));
     expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
+});
+
+// Repeated gallery instances must resolve descriptions/titles inside their own root.
+it("keeps relationship IDs local to each instance", () => {
+  const { container } = render(<><CouncilToggle enabled={true} pairing="claude+claude" onEnabledChange={() => {}} onPairingChange={() => {}} /><CouncilToggle enabled={true} pairing="claude+claude" onEnabledChange={() => {}} onPairingChange={() => {}} /></>);
+  const roots = [...container.querySelectorAll('[data-testid="council-toggle"]')];
+  expect(roots).toHaveLength(2);
+  const ids = [...container.querySelectorAll("[id]")].map((el) => el.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  for (const root of roots) {
+    const source = root.matches('[aria-describedby]') ? root : root.querySelector('[aria-describedby]')!;
+    const target = document.getElementById(source.getAttribute('aria-describedby')!);
+    expect(target).not.toBeNull();
+    expect(root.contains(target)).toBe(true);
+  }
 });

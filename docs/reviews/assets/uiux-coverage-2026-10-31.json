@@ -1,0 +1,118 @@
+[
+  {
+    "file": "web/scripts/kb-health.ts",
+    "lineCoverage": 85.45
+  },
+  {
+    "file": "web/server/diagnostics/kb-analysis-store.ts",
+    "lineCoverage": 97.95
+  },
+  {
+    "file": "web/server/diagnostics/kb-decisions.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/server/knowledge/kb-store.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/server/routes/diagnostics-routes.ts",
+    "lineCoverage": 90.32
+  },
+  {
+    "file": "web/src/components/AgentsPage.tsx",
+    "lineCoverage": 88.88
+  },
+  {
+    "file": "web/src/components/ClaudeMdEditor.tsx",
+    "lineCoverage": 97.75
+  },
+  {
+    "file": "web/src/components/Composer.tsx",
+    "lineCoverage": 86.8
+  },
+  {
+    "file": "web/src/components/FolderPicker.tsx",
+    "lineCoverage": 88.46
+  },
+  {
+    "file": "web/src/components/HomePage.tsx",
+    "lineCoverage": 90.63
+  },
+  {
+    "file": "web/src/components/Playground.tsx",
+    "lineCoverage": 89.07
+  },
+  {
+    "file": "web/src/components/RunsPage.tsx",
+    "lineCoverage": 90.8
+  },
+  {
+    "file": "web/src/components/SessionEditorPane.tsx",
+    "lineCoverage": 89.14
+  },
+  {
+    "file": "web/src/components/TaskPanel.tsx",
+    "lineCoverage": 86.49
+  },
+  {
+    "file": "web/src/components/UiuxToolkitSettings.tsx",
+    "lineCoverage": 93.33
+  },
+  {
+    "file": "web/src/components/UpdateAvailableBanner.tsx",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/components/council/CheckpointCoverageList.tsx",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/components/council/CouncilBudgetNotice.tsx",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/components/council/CouncilToggle.tsx",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/components/council/FindingsLog.tsx",
+    "lineCoverage": 92.66
+  },
+  {
+    "file": "web/src/components/council/ProviderBadges.tsx",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/components/diagnostics/KbCards.tsx",
+    "lineCoverage": 91.17
+  },
+  {
+    "file": "web/src/store/index.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/store/sessions-slice.ts",
+    "lineCoverage": 97.45
+  },
+  {
+    "file": "web/src/store/ui-slice.ts",
+    "lineCoverage": 98.75
+  },
+  {
+    "file": "web/src/sw-register.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/store/drafts.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/src/utils/permission-mode-label.ts",
+    "lineCoverage": 100
+  },
+  {
+    "file": "web/server/knowledge/archive-availability.ts",
+    "lineCoverage": 100
+  }
+]

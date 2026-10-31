@@ -1,0 +1,38 @@
+[
+  {
+    "href": "http://127.0.0.1:5199/#",
+    "overflow": false,
+    "theme": "dark",
+    "width": 320
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/settings",
+    "overflow": false,
+    "theme": "dark",
+    "width": 320
+  },
+  {
+    "href": "http://127.0.0.1:5199/#",
+    "overflow": false,
+    "theme": "dark",
+    "width": 430
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/settings",
+    "overflow": false,
+    "theme": "dark",
+    "width": 430
+  },
+  {
+    "href": "http://127.0.0.1:5199/#",
+    "overflow": false,
+    "theme": "dark",
+    "width": 1280
+  },
+  {
+    "href": "http://127.0.0.1:5199/#/settings",
+    "overflow": false,
+    "theme": "dark",
+    "width": 1280
+  }
+]

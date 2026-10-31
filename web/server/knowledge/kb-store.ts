@@ -1,3 +1,5 @@
+import { assertKbArchiveAvailable } from "./archive-availability.js";
+import { isDeepStrictEqual } from "node:util";
 // Knowledge-base core (moved from `web/scripts/kb-health.ts` so the server can
 // import it; the script is now a thin CLI that re-exports this module).
 //
@@ -401,10 +403,9 @@ function fileIdentity(path: string): string {
  *  - idempotent by state, not by memory: an id found in the archive and still
  *    live only gets the live rewrite; an id only in the archive is a no-op;
  *  - every untouched live line is written back verbatim (unparseable rows too);
- *  - compare-and-swap: if the live store's size/mtime/inode changed between
- *    the read and the rename (another process appended), the rewrite is
- *    aborted with `KbStoreConflictError` and the store is left as it was.
- *    The read → rewrite runs synchronously with no await in between.
+ *  - the stat guard detects some concurrent writes, but is NOT a CAS.
+ * Quiescent/offline helper only: a writer after the final stat can still lose
+ * its append. Production callers must fail closed via assertKbArchiveAvailable.
  */
 export function archiveEntries(
   kbDir: string,
@@ -442,7 +443,17 @@ export function archiveEntries(
   for (const store of load.stores) {
     const livePath = join(kbDir, store.file);
     const archivePath = join(kbDir, ARCHIVE_DIR, store.file);
-    const inArchive = archivedIds(archivePath);
+    const archivedVersions: unknown[] = [];
+    if (existsSync(archivePath)) {
+      for (const raw of readFileSync(archivePath, "utf8").split("\n")) {
+        try { archivedVersions.push(JSON.parse(raw)); } catch { /* retain corrupt rows verbatim */ }
+      }
+    }
+    const content = (v: unknown): unknown => {
+      if (typeof v !== "object" || v === null || Array.isArray(v)) return v;
+      const { archivedAt: _at, archiveReason: _reason, ...rest } = v as Record<string, unknown>;
+      return rest;
+    };
     const keep: KbLine[] = [];
     const toAppend: KbEntry[] = [];
     const storeOutcomes: ArchiveOutcome[] = [];
@@ -453,7 +464,7 @@ export function archiveEntries(
         continue;
       }
       found.add(line.entry.id);
-      if (inArchive.has(line.entry.id)) {
+      if (archivedVersions.some((v) => isDeepStrictEqual(content(v), content(line.entry)))) {
         storeOutcomes.push({ id: line.entry.id, file: store.file, status: "completed-partial" });
       } else {
         toAppend.push({ ...line.entry, archivedAt: now.toISOString(), archiveReason: reason });
@@ -512,6 +523,9 @@ export function pruneKb(
   const threshold = opts.threshold ?? DEFAULT_IDLE_THRESHOLD;
   const selected = selectIdle(loadKb(kbDir), indexUsage(readUsageLog(kbDir)), threshold);
   const archived = selected.map(({ id, file, reason }) => ({ id, file, reason }));
-  if (!opts.dryRun && selected.length > 0) archiveEntries(kbDir, selected, { now: opts.now });
+  if (!opts.dryRun && selected.length > 0) {
+    assertKbArchiveAvailable();
+    archiveEntries(kbDir, selected, { now: opts.now });
+  }
   return { archived, dryRun: opts.dryRun === true };
 }

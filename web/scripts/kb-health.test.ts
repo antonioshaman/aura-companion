@@ -1,3 +1,4 @@
+import * as archiveAvailability from "../server/knowledge/archive-availability.js";
 // Tests for the KB lifecycle engine (spec `aura-meta-diet.md`, Story A2, plus the
 // FIX-A2-1 telemetry/content split).
 //
@@ -10,7 +11,7 @@
 // store (stores stay content-only, so /prime cannot dirty a git checkout), and
 // concurrent `record` processes lose no session.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -86,9 +87,12 @@ function cli(argv: string[]) {
 }
 
 beforeEach(() => {
+  // Existing move/recovery tests exercise the quiescent algorithm in temp dirs only.
+  vi.spyOn(archiveAvailability, "assertKbArchiveAvailable").mockImplementation(() => {});
   dir = mkdtempSync(join(tmpdir(), "kb-health-"));
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -353,4 +357,19 @@ describe("CLI argument handling", () => {
     expect(r.out).toContain("usage.log:2");
     expect(r.out).toContain("prime sessions recorded: 1");
   });
+});
+
+// Production policy is separate from quiescent algorithm tests above.
+it("refuses destructive prune through core and CLI with no writes", () => {
+  vi.mocked(archiveAvailability.assertKbArchiveAvailable).mockRestore();
+  writeFileSync(join(dir, "gotchas.jsonl"), JSON.stringify(entry("idle")) + "\n");
+  for (let i = 0; i < 20; i++) recordPrime(dir, [], { session: `idle-${i}` });
+  const before = readFileSync(join(dir, "gotchas.jsonl"), "utf8");
+  expect(() => pruneKb(dir)).toThrow(/temporarily unavailable/);
+  const r = cli(["prune"]);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain("temporarily unavailable");
+  expect(readFileSync(join(dir, "gotchas.jsonl"), "utf8")).toBe(before);
+  expect(existsSync(join(dir, "archive"))).toBe(false);
+  expect(pruneKb(dir, { dryRun: true }).archived).toHaveLength(1);
 });

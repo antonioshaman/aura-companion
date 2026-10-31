@@ -139,6 +139,7 @@ export function ProviderBadges({ pairing, size = "compact", ariaLabel }: Provide
   const observer = parsed?.observer ?? "unknown";
   return (
     <div
+      role="group"
       data-testid="provider-badges"
       aria-label={ariaLabel ?? `Pairing: orchestrator ${orchestrator}, observer ${observer}`}
       className="inline-flex items-center gap-1"

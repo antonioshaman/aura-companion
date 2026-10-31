@@ -115,6 +115,7 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const dirty = content !== originalContent;
@@ -224,7 +225,7 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
     }
     let cancelled = false;
     setLoadingTree(true);
-    setError(null);
+    setTreeError(null);
     // Fetch tree and git status in parallel
     const treePromise = api.getFileTree(cwd);
     const gitPromise = api.getChangedFiles(cwd, "last-commit").catch(() => ({ files: [] }));
@@ -234,9 +235,7 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
       setGitStatus(new Map(gitRes.files.map((f) => [f.path, f.status])));
     }).catch((err) => {
       if (cancelled) return;
-      setError(err instanceof Error ? err.message : "Failed to load file tree");
-      setTree([]);
-      setSelectedPath(null);
+      setTreeError(err instanceof Error ? err.message : "Failed to load file tree");
     }).finally(() => {
       if (!cancelled) setLoadingTree(false);
     });
@@ -468,12 +467,12 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
       {!searchActive && (
         <div className="flex-1 min-h-0 overflow-auto p-1.5">
           {loadingTree && <div className="px-2 py-2 text-xs text-cc-muted">Loading files...</div>}
-          {!loadingTree && tree.length === 0 && !error && (
+          {!loadingTree && tree.length === 0 && !treeError && (
             <div className="px-2 py-2 text-xs text-cc-muted">No editable files found.</div>
           )}
-          {!loadingTree && error && !selectedPath && (
+          {!loadingTree && treeError && (
             <div className="m-2 px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/30 text-xs text-cc-error">
-              {error}
+              <span role="alert">{treeError}</span> <button type="button" onClick={refreshTree}>Retry</button>
             </div>
           )}
           {!loadingTree && tree.map((node) => (

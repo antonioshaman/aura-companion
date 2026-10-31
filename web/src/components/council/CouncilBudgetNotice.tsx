@@ -1,3 +1,4 @@
+import { useId } from "react";
 /**
  * CouncilBudgetNotice — the pair crossed its token budget (server
  * `council-budget.ts`), so the server paused its AUTOMATIC activity: no
@@ -33,16 +34,17 @@ function budgeted(u: CouncilRoleUsage): number {
 }
 
 export function CouncilBudgetNotice({ budget, continuing = false, error, onContinue }: CouncilBudgetNoticeProps) {
+  const titleId = useId();
   if (!budget || !budget.exceeded) return null;
   const { orchestrator, observer } = budget.byRole;
   const cacheReads = orchestrator.cacheReadTokens + observer.cacheReadTokens;
   return (
     <section
       data-testid="council-budget-notice"
-      aria-labelledby="council-budget-notice-title"
+      aria-labelledby={titleId}
       className="shrink-0 px-3 py-2.5 border-b border-cc-warning/25 bg-cc-warning/10"
     >
-      <h2 id="council-budget-notice-title" className="text-xs font-medium text-cc-fg">
+      <h2 id={titleId} className="text-xs font-medium text-cc-fg">
         Pair paused: token budget reached
       </h2>
       <p className="mt-0.5 text-[11px] text-cc-muted leading-snug">

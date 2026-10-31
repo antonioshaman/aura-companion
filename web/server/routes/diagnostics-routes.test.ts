@@ -1,3 +1,4 @@
+import { KbArchiveUnavailableError } from "../knowledge/archive-availability.js";
 // Tests for the Diagnostics REST surface (spec §3.5; AC6; plan Task 13).
 //
 // What is validated: each runner / validator outcome maps to one status —
@@ -86,4 +87,31 @@ describe("diagnostics routes", () => {
     expect(res.status).toBe(202);
     expect(await res.json()).toMatchObject({ recorded: true, message: "retry" });
   });
+});
+
+it("archive refusal is 409 without recorded success or counter refresh", async () => {
+  const { a, deps } = app({ apply: () => { throw new KbArchiveUnavailableError(); } });
+  const res = await post(a, "/api/diagnostics/kb-analysis/decisions", {});
+  expect(res.status).toBe(409);
+  expect(await res.json()).toMatchObject({ error: "archive_unavailable" });
+  expect(deps.afterDecisions).not.toHaveBeenCalled();
+});
+
+// Request body can arrive after analysis starts: check the commit boundary too.
+it("rejects decisions when analysis starts while the body is being read", async () => {
+  let running = false;
+  let release!: (value: Uint8Array) => void;
+  const { a, deps } = app({ isRunning: () => running });
+  const stream = new ReadableStream<Uint8Array>({ start(controller) {
+    release = (bytes) => { controller.enqueue(bytes); controller.close(); };
+  }});
+  const result = a.fetch(new Request("http://localhost/api/diagnostics/kb-analysis/decisions", {
+    method: "POST", body: stream, duplex: "half",
+  } as RequestInit));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  running = true;
+  release(new TextEncoder().encode("{}"));
+  expect((await result).status).toBe(409);
+  expect(deps.apply).not.toHaveBeenCalled();
+  expect(deps.afterDecisions).not.toHaveBeenCalled();
 });

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 // Tests for `archiveEntries` — the single function that rewrites a KB store
 // (used by `kb:prune` and by the diagnostics "archive" decision).
 //
@@ -10,7 +11,7 @@
 //     BOTH files by a crash between the two writes only gets the live rewrite
 //     ("completed-partial") and is NOT appended to the archive a second time;
 //   - an unknown id is reported "not-found" and nothing is written;
-//   - compare-and-swap: if the live store changes between the read and the
+//   - best-effort guard: if the live store changes before the final stat, the
 //     rename (a concurrent /learn append), the rewrite aborts with
 //     KbStoreConflictError and the appended line survives.
 
@@ -83,6 +84,23 @@ describe("archiveEntries", () => {
     expect(readFileSync(join(dir, ARCHIVE_DIR, "gotchas.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
   });
 
+  // Same id is not the same version: preserve changed and unknown nested fields.
+  it("archives the current version even when an older version has the same id", () => {
+    const current = { id: "got-002", fact: "new", extra: { b: 2, a: [1] } };
+    writeStore("gotchas.jsonl", [JSON.stringify(current)]);
+    mkdirSync(join(dir, ARCHIVE_DIR));
+    const archive = join(dir, ARCHIVE_DIR, "gotchas.jsonl");
+    writeFileSync(archive, line("got-002") + "\n");
+    expect(archiveEntries(dir, [{ id: "got-002", reason: "r" }])[0].status).toBe("archived");
+    const rows = readFileSync(archive, "utf8").trim().split("\n").map((r) => JSON.parse(r));
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject(current);
+    // A restored identical version with reordered keys is not appended twice.
+    writeStore("gotchas.jsonl", [JSON.stringify({ extra: { a: [1], b: 2 }, fact: "new", id: "got-002" })]);
+    expect(archiveEntries(dir, [{ id: "got-002", reason: "retry" }])[0].status).toBe("completed-partial");
+    expect(readFileSync(archive, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
   it("reports an unknown id as not-found and writes nothing", () => {
     const live = writeStore("gotchas.jsonl", [line("got-001")]);
     const before = readFileSync(live, "utf8");
@@ -92,7 +110,7 @@ describe("archiveEntries", () => {
     expect(existsSync(join(dir, ARCHIVE_DIR))).toBe(false);
   });
 
-  it("aborts the live rewrite when another writer appended in between (compare-and-swap)", () => {
+  it("aborts the live rewrite when another writer appended before the final stat", () => {
     const live = writeStore("gotchas.jsonl", [line("got-001"), line("got-002")]);
     // Inject the concurrent /learn append at the last moment before the live
     // rename, by wrapping writeAtomicText's beforeRename for the live store.
@@ -134,4 +152,24 @@ describe("writeAtomicText", () => {
     expect(readFileSync(p, "utf8")).not.toContain("replacement");
     expect(readdirSync(dir)).toEqual(["store.jsonl"]);
   });
+});
+
+// A separate, non-cooperating writer after stat defeats the offline guard.
+// This is why production Archive/prune are disabled, not advertised as CAS.
+it("demonstrates the after-stat external writer window on temporary files", () => {
+  const live = writeStore("gotchas.jsonl", [line("got-002")]);
+  const real = atomicWrite.writeAtomicText;
+  const spy = vi.spyOn(atomicWrite, "writeAtomicText").mockImplementation((target, text, opts) => {
+    if (target !== live) return real(target, text, opts);
+    return real(target, text, { ...opts, beforeRename: () => {
+      opts?.beforeRename?.(); // barrier: identity already checked
+      const child = spawnSync(process.execPath, ["-e", "require('node:fs').appendFileSync(process.argv[1], process.argv[2])", live, line("external") + "\n"]);
+      expect(child.status).toBe(0);
+      expect(readFileSync(live, "utf8")).toContain("external");
+    }});
+  });
+  try {
+    archiveEntries(dir, [{ id: "got-002", reason: "offline repro" }]);
+    expect(readFileSync(live, "utf8")).not.toContain("external");
+  } finally { spy.mockRestore(); }
 });

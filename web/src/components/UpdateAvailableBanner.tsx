@@ -34,7 +34,7 @@ export function UpdateAvailableBanner({ onUpdate, onDismiss }: UpdateAvailableBa
         <div className="flex-1 min-w-0">
           <div className="text-xs font-semibold text-cc-fg mb-0.5">A new version is available</div>
           <p className="text-xs text-cc-fg/80 leading-snug mb-2">
-            Save file edits before updating. Your sessions will remain available.
+            Save file edits and copy unsent drafts before updating. Your sessions will remain available.
           </p>
           <div className="flex items-center gap-3">
             <button

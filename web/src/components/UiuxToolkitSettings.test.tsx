@@ -108,3 +108,18 @@ describe("UiuxToolkitSettings", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+// Repeated gallery instances must resolve descriptions/titles inside their own root.
+it("keeps relationship IDs local to each instance", () => {
+  const { container } = render(<><UiuxToolkitSettings enabled={true} onEnabledChange={() => {}} view={null} /><UiuxToolkitSettings enabled={true} onEnabledChange={() => {}} view={null} /></>);
+  const roots = [...container.querySelectorAll('[data-testid="uiux-toolkit-settings"]')];
+  expect(roots).toHaveLength(2);
+  const ids = [...container.querySelectorAll("[id]")].map((el) => el.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  for (const root of roots) {
+    const source = root.matches('[aria-describedby]') ? root : root.querySelector('[aria-describedby]')!;
+    const target = document.getElementById(source.getAttribute('aria-describedby')!);
+    expect(target).not.toBeNull();
+    expect(root.contains(target)).toBe(true);
+  }
+});

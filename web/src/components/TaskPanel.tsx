@@ -413,7 +413,7 @@ export function GitHubPRDisplay({ pr }: { pr: GitHubPRInfo }) {
 
       {/* CI Checks */}
       {cs.total > 0 && (
-        <div className="flex items-center gap-2 text-[11px]" aria-label={`CI checks: ${cs.success} passed, ${cs.failure} failing, ${cs.pending} pending`}>
+        <div role="group" className="flex items-center gap-2 text-[11px]" aria-label={`CI checks: ${cs.success} passed, ${cs.failure} failing, ${cs.pending} pending`}>
           {cs.failure > 0 ? (
             <>
               <span className="flex items-center gap-1 text-cc-error">

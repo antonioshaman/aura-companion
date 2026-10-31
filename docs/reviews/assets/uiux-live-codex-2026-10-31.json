@@ -1,0 +1,18 @@
+{
+  "scope": "real CLI + current patched adapter, before production deploy",
+  "reply": true,
+  "completed": true,
+  "errors": [],
+  "types": [
+    "session_init",
+    "status_change",
+    "session_update",
+    "stream_event",
+    "assistant",
+    "result"
+  ],
+  "send": {
+    "kind": "sent"
+  },
+  "isError": false
+}

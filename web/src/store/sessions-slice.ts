@@ -1,3 +1,4 @@
+import { useDraftStore } from "./drafts.js";
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
 import type { SessionState, SdkSessionInfo, McpServerDetail } from "../types.js";
@@ -149,6 +150,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
 
   removeSession: (sessionId) =>
     set((s) => {
+      useDraftStore.getState().clear(sessionId);
       const sessionNames = deleteFromMap(s.sessionNames, sessionId);
       localStorage.setItem("cc-session-names", JSON.stringify(Array.from(sessionNames.entries())));
       if (s.currentSessionId === sessionId) {

@@ -193,3 +193,10 @@ describe("ProviderBadges", () => {
     expect(results).toHaveNoViolations();
   });
 });
+
+it("exposes a named pairing group and passes axe", async () => {
+  const { axe } = await import("vitest-axe");
+  const { container } = render(<ProviderBadges pairing="claude+codex" />);
+  expect(screen.getByRole("group", { name: /orchestrator claude, observer codex/ })).toBeInTheDocument();
+  expect(await axe(container)).toHaveNoViolations();
+});

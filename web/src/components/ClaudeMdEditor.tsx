@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useModalDialog } from "../use-modal-dialog.js";
 import { api } from "../api.js";
 
@@ -23,12 +23,21 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
   const [error, setError] = useState<string | null>(null);
   const [createMode, setCreateMode] = useState<null | string>(null);
 
+  const loadEpoch = useRef(0);
+  const revision = useRef(0);
+  const activePath = useRef<string | undefined>(undefined);
+  activePath.current = createMode || files[selectedIdx]?.path;
+
   const load = useCallback(() => {
+    const epoch = ++loadEpoch.current;
+    setSaving(false);
     setLoading(true);
     setError(null);
     api
       .getClaudeMdFiles(cwd)
       .then((res) => {
+        if (epoch !== loadEpoch.current) return;
+        revision.current++;
         setFiles(res.files);
         if (res.files.length > 0) {
           setSelectedIdx(0);
@@ -41,6 +50,7 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
         setLoading(false);
       })
       .catch((e) => {
+        if (epoch !== loadEpoch.current) return;
         setError(e.message);
         setLoading(false);
       });
@@ -48,10 +58,12 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
 
   useEffect(() => {
     if (open) load();
+    return () => { loadEpoch.current++; };
   }, [open, load]);
 
   const handleSelect = (idx: number) => {
     if (dirty && !confirm("Discard unsaved changes?")) return;
+    revision.current++;
     setSelectedIdx(idx);
     setEditContent(files[idx].content);
     setDirty(false);
@@ -61,31 +73,39 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
   const handleSave = async () => {
     const path = createMode || files[selectedIdx]?.path;
     if (!path) return;
+    const savedRevision = revision.current;
+    const epoch = loadEpoch.current;
     setSaving(true);
     setError(null);
     try {
       await api.saveClaudeMd(path, editContent);
-      setDirty(false);
-      // Reload to pick up new file
-      if (createMode) {
+      if (epoch !== loadEpoch.current) return;
+      const stillSelected = activePath.current === path;
+      const unchanged = stillSelected && revision.current === savedRevision;
+      if (unchanged) setDirty(false);
+      // A newly created file may be reloaded only if no newer typing exists.
+      if (createMode && unchanged) {
         load();
       } else {
-        setFiles((prev) =>
-          prev.map((f, i) =>
-            i === selectedIdx ? { ...f, content: editContent } : f,
-          ),
-        );
+        setFiles((prev) => prev.some((f) => f.path === path)
+          ? prev.map((f) => f.path === path ? { ...f, content: editContent } : f)
+          : [...prev, { path, content: editContent }]);
+        if (createMode && stillSelected) {
+          setSelectedIdx(files.length);
+          setCreateMode(null);
+        }
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to save");
+      if (epoch === loadEpoch.current && activePath.current === path) setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
-      setSaving(false);
+      if (epoch === loadEpoch.current) setSaving(false);
     }
   };
 
   const handleCreate = (location: "root" | "dotclaude") => {
     const path =
       location === "root" ? `${cwd}/CLAUDE.md` : `${cwd}/.claude/CLAUDE.md`;
+    revision.current++;
     setCreateMode(path);
     setEditContent("# CLAUDE.md\n\n");
     setDirty(true);
@@ -317,6 +337,7 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
                     <textarea
                       value={editContent}
                       onChange={(e) => {
+                        revision.current++;
                         setEditContent(e.target.value);
                         setDirty(true);
                       }}

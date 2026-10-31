@@ -1,3 +1,4 @@
+import { HOME_DRAFT, useDraftField, useDraftStore } from "../store/drafts.js";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WorktreeIsolationChoice, type IsolationChoice } from "./home/WorktreeIsolationChoice.js";
 import { useStore } from "../store.js";
@@ -102,7 +103,7 @@ export function HomePage() {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  const [text, setText] = useState("");
+  const [text, setText] = useDraftField(HOME_DRAFT, "text");
   const [backend, setBackend] = useState<BackendType>(() =>
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   );
@@ -130,8 +131,8 @@ export function HomePage() {
   const [mode, setMode] = useState(() => getDefaultMode(
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   ));
-  const [cwd, setCwd] = useState(() => getRecentDirs()[0] || "");
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [cwd, setCwd] = useDraftField(HOME_DRAFT, "cwd", getRecentDirs()[0] || "");
+  const [images, setImages] = useDraftField(HOME_DRAFT, "images");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   // PLAN-aura-dynamic-model-list Task 10: dynamic models lifted from
@@ -751,6 +752,7 @@ export function HomePage() {
   ) {
     const store = useStore.getState();
     const launchHomeKey = store.homeResetKey;
+    const submittedDraft = useDraftStore.getState().drafts[HOME_DRAFT];
     let createdSessionId: string | null = null;
     const ownsLaunchView = () => mountedRef.current && useStore.getState().homeResetKey === launchHomeKey;
     store.clearCreation();
@@ -922,6 +924,8 @@ export function HomePage() {
           /* fire-and-forget: status transition is best-effort */
         });
       }
+
+      if (submittedDraft) useDraftStore.getState().clear(HOME_DRAFT, submittedDraft);
 
       // Clear progress on success
       if (useStore.getState().homeResetKey === launchHomeKey) useStore.getState().clearCreation();

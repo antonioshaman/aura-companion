@@ -1,0 +1,20 @@
+{
+  "tool": "agent-browser / Chromium, local readonly preview",
+  "before": {
+    "build": "A",
+    "text": "PWA update review — unsent draft",
+    "timeOrigin": 1793462562662.8
+  },
+  "waiting": {
+    "banner": true,
+    "build": "A",
+    "text": "PWA update review — unsent draft",
+    "timeOrigin": 1793462562662.8
+  },
+  "afterExplicitUpdate": {
+    "build": "B",
+    "timeOrigin": 1793462579758.1
+  },
+  "result": "PASS; no automatic reload; explicit Update activates distinct build B",
+  "scope": "Desktop Chromium; physical iOS PWA not verified"
+}
