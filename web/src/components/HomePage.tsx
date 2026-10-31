@@ -97,6 +97,11 @@ function formatTimeAgo(timestamp: number): string {
 }
 
 export function HomePage() {
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [text, setText] = useState("");
   const [backend, setBackend] = useState<BackendType>(() =>
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
@@ -304,9 +309,8 @@ export function HomePage() {
   // Load server home/cwd and available backends on mount
   useEffect(() => {
     api.getHome().then(({ home, cwd: serverCwd }) => {
-      if (!cwd) {
-        setCwd(serverCwd || home);
-      }
+      // A phone user can choose a folder before this request resolves.
+      setCwd((current) => current || serverCwd || home);
     }).catch(() => {});
     api.listEnvs().then(setEnvs).catch(() => {});
     api.listSandboxes().then(setSandboxes).catch(() => {});
@@ -746,6 +750,9 @@ export function HomePage() {
     launchOverride?: SessionLaunchOverride,
   ) {
     const store = useStore.getState();
+    const launchHomeKey = store.homeResetKey;
+    let createdSessionId: string | null = null;
+    const ownsLaunchView = () => mountedRef.current && useStore.getState().homeResetKey === launchHomeKey;
     store.clearCreation();
     store.setSessionCreating(true, backend as "claude" | "codex");
 
@@ -823,10 +830,11 @@ export function HomePage() {
           councilPairing: backend === "claude" && councilEnabled ? effectiveCouncilPairing : undefined,
         },
         (progress) => {
-          useStore.getState().addCreationProgress(progress);
+          if (ownsLaunchView()) useStore.getState().addCreationProgress(progress);
         },
       );
       const sessionId = result.sessionId;
+      createdSessionId = sessionId;
 
       // Seed sdk session metadata immediately so chat can render resume/fork context
       // before the sidebar poller refreshes /api/sessions.
@@ -871,7 +879,8 @@ export function HomePage() {
       useStore.getState().setPreviousPermissionMode(sessionId, mode);
 
       // Switch to session — use replace to avoid a back-button entry for the creation state
-      navigateToSession(sessionId, true);
+      // A slow old launch must not replace a form/session chosen since then.
+      if (ownsLaunchView()) navigateToSession(sessionId, true);
       // connectSession called eagerly so waitForConnection below can resolve immediately;
       // the App.tsx hash-sync effect also calls it, but that runs after render (too late).
       connectSession(sessionId);
@@ -915,8 +924,14 @@ export function HomePage() {
       }
 
       // Clear progress on success
-      useStore.getState().clearCreation();
+      if (useStore.getState().homeResetKey === launchHomeKey) useStore.getState().clearCreation();
     } catch (e: unknown) {
+      const currentStore = useStore.getState();
+      if (currentStore.homeResetKey !== launchHomeKey) return;
+      if (!mountedRef.current && (createdSessionId === null || currentStore.currentSessionId !== createdSessionId)) {
+        currentStore.clearCreation();
+        return;
+      }
       const errMsg = e instanceof Error ? e.message : String(e);
       setError(errMsg);
       // Set error in store so the overlay can display it; keep sessionCreating

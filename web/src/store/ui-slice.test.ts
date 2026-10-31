@@ -75,11 +75,14 @@ describe("UI state", () => {
   it("newSession: clears currentSessionId and increments homeResetKey", () => {
     useStore.getState().setCurrentSession("s1");
     const keyBefore = useStore.getState().homeResetKey;
+    useStore.setState({ sessionCreating: true, sessionCreatingBackend: "claude", creationError: "old launch" });
 
     useStore.getState().newSession();
 
     expect(useStore.getState().currentSessionId).toBeNull();
     expect(useStore.getState().homeResetKey).toBe(keyBefore + 1);
+    expect(useStore.getState().sessionCreating).toBe(false);
+    expect(useStore.getState().creationError).toBeNull();
     expect(localStorage.getItem("cc-current-session")).toBeNull();
   });
 });

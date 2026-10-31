@@ -276,6 +276,8 @@ export function SandboxManager({ embedded = false }: Props) {
           <div className="flex items-center gap-2 mt-4 mb-5">
             <div className="flex-1" />
             <button
+              aria-label={showCreate ? "Cancel" : "New Sandbox"}
+              aria-expanded={showCreate}
               onClick={() => setShowCreate(!showCreate)}
               className={`flex items-center gap-1.5 px-3.5 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-colors cursor-pointer shrink-0 ${
                 showCreate

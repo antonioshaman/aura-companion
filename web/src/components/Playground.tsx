@@ -3599,7 +3599,7 @@ function CouncilModeSection() {
 
         {/* PWA update prompt — info-tone toaster shown when a new Service
             Worker version is waiting to activate after a frontend deploy. */}
-        <Card label="UpdateAvailableBanner — new version ready">
+        <Card label="UpdateAvailableBanner — update waits for saved work">
           <UpdateAvailableBanner onUpdate={() => {}} onDismiss={() => {}} />
         </Card>
 

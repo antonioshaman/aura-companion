@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const getFileTreeMock = vi.hoisted(() => vi.fn());
@@ -98,6 +98,54 @@ describe("SessionEditorPane", () => {
     // File path label appears in the editor header
     const pathLabels = await screen.findAllByText("src/a.ts");
     expect(pathLabels.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not overwrite edits made while an agent file refresh is in flight", async () => {
+    getFileTreeMock.mockResolvedValue({ path: "/repo", tree: [{ name: "a.ts", path: "/repo/a.ts", type: "file" }] });
+    readFileMock.mockResolvedValue({ content: "original" });
+    const { rerender } = render(<SessionEditorPane sessionId="s1" />);
+    await clickFile("a.ts");
+    await waitFor(() => expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("original"));
+    let resolveRead!: (value: { content: string }) => void;
+    readFileMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    storeState.changedFilesTick.set("s1", 1);
+    rerender(<SessionEditorPane sessionId="s1" />);
+    await waitFor(() => expect(readFileMock).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getAllByLabelText("Code editor")[0], { target: { value: "my unsaved edit" } });
+    await act(async () => resolveRead({ content: "agent version" }));
+    expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("my unsaved edit");
+  });
+
+  it("ignores a completed save for a file that has since been left", async () => {
+    // A slow save of A must not mark B dirty or show A's status on B.
+    getFileTreeMock.mockResolvedValue({ path: "/repo", tree: [
+      { name: "a.ts", path: "/repo/a.ts", type: "file" },
+      { name: "b.ts", path: "/repo/b.ts", type: "file" },
+    ] });
+    readFileMock.mockImplementation(async (path: string) => ({ content: path.endsWith("a.ts") ? "A" : "B" }));
+    let finishSave!: () => void;
+    writeFileMock.mockReturnValueOnce(new Promise<void>((resolve) => { finishSave = resolve; }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<SessionEditorPane sessionId="s1" />);
+    await clickFile("a.ts");
+    await waitFor(() => expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("A"));
+    fireEvent.change(screen.getAllByLabelText("Code editor")[0], { target: { value: "edited A" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await clickFile("b.ts");
+    await waitFor(() => expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("B"));
+    await act(async () => finishSave());
+    expect(screen.getAllByRole("button", { name: "Save" })[0]).toBeDisabled();
+    confirm.mockRestore();
+  });
+
+  it("passes axe accessibility checks with a file open", async () => {
+    const { axe } = await import("vitest-axe");
+    getFileTreeMock.mockResolvedValue({ path: "/repo", tree: [{ name: "a.ts", path: "/repo/a.ts", type: "file" }] });
+    readFileMock.mockResolvedValue({ content: "original" });
+    const { container } = render(<SessionEditorPane sessionId="s1" />);
+    await clickFile("a.ts");
+    await waitFor(() => expect(screen.getAllByLabelText("Code editor")[0]).toHaveValue("original"));
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("saves when content changes", async () => {

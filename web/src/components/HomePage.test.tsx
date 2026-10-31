@@ -732,6 +732,19 @@ describe("HomePage", () => {
 
   // ─── Folder picker ──────────────────────────────────────────────────────────
 
+  it("keeps a selected folder when the slow server default arrives", async () => {
+    // Phone: the picker can finish before the /fs/home request does.
+    let resolveHome!: (value: { home: string; cwd: string }) => void;
+    mockApi.getHome.mockReturnValueOnce(new Promise((resolve) => { resolveHome = resolve; }));
+    render(<HomePage />);
+    fireEvent.click(screen.getByText("Select folder").closest("button")!);
+    fireEvent.click(screen.getByText("Select Folder"));
+    expect(await screen.findByText("new-project")).toBeInTheDocument();
+    await act(async () => resolveHome({ home: "/home/ubuntu", cwd: "/default" }));
+    expect(screen.getByText("new-project")).toBeInTheDocument();
+    expect(screen.queryByText("default")).not.toBeInTheDocument();
+  });
+
   it("opens and uses the folder picker", async () => {
     // Clicking the folder selector should open the FolderPicker component,
     // and closing it should remove it from the DOM.
@@ -958,6 +971,36 @@ describe("HomePage", () => {
   });
 
   // ─── Session creation flow ──────────────────────────────────────────────────
+
+  it("does not surface an old launch failure over the screen chosen afterward", async () => {
+    let fail!: (error: Error) => void;
+    createSessionStreamMock.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }));
+    const store = buildStoreMock({ currentSessionId: null });
+    mockStoreGetState.mockReturnValue(store);
+    const { unmount } = render(<HomePage />);
+    await screen.findByText("repo");
+    fireEvent.change(screen.getByRole("textbox", { name: "Task description" }), { target: { value: "old launch" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    unmount();
+    await act(async () => fail(new Error("old request failed")));
+    expect(store.setCreationError).not.toHaveBeenCalled();
+  });
+
+  it("does not switch screens when an old launch finishes after leaving its form", async () => {
+    // A slow previous launch must not hijack a new form opened with +.
+    let finish!: (value: { sessionId: string; cwd: string; state: string }) => void;
+    createSessionStreamMock.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { unmount } = render(<HomePage />);
+    await screen.findByText("repo");
+    fireEvent.change(screen.getByRole("textbox", { name: "Task description" }), { target: { value: "old launch" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    unmount();
+    await act(async () => finish({ sessionId: "old-launch", cwd: "/repo", state: "starting" }));
+    const { navigateToSession } = await import("../utils/routing.js");
+    expect(navigateToSession).not.toHaveBeenCalled();
+  });
 
   it("creates a session and sends the initial message on submit", async () => {
     // Full end-to-end test of the send flow: type a message, click send,

@@ -114,7 +114,6 @@ export default function App() {
   // Capture the localStorage-restored session ID during render (before any effects run)
   // so the mount logic can use it even if the hash-sync branch would clear it.
   const restoredIdRef = useRef(useStore.getState().currentSessionId);
-  const initialServerSessionRecoveryRef = useRef(false);
   // The session (if any) this page load reopened on its own — a hash-less
   // localStorage restore, or a browser reload of `#/session/<id>`. The session
   // list is empty at mount (not persisted across reload), so whether it is
@@ -178,49 +177,8 @@ export default function App() {
     }
   }, [route, sdkSessions, sdkSessionsLoaded]);
 
-  // If the browser opens with no persisted selection but the server already has
-  // live sessions (for example an agent was started from a CLI-side entrypoint),
-  // route to the newest active session once. Sidebar polling still owns the
-  // session list; this closes the gap where messages stream and ack in the
-  // background while the main panel remains on the empty home route.
-  // An explicit "+" (newSession bumps homeResetKey) also disarms it: on a slow
-  // link the first session list can land after the user already chose to start
-  // a new session, and redirecting then would yank them into an old session.
-  useEffect(() => {
-    if (initialServerSessionRecoveryRef.current) return;
-    if (!isAuthenticated) return;
-    if (route.page !== "home" || currentSessionId !== null || homeResetKey !== 0) {
-      initialServerSessionRecoveryRef.current = true;
-      return;
-    }
-    if (sdkSessions.length === 0) return;
-    initialServerSessionRecoveryRef.current = true;
-
-    const latestActive = sdkSessions
-      .filter((session) => !session.archived && session.state !== "exited")
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
-    if (latestActive) {
-      navigateToSession(latestActive.sessionId, true);
-    }
-  }, [currentSessionId, homeResetKey, isAuthenticated, route.page, sdkSessions]);
-
-  // Any tap or keypress before the session list lands also disarms the
-  // recovery: on a slow phone link the home form is already on screen and the
-  // user may be picking a model or folder when the list arrives — yanking them
-  // into an old session then throws that choice away.
-  useEffect(() => {
-    const disarm = () => {
-      initialServerSessionRecoveryRef.current = true;
-      document.removeEventListener("pointerdown", disarm, true);
-      document.removeEventListener("keydown", disarm, true);
-    };
-    document.addEventListener("pointerdown", disarm, true);
-    document.addEventListener("keydown", disarm, true);
-    return () => {
-      document.removeEventListener("pointerdown", disarm, true);
-      document.removeEventListener("keydown", disarm, true);
-    };
-  }, []);
+  // With no saved/explicit selection, keep the new-session form on screen.
+  // A delayed session-list refresh must never select another conversation.
 
   // Keep git changed-files count in sync for the badge regardless of which tab is active.
   // DiffPanel does the same when mounted; this covers the case where the diff tab is closed.
