@@ -972,6 +972,21 @@ describe("HomePage", () => {
 
   // ─── Session creation flow ──────────────────────────────────────────────────
 
+  it("does not surface an old launch failure over the screen chosen afterward", async () => {
+    let fail!: (error: Error) => void;
+    createSessionStreamMock.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }));
+    const store = buildStoreMock({ currentSessionId: null });
+    mockStoreGetState.mockReturnValue(store);
+    const { unmount } = render(<HomePage />);
+    await screen.findByText("repo");
+    fireEvent.change(screen.getByRole("textbox", { name: "Task description" }), { target: { value: "old launch" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    unmount();
+    await act(async () => fail(new Error("old request failed")));
+    expect(store.setCreationError).not.toHaveBeenCalled();
+  });
+
   it("does not switch screens when an old launch finishes after leaving its form", async () => {
     // A slow previous launch must not hijack a new form opened with +.
     let finish!: (value: { sessionId: string; cwd: string; state: string }) => void;

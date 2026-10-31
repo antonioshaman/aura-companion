@@ -926,8 +926,12 @@ export function HomePage() {
       // Clear progress on success
       if (useStore.getState().homeResetKey === launchHomeKey) useStore.getState().clearCreation();
     } catch (e: unknown) {
-      if (useStore.getState().homeResetKey !== launchHomeKey
-        || (!mountedRef.current && useStore.getState().currentSessionId !== createdSessionId)) return;
+      const currentStore = useStore.getState();
+      if (currentStore.homeResetKey !== launchHomeKey) return;
+      if (!mountedRef.current && (createdSessionId === null || currentStore.currentSessionId !== createdSessionId)) {
+        currentStore.clearCreation();
+        return;
+      }
       const errMsg = e instanceof Error ? e.message : String(e);
       setError(errMsg);
       // Set error in store so the overlay can display it; keep sessionCreating
