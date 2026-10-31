@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.9.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.9.1...aura-companion-v2.9.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **landing:** keep collapsed FAQ answers out of keyboard navigation ([#447](https://github.com/antonioshaman/aura-companion/issues/447)) ([f92bbb4](https://github.com/antonioshaman/aura-companion/commit/f92bbb400f819c9cd0d9666c3dc116e50d5d661b))
+* **mobile:** preserve new-session intent and unsaved editor state ([#449](https://github.com/antonioshaman/aura-companion/issues/449)) ([c330b12](https://github.com/antonioshaman/aura-companion/commit/c330b1248327896683c4d739f952c3c89bc140e6))
+
 ## [2.9.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.9.0...aura-companion-v2.9.1) (2026-10-30)
 
 
