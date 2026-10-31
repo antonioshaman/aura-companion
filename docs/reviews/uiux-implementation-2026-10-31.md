@@ -2,7 +2,7 @@
 
 Plan: PLAN-aura-uiux-usability-followup.md. Scope and fixes authorized by owner.
 
-Task status: 1–12 complete; 14 protocol fix implemented, typecheck/CI verification in progress; 13 delivery pending.
+Task status: 1–12 and 14 complete; 13 CI/deployment in progress. Final deployment receipt is added to PR #450 and the local log after public verification.
 TodoWrite tool is not exposed in this session; this file records transitions.
 Council checkpoint: API probe performed; no unrelated pair will be woken.
 
@@ -53,3 +53,98 @@ Final full UI/PWA run passed: 11383 tests, six skipped; 520 files passed/one ski
 Actual SSE creation + public-Origin WS subscription exposed turn/moderationMetadata protocol drift on codex-cli 0.162.1. Captured replay and generated CLI JSON schema retained. Red tests fail for valid envelope; malformed/unknown methods remain rejected. Accept only this known informational method with required string IDs and opaque metadata (schema says ANY JSON, including null). Claude real create/subscribe succeeded but provider returned Anthropic account verification requirement, not an application fix. Smoke sessions stopped/archived, history retained. Original loopback-Origin3456 probe was rejected by allowlist as designed; corrected to actual public Origin.
 
 Task 14 regression verification: five valid-case tests failed before; malformed cases already failed closed. After fix: all 210 Codex adapter/contract/drift tests pass, including captured frame followed by reply delta and all opaque JSON metadata alternatives. Unknown notification regression remains. Typecheck caught the deliberately malformed array passed through the typed test transport; marked its explicit unknown-wire cast. No protocol/sandbox/approval policy changed.
+
+Task 14 live verification after owner reset the provider limit: current patched adapter + real Codex 0.162.1 / gpt-6.1-sol replied OK, completed normally, no protocol errors. The new notification was observed and accepted. The preceding attempt correctly surfaced usageLimitExceeded; no auth/policy workaround was applied. 210 Codex tests and final typecheck passed.
+
+## Plan–diff reconciliation
+All 14 tasks map to changes/evidence: 1 plan/reports, 2 KB archive boundary/store/UI/CLI, 3 report loader, 4 decision route, 5 drafts/Home/Composer/store cleanup, 6 both editors, 7 Agents/Runs, 8 Composer labels/reconnect, 9 FolderPicker, 10 Council IDs/annotations/CI group, 11 tests/Playground/coverage, 12 browser matrices and two-build PWA proof/native registration, 14 captured Codex replay/adapter/schema, 13 this PR and deployment receipt. No task silently dropped. Physical iPhone/VoiceOver remains external owner acceptance, not an automated PASS. Counterpart checkpoint skipped: no connected orchestrator at this exact workspace.
+
+## Ready for review
+Implementation/self-review by AI; nine AI advisors planned the work. Human code review pending. Base c330b124. PR: https://github.com/antonioshaman/aura-companion/pull/450
+
+- `.council/plan-output/2026-10-31-uiux-usability/ROSTER.md`
+- `.council/plan-output/2026-10-31-uiux-usability/SCOPE.md`
+- `.council/plan-output/2026-10-31-uiux-usability/abramov.md`
+- `.council/plan-output/2026-10-31-uiux-usability/beck.md`
+- `.council/plan-output/2026-10-31-uiux-usability/fowler.md`
+- `.council/plan-output/2026-10-31-uiux-usability/friedman.md`
+- `.council/plan-output/2026-10-31-uiux-usability/hunt.md`
+- `.council/plan-output/2026-10-31-uiux-usability/ritchie.md`
+- `.council/plan-output/2026-10-31-uiux-usability/roster.json`
+- `.council/plan-output/2026-10-31-uiux-usability/saarinen.md`
+- `.council/plan-output/2026-10-31-uiux-usability/watson.md`
+- `.council/plan-output/2026-10-31-uiux-usability/willison.md`
+- `PLAN-aura-uiux-usability-followup.md`
+- `docs/reviews/assets/uiux-agents-unavailable.png`
+- `docs/reviews/assets/uiux-browser-matrix-2026-10-31.json`
+- `docs/reviews/assets/uiux-coverage-2026-10-31.json`
+- `docs/reviews/assets/uiux-errors-2026-10-31.json`
+- `docs/reviews/assets/uiux-home-codex-final.png`
+- `docs/reviews/assets/uiux-navigation-2026-10-31.json`
+- `docs/reviews/assets/uiux-pwa-proof-2026-10-31.json`
+- `docs/reviews/assets/uiux-pwa-waits-for-update.png`
+- `docs/reviews/assets/uiux-responsive-2026-10-31.json`
+- `docs/reviews/assets/uiux-runs-unavailable.png`
+- `docs/reviews/uiux-implementation-2026-10-31.md`
+- `docs/reviews/uiux-usability-2026-10-31.md`
+- `web/scripts/kb-health.test.ts`
+- `web/scripts/kb-health.ts`
+- `web/server/__fixtures__/codex-moderation/README.md`
+- `web/server/__fixtures__/codex-moderation/notification.jsonl`
+- `web/server/codex-adapter.test.ts`
+- `web/server/codex-adapter.ts`
+- `web/server/codex-protocol-contract.test.ts`
+- `web/server/codex-protocol-drift.test.ts`
+- `web/server/diagnostics/kb-analysis-store.test.ts`
+- `web/server/diagnostics/kb-analysis-store.ts`
+- `web/server/diagnostics/kb-decisions.test.ts`
+- `web/server/diagnostics/kb-decisions.ts`
+- `web/server/knowledge/archive-availability.test.ts`
+- `web/server/knowledge/archive-availability.ts`
+- `web/server/knowledge/kb-store.test.ts`
+- `web/server/knowledge/kb-store.ts`
+- `web/server/protocol/codex-upstream/README.md`
+- `web/server/protocol/codex-upstream/v2/TurnModerationMetadataNotification.json`
+- `web/server/routes/diagnostics-routes.test.ts`
+- `web/server/routes/diagnostics-routes.ts`
+- `web/src/components/AgentsPage.test.tsx`
+- `web/src/components/AgentsPage.tsx`
+- `web/src/components/ClaudeMdEditor.test.tsx`
+- `web/src/components/ClaudeMdEditor.tsx`
+- `web/src/components/Composer.test.tsx`
+- `web/src/components/Composer.tsx`
+- `web/src/components/FolderPicker.test.tsx`
+- `web/src/components/FolderPicker.tsx`
+- `web/src/components/HomePage.test.tsx`
+- `web/src/components/HomePage.tsx`
+- `web/src/components/Playground.tsx`
+- `web/src/components/RunsPage.test.tsx`
+- `web/src/components/RunsPage.tsx`
+- `web/src/components/SessionEditorPane.test.tsx`
+- `web/src/components/SessionEditorPane.tsx`
+- `web/src/components/TaskPanel.tsx`
+- `web/src/components/UiuxToolkitSettings.test.tsx`
+- `web/src/components/UiuxToolkitSettings.tsx`
+- `web/src/components/UpdateAvailableBanner.test.tsx`
+- `web/src/components/UpdateAvailableBanner.tsx`
+- `web/src/components/council/CheckpointCoverageList.test.tsx`
+- `web/src/components/council/CheckpointCoverageList.tsx`
+- `web/src/components/council/CouncilBudgetNotice.test.tsx`
+- `web/src/components/council/CouncilBudgetNotice.tsx`
+- `web/src/components/council/CouncilToggle.test.tsx`
+- `web/src/components/council/CouncilToggle.tsx`
+- `web/src/components/council/FindingsLog.test.tsx`
+- `web/src/components/council/FindingsLog.tsx`
+- `web/src/components/council/ProviderBadges.test.tsx`
+- `web/src/components/council/ProviderBadges.tsx`
+- `web/src/components/diagnostics/DiagnosticsPage.test.tsx`
+- `web/src/components/diagnostics/KbCards.test.tsx`
+- `web/src/components/diagnostics/KbCards.tsx`
+- `web/src/store/drafts.test.ts`
+- `web/src/store/drafts.ts`
+- `web/src/store/index.ts`
+- `web/src/store/sessions-slice.ts`
+- `web/src/store/ui-slice.ts`
+- `web/src/sw-register.test.ts`
+- `web/src/sw-register.ts`
+- `web/src/utils/permission-mode-label.ts`
