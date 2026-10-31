@@ -91,6 +91,17 @@ afterEach(() => {
 // ─── Render & Accessibility ────────────────────────────────────
 
 describe("SandboxManager render & accessibility", () => {
+  it("names the mobile create toggle even when its visual text is hidden", async () => {
+    // sm:inline text is display:none on phones, so it cannot supply the name.
+    render(<SandboxManager embedded />);
+    const toggle = await screen.findByRole("button", { name: "New Sandbox" });
+    expect(toggle).toHaveAttribute("aria-label", "New Sandbox");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-label", "Cancel");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("renders embedded mode with title and passes axe accessibility scan", async () => {
     // Validates that the component renders its heading and has no
     // accessibility violations as detected by axe-core.

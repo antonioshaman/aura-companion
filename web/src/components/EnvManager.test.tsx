@@ -66,6 +66,17 @@ beforeEach(() => {
 // ─── Render & Accessibility ────────────────────────────────────
 
 describe("EnvManager render & accessibility", () => {
+  it("names the mobile create toggle even when its visual text is hidden", async () => {
+    // sm:inline text is display:none on phones, so it cannot supply the name.
+    render(<EnvManager embedded />);
+    const toggle = await screen.findByRole("button", { name: "New Environment" });
+    expect(toggle).toHaveAttribute("aria-label", "New Environment");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-label", "Cancel");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("renders embedded mode and passes axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<EnvManager embedded />);

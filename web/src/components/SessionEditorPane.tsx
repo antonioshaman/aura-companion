@@ -131,8 +131,8 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
 
   // CodeMirror extensions with language detection
   const extensions = useMemo(() => {
-    if (!selectedPath) return [EditorView.lineWrapping];
-    const exts = [EditorView.lineWrapping];
+    const exts = [EditorView.lineWrapping, EditorView.contentAttributes.of({ "aria-label": "Code editor" })];
+    if (!selectedPath) return exts;
     const lang = langForPath(selectedPath);
     if (lang) exts.push(lang as never);
     return exts;
@@ -249,6 +249,7 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
   // Uses refs so the effect only depends on changedFilesTick itself.
   const selectedPathRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
+  const fileRevisionRef = useRef(0);
   useEffect(() => { selectedPathRef.current = selectedPath; }, [selectedPath]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
 
@@ -259,7 +260,8 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
     if (dirtyRef.current) return; // don't overwrite unsaved user edits
     let cancelled = false;
     api.readFile(path).then((res) => {
-      if (cancelled) return;
+      // The request began while clean, but the user may have typed since.
+      if (cancelled || dirtyRef.current || selectedPathRef.current !== path) return;
       setContent(res.content);
       setOriginalContent(res.content);
     }).catch(() => { /* file may have been deleted */ });
@@ -268,6 +270,8 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
 
   // Load file content (or image blob) when a file is selected
   useEffect(() => {
+    fileRevisionRef.current += 1;
+    setSaved(false);
     if (!selectedPath) {
       setContent("");
       setOriginalContent("");
@@ -316,11 +320,14 @@ export function SessionEditorPane({ sessionId }: SessionEditorPaneProps) {
     setSaving(true);
     setSaved(false);
     setError(null);
+    const fileRevision = fileRevisionRef.current;
     api.writeFile(selectedPath, content).then(() => {
+      if (fileRevisionRef.current !== fileRevision) return;
       setOriginalContent(content);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 1500);
     }).catch((err) => {
+      if (fileRevisionRef.current !== fileRevision) return;
       setError(err instanceof Error ? err.message : "Failed to save file");
     }).finally(() => {
       setSaving(false);

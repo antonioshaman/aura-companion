@@ -74,6 +74,17 @@ beforeEach(() => {
 });
 
 describe("PromptsPage", () => {
+  it("names the mobile create toggle even when its visual text is hidden", async () => {
+    // sm:inline text is display:none on phones, so it cannot supply the name.
+    render(<PromptsPage />);
+    const toggle = await screen.findByRole("button", { name: "New Prompt" });
+    expect(toggle).toHaveAttribute("aria-label", "New Prompt");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-label", "Cancel");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("loads all prompts on mount without session cwd filtering", async () => {
     // Validates prompt listing fetches all prompts regardless of active session cwd.
     render(<PromptsPage embedded />);

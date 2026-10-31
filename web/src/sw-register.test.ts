@@ -45,34 +45,23 @@ describe("sw-register", () => {
     expect(typeof config.onNeedRefresh).toBe("function");
   });
 
-  // Auto-apply: onNeedRefresh flips the update-ready flag, notifies subscribers
-  // (the banner is now an inert fallback), AND immediately activates the waiting
-  // SW via updateSW(true) so the tab reloads onto the fresh bundle without a
-  // user gesture. This prevents a stale cached bundle from stranding the tab.
-  it("auto-applies the waiting SW on onNeedRefresh and notifies subscribers", async () => {
+  // Updating a resumed phone tab must not reload a form or dirty editor.
+  it("announces an update but waits for the user before reloading", async () => {
     const updateSWFn = vi.fn();
     mockRegisterSW.mockReturnValueOnce(updateSWFn);
-
     const mod = await import("./sw-register.js");
-    expect(mod.isUpdateReady()).toBe(false);
-
     const listener = vi.fn();
     const unsubscribe = mod.subscribeUpdateReady(listener);
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const config = mockRegisterSW.mock.calls[0]![0] as any;
+    const config = mockRegisterSW.mock.calls[0]![0];
     config.onNeedRefresh();
-
     expect(mod.isUpdateReady()).toBe(true);
     expect(listener).toHaveBeenCalledWith(true);
-    // The refresh no longer waits on applyUpdate()/a banner click.
-    expect(updateSWFn).toHaveBeenCalledWith(true);
-
-    // applyUpdate() remains available as an explicit fallback and is idempotent.
+    expect(updateSWFn).not.toHaveBeenCalled();
     mod.applyUpdate();
-    expect(updateSWFn).toHaveBeenCalledTimes(2);
-
+    expect(updateSWFn).toHaveBeenCalledExactlyOnceWith(true);
     unsubscribe();
+    config.onNeedRefresh();
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("sets up periodic update check every 60 minutes", async () => {

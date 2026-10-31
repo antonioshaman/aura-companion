@@ -365,11 +365,10 @@ describe("App", () => {
       expect(screen.getByTestId("session-launch-overlay")).toBeInTheDocument();
     });
 
-    it("opens the newest active server session when no browser session is selected", async () => {
-      // CLI-created sessions can exist on the server before this browser has a
-      // currentSessionId in localStorage. The app should recover by selecting
-      // the newest live session once, so streamed assistant replies are visible
-      // instead of being acked in a background WebSocket while home is shown.
+    it("keeps the new-session form when live sessions arrive without an explicit selection", async () => {
+      // A resumed phone can have live server sessions but no saved selection.
+      // Keep home until an explicit choice; never replace the new-session form
+      // simply because the background list arrived before the first tap.
       setStoreValues({
         currentSessionId: null,
         sdkSessions: [
@@ -407,7 +406,7 @@ describe("App", () => {
       render(<App />);
 
       await waitFor(() => {
-        expect(navigateToSession).toHaveBeenCalledWith("newest-live", true);
+        expect(navigateToSession).not.toHaveBeenCalled();
       });
     });
 

@@ -155,7 +155,16 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
     localStorage.removeItem("cc-current-session");
     // Cross-slice write: clears currentSessionId (owned by SessionsSlice)
     // alongside the homeResetKey bump to return the user to the home page.
-    set((s) => ({ currentSessionId: null, homeResetKey: s.homeResetKey + 1 }));
+    set((s) => ({
+      currentSessionId: null,
+      homeResetKey: s.homeResetKey + 1,
+      // An explicit + leaves the old launch view. Its delayed result can still
+      // appear in the session list, but must not keep an overlay on this form.
+      sessionCreating: false,
+      sessionCreatingBackend: null,
+      creationProgress: null,
+      creationError: null,
+    }));
   },
   setActiveTab: (tab) => set({ activeTab: tab }),
   markChatTabReentry: (sessionId) =>
