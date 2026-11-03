@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PortableHistoryStore } from "../portable-history-store.js";
@@ -46,11 +46,12 @@ describe("portable history REST", () => {
     expect(f.createSession).not.toHaveBeenCalled();
   });
   // AC8/9: spawn configuration is rebuilt, never copied from historical state, with explicit user-selected backend.
+  // macOS temp paths may use /var while realpath resolves /private/var; compare the canonical workspace.
   it.each(["claude", "codex"])("creates a fresh %s draft with conservative settings", async backend => {
     const f = fixture(); const { id } = f.store.import(f.archive);
     const response = await post(f.app, `/portable-history/${id}/continue`, { sessionId: "old", backend, cwd: f.root });
     expect(response.status).toBe(200);
-    expect(f.createSession).toHaveBeenCalledWith({ cwd: f.root, backend, permissionMode: "default", isolation: "auto" });
+    expect(f.createSession).toHaveBeenCalledWith({ cwd: realpathSync(f.root), backend, permissionMode: "default", isolation: "auto" });
     const result = await response.json();
     expect(result.newSessionId).toBe("fresh"); expect(f.setPickupDraft).toHaveBeenCalledWith("fresh", result.draft, backend);
     expect(f.store.get(id)).toEqual(f.archive);
