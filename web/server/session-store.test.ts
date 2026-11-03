@@ -687,3 +687,26 @@ describe("SessionStore — secrets in chat content", () => {
     expect((session.messageHistory[0] as unknown as typeof userMsg).content).toContain(FAKE_NPM);
   });
 });
+
+// Portable export must include cleanup archives without changing boot recovery's
+// loadAll semantics, and must expose corrupt rows rather than claiming completeness.
+describe("loadForPortableExport", () => {
+  it("includes live-directory and cleanup-archived histories and counts corrupt files", () => {
+    store.saveSync(makeSession("live"));
+    store.saveSync(makeSession("old", { archived: true }));
+    store.moveToArchive("old");
+    writeFileSync(join(tempDir, "corrupt.json"), "{broken");
+    const result = store.loadForPortableExport(32 * 1024 * 1024);
+    expect(result.sessions.map(row => row.id).sort()).toEqual(["live", "old"]);
+    expect(result.skipped).toBe(1);
+    expect(store.loadAll().map(row => row.id)).toEqual(["live"]);
+    expect(store.hasArchivedRow("old")).toBe(true);
+  });
+
+  it("counts oversized rows without loading or deleting them", () => {
+    store.saveSync(makeSession("big"));
+    const result = store.loadForPortableExport(1);
+    expect(result).toEqual({ sessions: [], skipped: 1 });
+    expect(store.load("big")?.id).toBe("big");
+  });
+});

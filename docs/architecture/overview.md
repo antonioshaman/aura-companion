@@ -49,7 +49,7 @@ steps 3-5 are unchanged apart from where the bytes travel.
   - `delivery-metrics.ts` — Reply-delivery metrics (time to first output, stalls, "No response requested." replies, drift recoveries + background tasks they kill, RU/EN nudges); fed by `ws-bridge.ts`, `claude-adapter.ts` and `session-recovery.ts`, served in `GET /api/metrics` and `GET /api/metrics/delivery`. See [session-lifecycle.md](session-lifecycle.md).
   - `session-group-coordinator.ts` — Council Mode pair lifecycle (spawn-with-rollback, archive, state-machine transitions). Decoupled from `session-orchestrator.ts` via injected `SessionSpawner`/`SessionKiller` — AP-1 convention.
   - `group-state-machine.ts` — Pure `transition(state, event)` for the 5 group statuses (`pairing | active | degraded | archived | reconnecting`). Single source of truth for group lifecycle.
-  - `session-store.ts` — JSON file persistence to `$TMPDIR/vibe-sessions/`. Debounced writes.
+  - `session-store.ts` — JSON file persistence to `~/.companion/sessions/` (or `COMPANION_SESSION_DIR`). Debounced durable writes; read-only portable-export inventory includes cleanup archives.
   - `session-types.ts` — All TypeScript types for CLI messages (NDJSON), browser messages, session state, permissions. Includes 5 Council Mode wire variants (`group_*` + `observer_review`).
   - `routes.ts` — REST API: session CRUD, filesystem browsing, environment management. `POST /sessions/create` + `/sessions/create-stream` branch on `councilMode: "council"` to `orchestrator.createCouncilGroup`.
   - `env-manager.ts` — CRUD for environment profiles stored in `~/.companion/envs/`.
@@ -85,6 +85,10 @@ steps 3-5 are unchanged apart from where the bytes travel.
   - `components/council/` — 6 Council Mode components: `CouncilToggle` (New Session toggle + provider dropdown with full APG listbox keyboard model), `ObserverPanel` (5-state status pill + collapsible rail + FindingsLog), `BlockerBanner` (destructive token in PermissionBanner slot, JSX-escaped claim), `DegradedBanner` (warning token in panel header), `ProviderBadges` (asymmetric chips for `claude+codex`), `FindingsLog` (`role="log"` + `aria-live="polite"`, server-assigned stable ids).
 
 - **`web/bin/cli.ts`** — CLI entry point (`bunx the-companion`). Sets `__COMPANION_PACKAGE_ROOT` and imports the server.
+
+## Portable project history
+
+Settings → Portable history exports available Claude/Codex histories and connects independent inert archives. Full Markdown/Obsidian copies are separate from bounded, unsent context drafts used to create a fresh Claude/Codex session. Imported archives never become live executable session state. See [portable-project-history.md](portable-project-history.md) for the format, limits, redaction and file-backup exclusions.
 
 ## WebSocket Protocol
 

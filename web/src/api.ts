@@ -1,3 +1,5 @@
+import type { PortableArchive, PortableSource, ContinuationDraft } from "../server/portable-history-types.js";
+import type { PortableArchiveSummary } from "../server/portable-history-store.js";
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
 import type { ToolkitView } from "../server/skill-exposure.js";
 export type { ToolkitView, ToolkitRow } from "../server/skill-exposure.js";
@@ -1057,7 +1059,29 @@ export interface SweepResult {
   perReason: Record<SweepReason, number>;
 }
 
+export interface PortableHistoryInventory {
+  sources: Omit<PortableSource, "messageHistory">[];
+  archives: PortableArchiveSummary[];
+  limits: { maxArchiveBytes: number; maxSessions: number; maxMessages: number; maxDepth: number; maxStringBytes: number; maxDraftBytes: number };
+  skipped: number;
+}
+
 export const api = {
+  listPortableHistory: () => get<PortableHistoryInventory>("/portable-history"),
+  exportPortableHistory: (sessionIds: string[]) => post<PortableArchive>("/portable-history/export", { sessionIds }),
+  importPortableHistory: (archive: unknown) => post<{ id: string; duplicate: boolean }>("/portable-history/import", archive as object),
+  getPortableHistory: (id: string) => get<PortableArchive>(`/portable-history/${encodeURIComponent(id)}`),
+  getPortableHistoryContext: (id: string, sessionId: string) => get<ContinuationDraft>(`/portable-history/${encodeURIComponent(id)}/context?sessionId=${encodeURIComponent(sessionId)}`),
+  continuePortableHistory: (id: string, sessionId: string, backend: "claude" | "codex", cwd: string) => post<{ newSessionId: string; draft: string }>(`/portable-history/${encodeURIComponent(id)}/continue`, { sessionId, backend, cwd }),
+  getPortableHistoryMarkdown: async (id: string, sessionId: string): Promise<string> => {
+    const res = await fetch(`${BASE}/portable-history/${encodeURIComponent(id)}/markdown?sessionId=${encodeURIComponent(sessionId)}`, { headers: getAuthHeaders() });
+    if (!res.ok) {
+      handle401(res.status);
+      const error = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(error.error || res.statusText);
+    }
+    return res.text();
+  },
   // Auth
   getAuthQr: () =>
     get<{ qrCodes: { label: string; url: string; qrDataUrl: string }[] }>("/auth/qr"),

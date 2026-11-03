@@ -1,5 +1,5 @@
 import { trackSync } from "./event-loop-lag-monitor.js";
-import { mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
+import { mkdirSync, lstatSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { ARCHIVED_SESSIONS_SUBDIR } from "./cleanup/cleanup-paths.js";
@@ -328,6 +328,40 @@ export class SessionStore {
       // Dir doesn't exist yet
     }
     return sessions;
+  }
+
+  /** Read-only export inventory, including rows moved by cleanup. No recovery mutations.
+   * Corrupt, oversized, unsupported or symlinked entries are counted, not hidden.
+   */
+  loadForPortableExport(maxFileBytes: number): { sessions: PersistedSession[]; skipped: number } {
+    const sessions: PersistedSession[] = [];
+    let skipped = 0;
+    const root = realpathSync(this.dir);
+    for (const directory of [root, join(root, ARCHIVED_SESSIONS_SUBDIR)]) {
+      try {
+        if (lstatSync(directory).isSymbolicLink() || !realpathSync(directory).startsWith(root)) {
+          skipped++;
+          continue;
+        }
+        for (const name of readdirSync(directory)) {
+          if (!name.endsWith(".json") || name.endsWith(".runtime.json") || name === "launcher.json") continue;
+          try {
+            const path = join(directory, name);
+            const info = lstatSync(path);
+            if (!info.isFile() || info.isSymbolicLink() || info.size > maxFileBytes || !realpathSync(path).startsWith(root + sep)) {
+              skipped++;
+              continue;
+            }
+            const parsed = migratePersistedSession(JSON.parse(readFileSync(path, "utf8")));
+            if (!parsed || typeof parsed.id !== "string" || !parsed.state || !Array.isArray(parsed.messageHistory)) { skipped++; continue; }
+            sessions.push(parsed);
+          } catch { skipped++; }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") skipped++;
+      }
+    }
+    return { sessions, skipped };
   }
 
   /** Set the archived flag on a persisted session. */

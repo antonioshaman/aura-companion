@@ -1,0 +1,22 @@
+web/server/portable-history-store.ts:4:import { writeAtomicJson } from "./atomic-write.js";
+web/server/portable-history-store.ts:5:import { MAX_ARCHIVE_BYTES, parsePortableArchive, PortableHistoryError, type PortableArchive } from "./portable-history.js";
+web/server/portable-history-store.ts:51:    const archive = parsePortableArchive(raw);
+web/server/portable-history-store.ts:64:    writeAtomicJson(file, archive, { maxBytes: MAX_ARCHIVE_BYTES });
+web/server/portable-history-store.ts:71:    return parsePortableArchive(readFileSync(file, "utf8"));
+web/server/routes.ts:1:import { registerPortableHistoryRoutes } from "./routes/portable-history-routes.js";
+web/server/routes.ts:10:import { writeAtomicJson } from "./atomic-write.js";
+web/server/routes.ts:832:      writeAtomicJson(target, payload);
+web/server/routes.ts:1484:    wsBridge.setPickupDraft(newSessionId, draft, pair ? pair.primary.backendType : launcherSession.backendType);
+web/server/routes.ts:2603:  registerPortableHistoryRoutes(api, { sessionStore: portableSessionStore, launcher, bridge: wsBridge, orchestrator });
+web/server/routes/portable-history-routes.ts:14:  sessionStore?: Pick<SessionStore, "loadForPortableExport">;
+web/server/routes/portable-history-routes.ts:16:  bridge: Pick<WsBridge, "getSession" | "setPickupDraft">;
+web/server/routes/portable-history-routes.ts:60:export function registerPortableHistoryRoutes(api: Hono, deps: PortableHistoryRoutesDeps): void {
+web/server/routes/portable-history-routes.ts:64:    const loaded = deps.sessionStore?.loadForPortableExport(MAX_ARCHIVE_BYTES) ?? { sessions: [], skipped: 0 };
+web/server/routes/portable-history-routes.ts:108:      return c.json(continuationDraft(store().get(c.req.param("id")), sessionId));
+web/server/routes/portable-history-routes.ts:123:      const draft = continuationDraft(store().get(c.req.param("id")), request.sessionId);
+web/server/routes/portable-history-routes.ts:130:      deps.bridge.setPickupDraft(newSessionId, draft.text, request.backend);
+web/server/session-store.ts:6:import { writeAtomicJson } from "./atomic-write.js";
+web/server/session-store.ts:291:    writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
+web/server/session-store.ts:336:  loadForPortableExport(maxFileBytes: number): { sessions: PersistedSession[]; skipped: number } {
+web/server/session-store.ts:396:      writeAtomicJson(join(this.dir, "launcher.json"), data, { maxBytes: Number.POSITIVE_INFINITY });
+web/server/index.ts:437:app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port, diagnosticsService.routes, sessionStore));

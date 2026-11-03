@@ -720,7 +720,7 @@
         </div>
       </div>
 
-      <h3 class="why-subtitle">Три конкретные задачи</h3>
+      <h3 class="why-subtitle">Четыре конкретные задачи</h3>
       <div class="why-scenarios">
         <div class="why-scenario">
           <div class="why-num">01</div>
@@ -741,12 +741,18 @@
           <div class="why-fix"><span class="why-tag why-tag-on">С Aura</span>Все сессии в одном окне, в том числе с телефона. После рестарта сервера сессии поднимаются сами, ответы больше не теряются при зависаниях.</div>
           <div class="why-proof">Как это устроено — открыто: <a href="https://github.com/antonioshaman/aura-companion/blob/main/docs/architecture/session-lifecycle.md" target="_blank" rel="noopener">session-lifecycle.md на GitHub →</a></div>
         </div>
+        <div class="why-scenario" id="portable-history">
+          <div class="why-num">04</div>
+          <div class="why-pain"><span class="why-tag">При смене сервиса</span>Доступ к аккаунту пропал, а история проекта осталась у прежнего агента.</div>
+          <div class="why-fix"><span class="why-tag why-tag-on">Доступно в Aura</span><strong>Модели меняются. История остаётся с вами.</strong> Экспортируйте доступную историю проектов, подключайте архив на другой установке Aura и передавайте проверенный вами контекст Claude ↔ Codex как черновик. Читайте копию в Markdown или Obsidian без аккаунта провайдера.</div>
+          <div class="why-proof">Архив сохраняет доступные сообщения и встроенные вложения; исходники подключаются отдельно. Это перенос контекста, а не внутреннего состояния модели. Локальные агенты — следующий этап.</div>
+        </div>
       </div>
 
       <div class="why-video">
         <span class="why-video-badge">Скоро</span>
         <div class="why-video-body">
-          <strong>Видео «3 задачи под кофе», 2–3 минуты.</strong> Ещё не снято — честно. Покажем ровно три сценария выше, на живом проекте:
+          <strong>Видео «3 задачи под кофе», 2–3 минуты.</strong> Ещё не снято — честно. Покажем первые три сценария выше, на живом проекте:
           <ol>
             <li>лимит ночью → утром работа уже продолжена;</li>
             <li>Codex ловит баг Claude до коммита;</li>
@@ -1095,7 +1101,7 @@
       <div class="faq-list">
         <div class="faq-item">
           <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-1" onclick="toggleFaq(this)">Зачем надстройка, если можно просто пользоваться Claude Code и Codex?</button>
-          <div class="faq-a" id="faq-answer-1" inert aria-hidden="true">Если вам хватает терминала — пользуйтесь терминалом, это честный ответ. Aura нужна, когда мешает трение вокруг агента: работа встала на лимите ночью, ответ потерялся при зависании, сервер перезапустился, вы отошли от ноутбука, а хочется, чтобы код проверила вторая модель. Внутри при этом тот же официальный CLI. <a href="#why">Три конкретные задачи →</a></div>
+          <div class="faq-a" id="faq-answer-1" inert aria-hidden="true">Если вам хватает терминала — пользуйтесь терминалом, это честный ответ. Aura нужна, когда мешает трение вокруг агента: работа встала на лимите ночью, ответ потерялся при зависании, сервер перезапустился, вы отошли от ноутбука, а хочется, чтобы код проверила вторая модель. Внутри при этом тот же официальный CLI. <a href="#why">Четыре конкретные задачи →</a></div>
         </div>
         <div class="faq-item">
           <button type="button" class="faq-q" aria-expanded="false" aria-controls="faq-answer-2" onclick="toggleFaq(this)">Обёртки и чужие фреймворки ухудшают агента. Aura не такая же?</button>
