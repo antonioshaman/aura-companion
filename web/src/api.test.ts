@@ -2221,3 +2221,38 @@ describe("council group API", () => {
     expect(mockFetch.mock.calls[0][0]).toBe("/api/groups");
   });
 });
+
+// Portable archives use installation auth, encoded IDs and explicit continuation options.
+describe("portable history API", () => {
+  it("loads inventory, exports selection, imports raw archive and encodes context IDs", async () => {
+    mockFetch.mockImplementation(() => Promise.resolve(mockResponse({})));
+    await api.listPortableHistory();
+    await api.exportPortableHistory(["s"]);
+    await api.importPortableHistory({ format: "aura-portable-history" });
+    await api.getPortableHistory("a/b");
+    await api.getPortableHistoryContext("a/b", "s/x");
+    expect(mockFetch.mock.calls.map(call => call[0])).toEqual([
+      "/api/portable-history", "/api/portable-history/export", "/api/portable-history/import",
+      "/api/portable-history/a%2Fb", "/api/portable-history/a%2Fb/context?sessionId=s%2Fx",
+    ]);
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ sessionIds: ["s"] });
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body)).toEqual({ format: "aura-portable-history" });
+  });
+  it("posts explicit provider/folder without inherited permissions", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ newSessionId: "new", draft: "review" }));
+    await api.continuePortableHistory("a/b", "s", "codex", "/workspace");
+    const [url, options] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/portable-history/a%2Fb/continue");
+    expect(JSON.parse(options.body)).toEqual({ sessionId: "s", backend: "codex", cwd: "/workspace" });
+  });
+  it("authenticates Markdown downloads and reports failures", async () => {
+    localStorage.setItem("companion_auth_token", "test-token");
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => "# Evidence" });
+    expect(await api.getPortableHistoryMarkdown("a/b", "s/x")).toBe("# Evidence");
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/portable-history/a%2Fb/markdown?sessionId=s%2Fx");
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer test-token");
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "Archive unavailable" }, 404));
+    await expect(api.getPortableHistoryMarkdown("a", "s")).rejects.toThrow("Archive unavailable");
+    localStorage.removeItem("companion_auth_token");
+  });
+});

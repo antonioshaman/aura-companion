@@ -1566,3 +1566,21 @@ describe("SettingsPage", () => {
     expect(results).toHaveNoViolations();
   });
 });
+
+// The portable section is discoverable without mounting history requests in old Settings flows.
+describe("portable history settings navigation", () => {
+  it("renders the section and accessible lazy entry", async () => {
+    const { container } = render(<SettingsPage />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open portable history" })).toBeEnabled());
+    expect(screen.getAllByRole("button", { name: "Portable history" })).toHaveLength(2);
+    const scroll = vi.fn();
+    const portableSection = container.querySelector("#portable-history") as HTMLElement;
+    portableSection.scrollIntoView = scroll;
+    fireEvent.click(screen.getAllByRole("button", { name: "Portable history" })[0]);
+    expect(scroll).toHaveBeenCalled();
+    const section = container.querySelector("#portable-history");
+    expect(section).not.toBeNull();
+    const { axe } = await import("vitest-axe");
+    expect(await axe(section as HTMLElement)).toHaveNoViolations();
+  });
+});

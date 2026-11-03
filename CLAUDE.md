@@ -58,6 +58,7 @@ All code lives under `web/`: `web/server/` (Hono + Bun backend; core router `ws-
 Read the matching doc before changing that area:
 - [docs/architecture/overview.md](docs/architecture/overview.md) — data flow step by step, per-file map of `web/server` / `web/src`, CLI message types.
 - [docs/architecture/session-lifecycle.md](docs/architecture/session-lifecycle.md) — restart recovery per transport, process identity (`argvSha256` anchor for stdio).
+- [docs/architecture/portable-project-history.md](docs/architecture/portable-project-history.md) — inert project archives, Markdown/Obsidian copies, explicit Claude/Codex context drafts, limits and redaction.
 - [docs/architecture/recordings-and-eval-sidecar.md](docs/architecture/recordings-and-eval-sidecar.md) — raw protocol recordings (`~/.companion/recordings/`, JSONL, `origin` field) and the opt-in `COMPANION_EVAL_SIDECAR`.
 - [docs/architecture/council-mode.md](docs/architecture/council-mode.md) — `.council/` filesystem protocol, server + browser pipelines, reconnect grace.
 - [docs/architecture/production-deployment.md](docs/architecture/production-deployment.md) — systemd `KillMode=process`, `COMPANION_ALLOWED_ORIGIN`, the `browsers=0` diagnostic.

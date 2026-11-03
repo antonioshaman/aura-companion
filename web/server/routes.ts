@@ -1,3 +1,4 @@
+import { registerPortableHistoryRoutes } from "./routes/portable-history-routes.js";
 import { Hono } from "hono";
 import { parseIsolationMode } from "./worktree-isolation.js";
 import type { WorktreeMapping } from "./worktree-tracker.js";
@@ -328,6 +329,7 @@ export function createRoutes(
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
   diagnostics?: import("./routes/diagnostics-routes.js").DiagnosticsRoutesDeps,
+  portableSessionStore?: import("./session-store.js").SessionStore,
 ) {
   const api = new Hono();
 
@@ -2598,6 +2600,7 @@ export function createRoutes(
     return c.json(images);
   });
 
+  registerPortableHistoryRoutes(api, { sessionStore: portableSessionStore, launcher, bridge: wsBridge, orchestrator });
   registerFsRoutes(api);
   registerEnvRoutes(api, { webDir: WEB_DIR });
   registerCouncilEconomyRoutes(api, { launcher });

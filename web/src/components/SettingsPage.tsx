@@ -1,3 +1,4 @@
+import { PortableHistorySettings } from "./PortableHistorySettings.js";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { api, type ModelDiagnostics } from "../api.js";
 import { useStore } from "../store.js";
@@ -18,6 +19,7 @@ interface SettingsPageProps {
 const CATEGORIES = [
   { id: "general", label: "General" },
   { id: "session-defaults", label: "Session defaults" },
+  { id: "portable-history", label: "Portable history" },
   { id: "webhooks", label: "Webhooks" },
   { id: "authentication", label: "Authentication" },
   { id: "notifications", label: "Notifications" },
@@ -523,6 +525,11 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   Last commit shows only uncommitted changes. Default branch shows all changes since diverging from main.
                 </p>
               </div>
+            </section>
+
+            <section id="portable-history" ref={setSectionRef("portable-history")}>
+              <h2 className="text-sm font-semibold text-cc-fg mb-4">Portable history</h2>
+              <PortableHistorySettings />
             </section>
 
             {/* Session defaults (aura-diet: solo by default, KB on demand) */}
