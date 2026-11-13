@@ -801,6 +801,18 @@ describe("attachCodexAdapterHandlers", () => {
     expect(deps.persistSession).toHaveBeenCalledWith(session);
   });
 
+  it("onSessionMeta keeps an already-known cwd", () => {
+    // The session cwd is pinned to its first value (same rule as the Claude
+    // path), so a later meta report cannot move the session to another
+    // sidebar project group.
+    session.state.cwd = "/home/user/project";
+    attachCodexAdapterHandlers("test-session", session, adapter as unknown as CodexAdapter, deps);
+
+    adapter._trigger("onSessionMeta", { cwd: "/home/user/project/sub" });
+
+    expect(session.state.cwd).toBe("/home/user/project");
+  });
+
   it("onSessionMeta emits session:cli-id-received when cliSessionId is present", () => {
     // When the meta includes a cliSessionId, the bus event should be emitted
     // to track the mapping from our session ID to the Codex thread ID.

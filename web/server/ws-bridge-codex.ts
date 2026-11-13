@@ -175,7 +175,8 @@ export function attachCodexAdapterHandlers(
       companionBus.emit("session:cli-id-received", { sessionId: session.id, cliSessionId: meta.cliSessionId });
     }
     if (meta.model) session.state.model = meta.model;
-    if (meta.cwd) session.state.cwd = meta.cwd;
+    // Pinned to the first value, as in the Claude path (ws-bridge.ts onSessionMeta).
+    if (meta.cwd && !session.state.cwd) session.state.cwd = meta.cwd;
     session.state.backend_type = "codex";
     deps.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
     deps.persistSession(session);

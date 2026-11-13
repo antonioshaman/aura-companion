@@ -104,6 +104,23 @@ describe("groupSessionsByProject", () => {
     expect(groups[0].sessions).toHaveLength(2);
   });
 
+  it("keeps Council pair members in one group even when their cwds differ", () => {
+    // Pair members share a sessionGroupId; all of them take the project key of
+    // the earliest-created member, so a drifted cwd cannot split the pair
+    // across two sidebar groups. A non-pair session in the drifted dir still
+    // gets its own group.
+    const sessions = [
+      makeItem({ id: "orch", cwd: "/root/Future_Projects", createdAt: 100, sessionGroupId: "grp_1" }),
+      makeItem({ id: "obs", cwd: "/root/Future_Projects/stop-ves/specs", createdAt: 200, sessionGroupId: "grp_1" }),
+      makeItem({ id: "solo", cwd: "/root/Future_Projects/stop-ves/specs", createdAt: 300 }),
+    ];
+    const groups = groupSessionsByProject(sessions);
+    expect(groups.map((g) => [g.label, g.sessions.map((s) => s.id)])).toEqual([
+      ["Future_Projects", ["obs", "orch"]],
+      ["specs", ["solo"]],
+    ]);
+  });
+
   it("sorts groups alphabetically by label", () => {
     const sessions = [
       makeItem({ id: "s1", cwd: "/a/zebra", createdAt: 200 }),

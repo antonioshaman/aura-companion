@@ -256,6 +256,7 @@ launcher.setRecorder(recorder);
 launcher.setStdioCliOpener((sessionId, transport, opts) => wsBridge.handleCLIStdioOpen(sessionId, transport, opts));
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
+wsBridge.repairDriftedCwds(launcher.listSessions());
 // UI/UX toolkit (PLAN Task 7): sweep + install the shipped skill pack before any
 // spawn. Versions decided by persisted sessions are kept for their resume.
 maintainSkillPack({

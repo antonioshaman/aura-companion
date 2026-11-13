@@ -413,6 +413,8 @@ export interface SdkSessionInfo {
   model?: string;
   permissionMode?: string;
   cwd: string;
+  /** Council pair id (set by the launcher for paired sessions). */
+  sessionGroupId?: string;
   createdAt: number;
   archived?: boolean;
   containerId?: string;

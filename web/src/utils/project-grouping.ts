@@ -25,6 +25,8 @@ export interface SessionItem {
   agentName?: string;
   /** Git worktree the session runs in (path + branch shown on the row). */
   worktree?: SessionWorktreeInfo;
+  /** Council pair id — members of one pair are listed in one project group. */
+  sessionGroupId?: string;
 }
 
 export interface ProjectGroup {
@@ -71,13 +73,21 @@ export function groupSessionsByProject(
   sessions: SessionItem[],
 ): ProjectGroup[] {
   const groups = new Map<string, ProjectGroup>();
+  const keyOf = (session: SessionItem) =>
+    extractProjectKey(session.cwd, session.repoRoot || undefined, session.isContainerized);
+
+  // A Council pair stays together even if its members' cwds differ: every
+  // member takes the project key of the earliest-created one.
+  const pairAnchor = new Map<string, SessionItem>();
+  for (const session of sessions) {
+    if (!session.sessionGroupId) continue;
+    const anchor = pairAnchor.get(session.sessionGroupId);
+    if (!anchor || session.createdAt < anchor.createdAt) pairAnchor.set(session.sessionGroupId, session);
+  }
 
   for (const session of sessions) {
-    const key = extractProjectKey(
-      session.cwd,
-      session.repoRoot || undefined,
-      session.isContainerized,
-    );
+    const anchor = session.sessionGroupId ? pairAnchor.get(session.sessionGroupId) : undefined;
+    const key = keyOf(anchor ?? session);
     const label = extractProjectLabel(key);
 
     if (!groups.has(key)) {
