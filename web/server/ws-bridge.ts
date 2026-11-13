@@ -590,6 +590,34 @@ export class WsBridge {
     return count;
   }
 
+  /**
+   * Undo cwd drift persisted before the cwd was pinned: a restored session
+   * whose cwd sits below its launch cwd moved there only because the CLI
+   * reported the agent's `cd`. Resets it to the launch cwd. Containerized
+   * sessions are skipped (their cwd is the host path, not the launch cwd).
+   */
+  repairDriftedCwds(launches: ReadonlyArray<{ sessionId: string; cwd: string; containerId?: string }>): number {
+    let repaired = 0;
+    for (const launch of launches) {
+      const session = this.sessions.get(launch.sessionId);
+      if (!session || session.state.is_containerized || launch.containerId) continue;
+      const launchCwd = launch.cwd.replace(/\/+$/, "");
+      const current = session.state.cwd;
+      if (!launchCwd || !current || !current.startsWith(`${launchCwd}/`)) continue;
+      log.info("ws-bridge", "Repaired drifted session cwd", {
+        event: "session.cwd_drift_repaired",
+        sessionId: session.id,
+        from: current,
+        to: launchCwd,
+      });
+      session.state.cwd = launchCwd;
+      resolveSessionGitInfo(session.id, session.state);
+      this.persistSession(session);
+      repaired++;
+    }
+    return repaired;
+  }
+
   /** Persist a session to disk (debounced). Delegates to ws-bridge-persist. */
   private persistSession(session: Session): void {
     persistSessionFn(session, this.store);
@@ -1119,9 +1147,9 @@ export class WsBridge {
         // it to overwrite session.state.session_id causes the browser to key
         // the session under the wrong ID, producing duplicate sidebar entries.
         const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
-        // For containerized sessions, the CLI reports /workspace as its cwd.
-        // Keep the host path (set by markContainerized()) for correct project grouping.
-        const cwdOverride = session.state.is_containerized ? { cwd: session.state.cwd } : {};
+        // Keep an already-known cwd (pinned on first init, or the host path
+        // set by markContainerized()) — see onSessionMeta for why.
+        const cwdOverride = session.state.cwd ? { cwd: session.state.cwd } : {};
         session.state = {
           ...session.state,
           ...rest,
@@ -1370,9 +1398,12 @@ export class WsBridge {
         if (session.launcherModel === undefined) session.launcherModel = meta.model;
         session.state.model = meta.model;
       }
-      // For containerized sessions, the CLI reports the container's cwd (e.g. /workspace).
-      // Keep the host path (set by markContainerized()) for correct project grouping.
-      if (meta.cwd && !session.state.is_containerized) {
+      // The session's cwd is pinned to the first value: the CLI's later
+      // reports follow the agent's persisted Bash `cd` (Claude Code keeps a
+      // `cd` that stays inside the project), which would move the session
+      // into another sidebar project group. Containerized sessions keep the
+      // host path set by markContainerized() instead of /workspace.
+      if (meta.cwd && !session.state.is_containerized && !session.state.cwd) {
         session.state.cwd = meta.cwd;
       }
       session.state.backend_type = session.backendType;

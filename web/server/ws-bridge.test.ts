@@ -637,6 +637,51 @@ describe("CLI handlers", () => {
     expect(state.is_containerized).toBe(true);
   });
 
+  it("handleCLIMessage: a later init does not move the session cwd (agent `cd` drift)", async () => {
+    // Claude Code keeps a Bash `cd` that stays inside the project and reports
+    // it as `cwd` in the next turn's system.init. Taking it would move the
+    // session into another sidebar project group (seen live: a Council
+    // orchestrator jumped from "Future_Projects" to "specs"). The first init
+    // pins the cwd; later ones must not change it.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/root/Future_Projects" }));
+    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/root/Future_Projects/stop-ves/specs" }));
+
+    expect(bridge.getSession("s1")!.state.cwd).toBe("/root/Future_Projects");
+  });
+
+  it("repairDriftedCwds: resets a restored cwd that drifted below the launch cwd", () => {
+    // Sessions persisted before the pin carry the drifted cwd on disk. On
+    // startup it is reset to the launcher's cwd — but only when it is a
+    // descendant of it; unrelated or containerized cwds are left alone.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+    bridge.getOrCreateSession("drifted").state.cwd = "/root/proj/sub/dir";
+    bridge.getOrCreateSession("same").state.cwd = "/root/proj";
+    bridge.getOrCreateSession("sibling").state.cwd = "/root/project-other";
+    bridge.markContainerized("container", "/root/proj/host");
+
+    const repaired = bridge.repairDriftedCwds([
+      { sessionId: "drifted", cwd: "/root/proj/" },
+      { sessionId: "same", cwd: "/root/proj" },
+      { sessionId: "sibling", cwd: "/root/proj" },
+      { sessionId: "container", cwd: "/root/proj", containerId: "c1" },
+      { sessionId: "unknown", cwd: "/root/proj" },
+    ]);
+
+    expect(repaired).toBe(1);
+    expect(bridge.getSession("drifted")!.state.cwd).toBe("/root/proj");
+    expect(bridge.getSession("same")!.state.cwd).toBe("/root/proj");
+    expect(bridge.getSession("sibling")!.state.cwd).toBe("/root/project-other");
+    expect(bridge.getSession("container")!.state.cwd).toBe("/root/proj/host");
+  });
+
   it("handleCLIMessage: keeps previous git info when container metadata is temporarily unavailable", async () => {
     const session = bridge.getOrCreateSession("s1");
     session.state.git_branch = "existing-branch";
