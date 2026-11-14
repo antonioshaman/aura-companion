@@ -1,7 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { getSettings, type CompanionSettings } from "./settings-manager.js";
+import { locateClaudeOAuth, locateCodexAuth } from "./auth-status/credential-locator.js";
 import { CLAUDE_AUTH_ENV_VARS, hasAnyClaudeAuthEnv, hasNonEmptyEnvVar } from "./provider-auth-env.js";
 
 /**
@@ -26,54 +24,6 @@ export interface BackendAuthStatus {
   authMethod?: AuthMethod;
 }
 
-/** Credential-file candidates under `~/.claude` — mirrors usage-limits.ts. */
-const CLAUDE_CREDENTIAL_FILES = [
-  ".credentials.json",
-  "auth.json",
-  ".auth.json",
-  "credentials.json",
-];
-
-function resolveHome(env: NodeJS.ProcessEnv): string {
-  return env.USERPROFILE || env.HOME || homedir() || "";
-}
-
-interface ClaudeOAuth {
-  accessToken: string;
-  /** Epoch ms the access token expires; absent/0 ⇒ treat as non-expiring here. */
-  expiresAt?: number;
-}
-
-/**
- * Read the Claude OAuth token from `~/.claude/*` credential files. NOTE: on
- * macOS the token lives in the login Keychain (see usage-limits.ts), which we
- * deliberately do NOT probe here — the server target is Linux, and env/settings
- * credentials are detected first anyway, so the only gap is a macOS dev box
- * that signed in with `claude` and set no env/settings key.
- */
-function readClaudeOAuth(env: NodeJS.ProcessEnv): ClaudeOAuth | null {
-  const dir = join(resolveHome(env), ".claude");
-  for (const fileName of CLAUDE_CREDENTIAL_FILES) {
-    const path = join(dir, fileName);
-    if (!existsSync(path)) continue;
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf-8")) as {
-        claudeAiOauth?: { accessToken?: unknown; expiresAt?: unknown };
-      };
-      const oauth = parsed?.claudeAiOauth;
-      if (typeof oauth?.accessToken === "string" && oauth.accessToken.length > 0) {
-        return {
-          accessToken: oauth.accessToken,
-          expiresAt: typeof oauth.expiresAt === "number" ? oauth.expiresAt : undefined,
-        };
-      }
-    } catch {
-      // Unreadable / malformed file — try the next candidate.
-    }
-  }
-  return null;
-}
-
 /**
  * Claude auth status. Precedence mirrors the CLI's own: an auth env var (or a
  * companion-managed key, which the spawn path injects as one) wins over the
@@ -89,9 +39,11 @@ export function getClaudeAuthStatus(
   if (settings.claudeCodeOAuthToken.trim()) return { authState: "authorized", authMethod: "settings_token" };
   if (settings.anthropicApiKey.trim()) return { authState: "authorized", authMethod: "api_key" };
 
-  const oauth = readClaudeOAuth(env);
+  // macOS Keychain is not probed (see credential-locator.ts): the server
+  // target is Linux and env/settings credentials are detected first anyway.
+  const oauth = locateClaudeOAuth(env);
   if (oauth) {
-    if (typeof oauth.expiresAt === "number" && oauth.expiresAt > 0 && oauth.expiresAt <= now) {
+    if (oauth.expiresAt !== null && oauth.expiresAt <= now) {
       return { authState: "expired", authMethod: "oauth" };
     }
     return { authState: "authorized", authMethod: "oauth" };
@@ -111,7 +63,7 @@ export function getCodexAuthStatus(
     return { authState: "authorized", authMethod: "env" };
   }
   if (settings.openaiApiKey.trim()) return { authState: "authorized", authMethod: "api_key" };
-  if (existsSync(join(resolveHome(env), ".codex", "auth.json"))) {
+  if (locateCodexAuth(env)) {
     return { authState: "authorized", authMethod: "oauth" };
   }
   return { authState: "unauthorized" };

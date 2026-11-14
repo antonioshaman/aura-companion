@@ -20,7 +20,9 @@ export function registerSystemRoutes(
   api.get("/sessions/:id/usage-limits", async (c) => {
     const sessionId = c.req.param("id");
     const session = deps.wsBridge.getSession(sessionId);
-    const empty = { five_hour: null, seven_day: null, extra_usage: null };
+    // Codex reports windows only after the app-server's first rate-limits read
+    // in this session; until then the reason is honestly "unknown" (S4 parity).
+    const empty = { five_hour: null, seven_day: null, extra_usage: null, reason: "unknown" as const };
 
     if (session?.backendType === "codex") {
       const rl = deps.wsBridge.getCodexRateLimits(sessionId);

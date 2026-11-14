@@ -15,6 +15,10 @@ vi.mock("node:child_process", () => ({
   execFileSync: mockExecFileSync,
 }));
 
+// Settings are mocked so the API-key branch never depends on the real ~/.companion.
+const mockSettings = vi.hoisted(() => ({ anthropicApiKey: "", claudeCodeOAuthToken: "" }));
+vi.mock("./settings-manager.js", () => ({ getSettings: () => ({ ...mockSettings }) }));
+
 // Mock global fetch at the module level (persists across tests)
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -273,43 +277,25 @@ describe("getCredentials (Linux / Docker)", () => {
     expect(mockExecSync).not.toHaveBeenCalled();
   });
 
-  it("writes refreshed credentials back to the same source file", async () => {
-    // Credentials are stored in auth.json (not the default .credentials.json)
+  it("never refreshes or writes back an expired token (owner default (a))", async () => {
+    // Before LLM-auth phase 1 task 6 this module refreshed the token itself and
+    // wrote it back — racing live CLIs for the single-use refresh token. Now an
+    // expired token is a reason, the file is byte-identical and nothing is fetched.
     const claudeDir = join(tempDir, ".claude");
     mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(
-      join(claudeDir, "auth.json"),
-      makeCredentialsJson(SAMPLE_TOKEN, { expired: true }),
-    );
+    const original = makeCredentialsJson(SAMPLE_TOKEN, { expired: true });
+    writeFileSync(join(claudeDir, "auth.json"), original);
     process.env.HOME = tempDir;
 
     vi.resetModules();
     mockFetch.mockReset();
     const linuxMod = await import("./usage-limits.js");
 
-    // First call = token refresh, second call = usage API
-    mockFetch
-      .mockReturnValueOnce(
-        makeFetchResponse({
-          access_token: "sk-ant-new-token",
-          refresh_token: "sk-ant-new-refresh",
-          expires_in: 3600,
-        }),
-      )
-      .mockReturnValueOnce(makeFetchResponse(SAMPLE_LIMITS));
-
     const result = await linuxMod.getUsageLimits();
-    expect(result).toEqual(SAMPLE_LIMITS);
-
-    // Credentials should have been written to file (not via execFileSync/security)
+    expect(result).toEqual({ five_hour: null, seven_day: null, extra_usage: null, reason: "auth_invalid" });
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(mockExecFileSync).not.toHaveBeenCalled();
-
-    // Verify the refreshed token was written back to auth.json (the source file)
-    const updatedCreds = JSON.parse(
-      readFileSync(join(claudeDir, "auth.json"), "utf-8"),
-    );
-    expect(updatedCreds.claudeAiOauth.accessToken).toBe("sk-ant-new-token");
-    expect(updatedCreds.claudeAiOauth.refreshToken).toBe("sk-ant-new-refresh");
+    expect(readFileSync(join(claudeDir, "auth.json"), "utf-8")).toBe(original);
   });
 });
 
@@ -379,6 +365,7 @@ describe("fetchUsageLimits", () => {
 // ===========================================================================
 describe("getUsageLimits", () => {
   const EMPTY = { five_hour: null, seven_day: null, extra_usage: null };
+  const withReason = (reason: string) => ({ ...EMPTY, reason });
 
   beforeEach(() => {
     Object.defineProperty(process, "platform", { value: "darwin" });
@@ -392,7 +379,68 @@ describe("getUsageLimits", () => {
       throw new Error("no keychain");
     });
     const result = await darwinMod.getUsageLimits();
-    expect(result).toEqual(EMPTY);
+    // S4: a typed reason instead of a silent all-null panel.
+    expect(result).toEqual(withReason("no_credentials"));
+  });
+
+  it("S4-AC2: an API-key sign-in without OAuth reports api_key_login", async () => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockImplementation(() => {
+      throw new Error("no keychain");
+    });
+    expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    expect(await darwinMod.getUsageLimits({ env: {}, settings: { anthropicApiKey: "sk-synthetic", claudeCodeOAuthToken: "" } })).toEqual(withReason("api_key_login"));
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("S4-AC2: an active API key wins over a leftover OAuth file (observer STOP, checkpoint 197)", async () => {
+    // A stale OAuth file next to an active ANTHROPIC_API_KEY must not be used:
+    // neither its (old subscription's) windows nor its expired-token reason.
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN, { expired: true }));
+    expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    expect(mockFetch).not.toHaveBeenCalled();
+    // A companion-managed OAuth token outranks a companion-managed API key (CLI precedence).
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    mockFetch.mockReturnValueOnce(makeFetchResponse(SAMPLE_LIMITS));
+    expect(await darwinMod.getUsageLimits({ env: {}, settings: { anthropicApiKey: "sk-synthetic", claudeCodeOAuthToken: "synthetic-oauth" } })).toEqual(SAMPLE_LIMITS);
+  });
+
+  it("S4-AC1: a rejected token reports auth_invalid and is not cached", async () => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    mockFetch.mockReturnValueOnce(Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) }));
+    expect(await darwinMod.getUsageLimits()).toEqual(withReason("auth_invalid"));
+    mockFetch.mockReturnValueOnce(makeFetchResponse(SAMPLE_LIMITS));
+    expect(await darwinMod.getUsageLimits()).toEqual(SAMPLE_LIMITS);
+  });
+
+  it("a network failure reports network, not auth_invalid", async () => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    expect(await darwinMod.getUsageLimits()).toEqual(withReason("network"));
+  });
+
+  it("EC-38: a cache stamped in the future (clock went back) is a miss", async () => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    mockFetch.mockReturnValue(makeFetchResponse(SAMPLE_LIMITS));
+    await darwinMod.getUsageLimits();
+    await darwinMod.getUsageLimits({ now: Date.now() - 3_600_000 });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("returns limits and caches the result", async () => {
@@ -446,87 +494,56 @@ describe("getUsageLimits", () => {
     mockFetch.mockReturnValue(makeFetchResponse({}, false));
 
     const result = await darwinMod.getUsageLimits();
-    expect(result).toEqual(EMPTY);
+    expect(result).toEqual(withReason("unknown"));
   });
 });
 
 // ===========================================================================
-// Token refresh flow (via getUsageLimits -> getValidAccessToken)
-// These tests use macOS platform to exercise the execSync/keychain path
+// Expired tokens (owner default (a), LLM-auth phase 1 task 6): getUsageLimits
+// NEVER refreshes — no call to the OAuth token endpoint, no Keychain/file
+// writeback. These replace the former "token refresh" tests, whose behaviour
+// was removed on purpose. macOS platform exercises the Keychain read path.
 // ===========================================================================
-describe("token refresh", () => {
-  const EMPTY = { five_hour: null, seven_day: null, extra_usage: null };
+describe("expired token (no refresh)", () => {
+  const AUTH_INVALID = { five_hour: null, seven_day: null, extra_usage: null, reason: "auth_invalid" };
 
   beforeEach(() => {
     Object.defineProperty(process, "platform", { value: "darwin" });
   });
 
-  it("refreshes an expired token and uses the new one", async () => {
+  it("does not call the token endpoint or write the Keychain for an expired token", async () => {
     vi.resetModules();
     mockFetch.mockReset();
     mockExecSync.mockReset();
     mockExecFileSync.mockReset();
     const darwinMod = await import("./usage-limits.js");
-
-    // Provide an expired token
     mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN, { expired: true }));
 
-    // First call = token refresh, second call = usage API
-    mockFetch
-      .mockReturnValueOnce(
-        makeFetchResponse({
-          access_token: "sk-ant-new-token",
-          refresh_token: "sk-ant-new-refresh",
-          expires_in: 3600,
-        }),
-      )
-      .mockReturnValueOnce(makeFetchResponse(SAMPLE_LIMITS));
-
-    const result = await darwinMod.getUsageLimits();
-    expect(result).toEqual(SAMPLE_LIMITS);
-
-    // First fetch = refresh call to platform.claude.com
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    const [refreshUrl, refreshOpts] = mockFetch.mock.calls[0];
-    expect(refreshUrl).toContain("oauth/token");
-    expect(refreshOpts.method).toBe("POST");
-
-    // Second fetch = usage API with refreshed token
-    const [usageUrl, usageOpts] = mockFetch.mock.calls[1];
-    expect(usageUrl).toContain("oauth/usage");
-    expect(usageOpts.headers.Authorization).toBe("Bearer sk-ant-new-token");
-
-    // Credentials should have been written back via execFileSync (macOS keychain)
-    expect(mockExecFileSync).toHaveBeenCalled();
+    expect(await darwinMod.getUsageLimits()).toEqual(AUTH_INVALID);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
-  it("returns empty when token is expired and refresh fails", async () => {
+  it("treats a token inside the 5-minute buffer as expired", async () => {
     vi.resetModules();
     mockFetch.mockReset();
     mockExecSync.mockReset();
     const darwinMod = await import("./usage-limits.js");
-
-    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN, { expired: true }));
-    // Refresh call fails
-    mockFetch.mockReturnValueOnce(makeFetchResponse({}, false));
-
-    const result = await darwinMod.getUsageLimits();
-    expect(result).toEqual(EMPTY);
-    // Only the refresh call, no usage call
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    mockExecSync.mockReturnValue(JSON.stringify({
+      claudeAiOauth: { accessToken: SAMPLE_TOKEN, refreshToken: "r", expiresAt: Date.now() + 60_000 },
+    }));
+    expect(await darwinMod.getUsageLimits()).toEqual(AUTH_INVALID);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("returns empty when token is expired and refresh throws", async () => {
+  it("treats a token without expiresAt as unusable (fail-closed)", async () => {
     vi.resetModules();
     mockFetch.mockReset();
     mockExecSync.mockReset();
     const darwinMod = await import("./usage-limits.js");
-
-    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN, { expired: true }));
-    mockFetch.mockRejectedValueOnce(new Error("network error"));
-
-    const result = await darwinMod.getUsageLimits();
-    expect(result).toEqual(EMPTY);
+    mockExecSync.mockReturnValue(JSON.stringify({ claudeAiOauth: { accessToken: SAMPLE_TOKEN } }));
+    expect(await darwinMod.getUsageLimits()).toEqual(AUTH_INVALID);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("uses valid (non-expired) token without refreshing", async () => {
