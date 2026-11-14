@@ -214,6 +214,36 @@ export const TURN_FAILURE_KINDS: readonly TurnFailureKind[] = [
   "auth_rejected", "limit_window", "extra_usage_exhausted", "network", "cli_outdated", "stale_session_credentials",
 ];
 
+/** Which allowance a limit failure hit. Structured limit type first, frame text only as a fallback. */
+export type UsageWindow = "five_hour" | "seven_day" | "extra_usage" | "unknown_window";
+
+export const USAGE_WINDOWS: readonly UsageWindow[] = ["five_hour", "seven_day", "extra_usage", "unknown_window"];
+
+/**
+ * A classified turn failure, carried as the optional `turnFailure` field of
+ * the existing `error` browser message. Built on the server from protocol
+ * frames only (never assistant or tool output). `providerMessage` is the
+ * provider's own text — clients render it as plain text, never as markup.
+ */
+export interface TurnFailure {
+  kind: TurnFailureKind;
+  provider: ProviderId;
+  providerMessage: string;
+  /** limit_window / extra_usage_exhausted. */
+  window?: UsageWindow;
+  /** Epoch ms the window resets; null when the frames did not say. */
+  resetAt?: number | null;
+  /** extra_usage_exhausted while the subscription windows still had room. */
+  likelyCause?: "model_outside_plan";
+  /** cli_outdated: the version the provider asked for, null when unknown. */
+  requiredVersion?: string | null;
+  /**
+   * auth_rejected only: false when the session's credential generation could
+   * not be compared with the primary sign-in (so "stale copy" was not ruled out).
+   */
+  credentialsCompared?: boolean;
+}
+
 // ─── Usage-limits panel reason (task 6) ───────────────────────────────────────
 
 /** Why `/api/usage-limits` carries no windows. Absent when data is present. */

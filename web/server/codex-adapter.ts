@@ -26,6 +26,9 @@ import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
+import { classifyCodexTurnFailure, type CodexTurnSignal, type CredentialGenerationVerdict } from "./turn-failure.js";
+import { describeTurnFailure } from "./auth-status/auth-catalog.js";
+import type { TurnFailure } from "./auth-status/auth-types.js";
 import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
 import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
 import type { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
@@ -154,7 +157,7 @@ export interface ICodexTransport {
   onRequest(handler: (method: string, id: number, params: Record<string, unknown>) => void): void;
   onRawIncoming(cb: (line: string) => void): void;
   onRawOutgoing(cb: (data: string, origin?: RecordingOrigin) => void): void;
-  onParseError(cb: (message: string) => void): void;
+  onParseError(cb: (message: string, idlessError?: { code: number | string | null; message: string }) => void): void;
   isConnected(): boolean;
 }
 
@@ -203,6 +206,12 @@ export interface CodexAdapterOptions {
    *  sent as `developerInstructions` on thread/start AND thread/resume —
    *  see `threadInstructionParams`. */
   systemPrompt?: string;
+  /**
+   * Compares this session's credential generation with the primary
+   * auth.json at the moment an auth failure arrives (task 11). Absent →
+   * "incomparable" (the card says the comparison was not possible).
+   */
+  credentialGeneration?: () => CredentialGenerationVerdict;
 }
 
 // ─── Stdio JSON-RPC Transport ────────────────────────────────────────────────
@@ -222,7 +231,7 @@ export class StdioTransport implements ICodexTransport {
   private requestHandler: ((method: string, id: number, params: Record<string, unknown>) => void) | null = null;
   private rawInCb: ((line: string) => void) | null = null;
   private rawOutCb: ((data: string, origin?: RecordingOrigin) => void) | null = null;
-  private parseErrorCb: ((message: string) => void) | null = null;
+  private parseErrorCb: ((message: string, idlessError?: { code: number | string | null; message: string }) => void) | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array>;
   private connected = true;
   private buffer = "";
@@ -412,7 +421,8 @@ export class StdioTransport implements ICodexTransport {
       code,
       message: text.slice(0, 500),
     });
-    this.parseErrorCb?.(message);
+    // The raw fields ride along so the adapter can classify the failure (task 10).
+    this.parseErrorCb?.(message, { code, message: text });
   }
 
   /** Report a frame that matches no JSON-RPC shape (deduped per transport). */
@@ -501,7 +511,7 @@ export class StdioTransport implements ICodexTransport {
   }
 
   /** Register callback for parse error messages to surface to the browser. */
-  onParseError(cb: (message: string) => void): void {
+  onParseError(cb: (message: string, idlessError?: { code: number | string | null; message: string }) => void): void {
     this.parseErrorCb = cb;
   }
 
@@ -765,8 +775,8 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     // Surface transport-level parse errors to the browser
-    this.transport.onParseError((message) => {
-      this.browserMessageCb?.({ type: "error", message });
+    this.transport.onParseError((message, idlessError) => {
+      this.emitErrorWithFailure(message, idlessError ? { source: "idless_error", ...idlessError } : null);
     });
 
     // Start initialization
@@ -986,8 +996,8 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     // Re-wire parse error surfacing
-    this.transport.onParseError((message) => {
-      this.browserMessageCb?.({ type: "error", message });
+    this.transport.onParseError((message, idlessError) => {
+      this.emitErrorWithFailure(message, idlessError ? { source: "idless_error", ...idlessError } : null);
     });
 
     // Re-run initialization (which will resume the thread if threadId is set)
@@ -2336,7 +2346,12 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     console.error(`[codex-adapter] Codex error notification: ${message}`);
-    this.emit({ type: "error", message });
+    this.emitErrorWithFailure(message, {
+      source: "error_notification",
+      message: baseMessage,
+      codexErrorInfo: error?.codexErrorInfo,
+      willRetry,
+    });
     if (!willRetry) {
       this.maybeEmitUsageLimit(baseMessage, error?.codexErrorInfo, typeof params.turnId === "string" ? params.turnId : null);
     }
@@ -3494,6 +3509,36 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
+
+  /**
+   * Send an `error` frame, attaching the classified turn failure when the
+   * signal is recognised (task 10). Unrecognised → the plain message, as before.
+   */
+  private emitErrorWithFailure(message: string, signal: CodexTurnSignal | null): void {
+    let turnFailure: TurnFailure | undefined;
+    if (signal) {
+      const outcome = classifyCodexTurnFailure(signal, {
+        rateLimits: this._rateLimits,
+        credentialGeneration: this.options.credentialGeneration ?? (() => "incomparable"),
+        now: Date.now(),
+      });
+      if (outcome.kind === "classified") {
+        turnFailure = outcome.failure;
+        log.info("codex-adapter", "turn failure classified", {
+          event: "turn_failure.classified",
+          sessionId: this.sessionId,
+          provider: "codex",
+          kind: turnFailure.kind,
+          window: turnFailure.window ?? null,
+        });
+      }
+    }
+    if (!turnFailure) {
+      this.emit({ type: "error", message });
+      return;
+    }
+    this.emit({ type: "error", message: `${describeTurnFailure(turnFailure.kind, "codex").title}: ${message}`, turnFailure });
+  }
 
   private emit(msg: BrowserIncomingMessage): void {
     this.browserMessageCb?.(msg);
