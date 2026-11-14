@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.11.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.10.0...aura-companion-v2.11.0) (2026-11-14)
+
+
+### Features
+
+* **auth:** add the LLM auth status foundation (phase 1a) ([#455](https://github.com/antonioshaman/aura-companion/issues/455)) ([394d91e](https://github.com/antonioshaman/aura-companion/commit/394d91e976b9206817a18085512b33cfc20541ec))
+* **auth:** classify turn failures and clear stale limit banners (phase 1c, tasks 10-13) ([#457](https://github.com/antonioshaman/aura-companion/issues/457)) ([7109319](https://github.com/antonioshaman/aura-companion/commit/7109319dbb12422c2d16370b214c5abd3009f1ec))
+* **auth:** LLM auth doctor, status/doctor REST and CLI (phase 1b) ([#456](https://github.com/antonioshaman/aura-companion/issues/456)) ([3e74559](https://github.com/antonioshaman/aura-companion/commit/3e74559a8c8565a9d0eefd9e42d5baddff3103b8))
+* **auth:** show turn failures, limit reasons and provider status in the UI (phase 1d, tasks 14-15) ([#458](https://github.com/antonioshaman/aura-companion/issues/458)) ([6a06da0](https://github.com/antonioshaman/aura-companion/commit/6a06da0bcef55ec3265d5d880ac39b4bbf935d19))
+
+
+### Bug Fixes
+
+* **auth:** keep turn-failure cards after reload and align the Codex auth badge (phase 1 follow-ups) ([#459](https://github.com/antonioshaman/aura-companion/issues/459)) ([61c75b3](https://github.com/antonioshaman/aura-companion/commit/61c75b3f2a9b0049bab66df178602c7a51ffa4a8))
+* **sessions:** pin session cwd so an agent `cd` cannot split a council pair ([#452](https://github.com/antonioshaman/aura-companion/issues/452)) ([a06354a](https://github.com/antonioshaman/aura-companion/commit/a06354a07c2fd61d140f28a1121d4c475f2bedfe))
+
 ## [2.10.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.9.1...aura-companion-v2.10.0) (2026-11-03)
 
 
