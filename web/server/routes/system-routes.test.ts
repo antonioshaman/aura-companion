@@ -123,7 +123,8 @@ describe("GET /api/sessions/:id/usage-limits", () => {
 
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null });
+    // S4 parity with Claude: an explicit reason, never a silent all-null body.
+    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null, reason: "unknown" });
   });
 
   // When codex rate limits have timestamps in epoch milliseconds (>1e12),

@@ -5,6 +5,7 @@ import type { ToolkitView } from "../server/skill-exposure.js";
 export type { ToolkitView, ToolkitRow } from "../server/skill-exposure.js";
 import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap, BrowserCouncilBudget } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
+import type { UsageLimitsReason } from "../server/auth-status/auth-types.js";
 
 const BASE = "/api";
 const AUTH_STORAGE_KEY = "companion_auth_token";
@@ -479,6 +480,8 @@ export interface UsageLimits {
     utilization: number | null;
     disabled_reason?: string | null;
   } | null;
+  /** Why the windows are empty; absent when data is present (server usage-limits.ts). */
+  reason?: UsageLimitsReason;
 }
 
 export interface EditorStartResult {
