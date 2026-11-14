@@ -9,8 +9,8 @@
 //
 // Argv: [--scenario=<name>] [--grandchild] then the real CLI argv:
 //   claude: `auth login`          codex: `login --device-auth`
-// Scenarios — claude: success | reject | garbage | ignore_term | env
-//             codex:  success | no_network | wait | garbage | ignore_term | env
+// Scenarios — claude: success | reject | garbage | ignore_term | env | silent
+//             codex:  success | no_network | wait | garbage | ignore_term | env | silent
 // The scenario is an argv flag (not env) because the runner passes an env
 // allowlist; tests wrap this file in a per-scenario shell script.
 import { spawn } from "node:child_process";
@@ -35,7 +35,10 @@ if (args.includes("--grandchild")) {
   spawn("sleep", ["300"], { stdio: "ignore" });
 }
 if (scenario === "ignore_term") process.on("SIGTERM", () => {});
-if (scenario === "env") {
+if (scenario === "silent") {
+  // Prints nothing and waits: the attempt's 10-second readiness budget must end it.
+  setInterval(() => {}, 1 << 30);
+} else if (scenario === "env") {
   // Prints the environment it received (names + the config-dir values), then waits.
   const keys = Object.keys(process.env).sort();
   process.stdout.write(`FAKE-ENV ${JSON.stringify({ keys, HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME, TERM: process.env.TERM })}\n`);
