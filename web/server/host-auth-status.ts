@@ -53,18 +53,24 @@ export function getClaudeAuthStatus(
 
 /**
  * Codex auth status. No expiry state (the `~/.codex/auth.json` schema has no
- * reliable expiry field we read); env var and companion key win over the file.
+ * reliable expiry field we read). A stored ChatGPT sign-in wins: codex 0.162.1
+ * keeps using it even with OPENAI_API_KEY set (`codex doctor` → "auth mode
+ * chatgpt"), and Aura injects the settings key as that env var — the same
+ * precedence as the provider status probe (LLM auth 1c). Otherwise an env
+ * var or the companion key wins over an API-key / unreadable file.
  */
 export function getCodexAuthStatus(
   env: NodeJS.ProcessEnv = process.env,
   settings: Pick<CompanionSettings, "openaiApiKey"> = getSettings(),
 ): BackendAuthStatus {
+  const file = locateCodexAuth(env);
+  if (file?.authMode === "chatgpt") return { authState: "authorized", authMethod: "oauth" };
   if (hasNonEmptyEnvVar(env, "OPENAI_API_KEY") || hasNonEmptyEnvVar(env, "CODEX_API_KEY")) {
     return { authState: "authorized", authMethod: "env" };
   }
   if (settings.openaiApiKey.trim()) return { authState: "authorized", authMethod: "api_key" };
-  if (locateCodexAuth(env)) {
-    return { authState: "authorized", authMethod: "oauth" };
+  if (file) {
+    return { authState: "authorized", authMethod: file.authMode === "api_key" ? "api_key" : "oauth" };
   }
   return { authState: "unauthorized" };
 }

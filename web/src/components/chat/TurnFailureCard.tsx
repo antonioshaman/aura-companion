@@ -18,8 +18,8 @@ import { createClientMessageId, sendToSession } from "../../ws.js";
  * "Retry" sends the last user message once (one click, one resend, no loop);
  * "Restart the session" is only a button. Neither runs automatically.
  *
- * Not persisted: `error` frames are not in the replayed history, so the card
- * does not survive a page reload (accepted for phase 1).
+ * Survives a reload: the server keeps `error` frames that carry a
+ * `turnFailure` in the session history, and ws.ts rebuilds the card from it.
  */
 
 export type RetryState = "ready" | "sent" | "unavailable";

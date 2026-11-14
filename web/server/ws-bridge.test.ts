@@ -603,6 +603,29 @@ describe("CLI handlers", () => {
     expect(session.state.model).toBe("claude-opus-4-6");
   });
 
+  // LLM auth follow-up: a classified turn failure is history-backed (like
+  // guard_denied) so its card survives a page reload; a plain error is not.
+  it("persists an error frame carrying turnFailure in the history (with a timestamp), not a plain error", async () => {
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    await bridge.handleCLIMessage(cli, makeInitMsg());
+    const session = bridge.getSession("s1")!;
+    const adapter = session.backendAdapter as any;
+    adapter.browserMessageCb({ type: "error", message: "plain failure" });
+    adapter.browserMessageCb({
+      type: "error",
+      message: "Claude rejected the sign-in: 401",
+      turnFailure: { kind: "auth_rejected", provider: "claude", providerMessage: "401", credentialsCompared: true },
+    });
+    const errors = session.messageHistory.filter((m: any) => m.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ turnFailure: { kind: "auth_rejected" } });
+    expect(typeof (errors[0] as any).timestamp).toBe("number");
+  });
+
   it("handleCLIMessage: session_update broadcasts merged state to connected browsers", async () => {
     // Codex sends session_update for runtime state changes after attach. The
     // browser must receive it or it can stay stuck in a stale disconnected UI.

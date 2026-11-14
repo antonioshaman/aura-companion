@@ -1693,6 +1693,17 @@ function handleParsedMessage(
           recomputeContextPct(sessionId);
         } else if (histMsg.type === "guard_denied") {
           chatMessages.push(guardDenialChatMessage(histMsg.denial, histMsg.timestamp));
+        } else if (histMsg.type === "error" && histMsg.turnFailure) {
+          // Card only — the per-turn failure gate (store.turnFailures) is for
+          // the live turn and is not re-armed from history.
+          chatMessages.push({
+            id: `hist-turn-failure-${i}`,
+            role: "system",
+            content: histMsg.message,
+            timestamp: histMsg.timestamp || Date.now(),
+            systemVariant: "turn-failure",
+            turnFailure: histMsg.turnFailure,
+          });
         } else if (histMsg.type === "system_event") {
           const summary = summarizeSystemEvent(histMsg.event);
           if (!summary) continue;
