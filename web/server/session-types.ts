@@ -463,6 +463,8 @@ export type BrowserIncomingMessageBase =
      * `advisory`: an old browser renders `message` as a plain line.
      */
     turnFailure?: TurnFailure;
+    /** Set when a turn-failure frame is stored in the history (reload replay). */
+    timestamp?: number;
   }
   // Model Registry + Failover Task 5 — proactive pre-send gate decision.
   // The server is the sole substitution-decision owner: when an outgoing

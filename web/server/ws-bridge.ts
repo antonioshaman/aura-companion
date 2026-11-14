@@ -1366,6 +1366,15 @@ export class WsBridge {
         this.persistSession(session);
       }
 
+      // -- error with turnFailure: history-backed like guard_denied so the
+      // turn-failure card survives a reload (LLM auth follow-up). A plain
+      // error stays live-only, as before.
+      if (msg.type === "error" && msg.turnFailure) {
+        if (msg.timestamp === undefined) msg.timestamp = Date.now();
+        this.appendHistory(session, msg);
+        this.persistSession(session);
+      }
+
       // -- guard_denied: guards-pack hook denial (Claude-only) — history-backed
       // so the card survives reload; resolveGuardDenial() updates it in place.
       if (msg.type === "guard_denied") {

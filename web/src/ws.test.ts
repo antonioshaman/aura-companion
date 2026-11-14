@@ -2270,6 +2270,27 @@ describe("handleMessage: guard_denied", () => {
   });
 });
 
+describe("message_history: turn-failure card", () => {
+  // LLM auth follow-up: the server keeps classified turn failures in the
+  // history, so a reload restores the card (not a plain line) — and does not
+  // re-arm the per-turn failure gate (that belongs to the live turn only).
+  it("restores the turn-failure card from message_history", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "message_history",
+      messages: [
+        { type: "error", message: "No connection to Codex: down", turnFailure: { kind: "network", provider: "codex", providerMessage: "down" }, timestamp: 1500 },
+        { type: "error", message: "legacy plain error without a card" },
+      ],
+    });
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ role: "system", systemVariant: "turn-failure", timestamp: 1500, turnFailure: { kind: "network" } });
+    expect(useStore.getState().turnFailures.has("s1")).toBe(false);
+  });
+});
+
 // ===========================================================================
 // handleMessage: cli_disconnected / cli_connected
 // ===========================================================================
