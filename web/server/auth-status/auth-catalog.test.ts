@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   describeAuthState,
+  describeDoctorClear,
   describeDoctorFinding,
+  describeDoctorUnchecked,
+  doctorPlaceLabel,
   describeNotVerified,
   describeTurnFailure,
   describeUsageLimitsReason,
@@ -10,6 +13,8 @@ import {
 } from "./auth-catalog.js";
 import {
   DOCTOR_FINDING_KINDS,
+  DOCTOR_PLACE_CLASSES,
+  DOCTOR_UNCHECKED_REASONS,
   NOT_VERIFIED_REASONS,
   PROVIDER_AUTH_STATES,
   PROVIDER_IDS,
@@ -75,5 +80,21 @@ describe("auth catalog", () => {
     expect(formatKnown(unknownField)).toBe("unknown");
     expect(formatKnown(knownField("max"))).toBe("max");
     expect(formatKnown(knownField(0), (n) => `t=${n}`)).toBe("t=0");
+  });
+
+  it("has doctor text for every unchecked reason × check × provider, every place, and the all-clear line", () => {
+    // Doctor output (CLI + Diagnostics) renders only through these; "not checked"
+    // must never read like "nothing found" (EC-17 fail-closed wording).
+    for (const provider of PROVIDER_IDS) {
+      expect(describeDoctorClear(provider).title).toContain("no problems found");
+      for (const reason of DOCTOR_UNCHECKED_REASONS) {
+        for (const check of ["binary", "cli_version", "credential_copies", "credential_access"] as const) {
+          const entry = describeDoctorUnchecked(check, reason, provider);
+          expect(entry.title).toContain("not checked");
+          expect(entry.detail.length).toBeGreaterThan(0);
+        }
+      }
+    }
+    for (const place of DOCTOR_PLACE_CLASSES) expect(doctorPlaceLabel(place).length).toBeGreaterThan(0);
   });
 });

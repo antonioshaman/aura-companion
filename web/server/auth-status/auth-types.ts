@@ -96,6 +96,105 @@ export const DOCTOR_FINDING_KINDS: readonly DoctorFindingKind[] = [
   "binary_divergence", "cli_outdated", "credential_copy", "credential_foreign_owner", "credential_unreadable",
 ];
 
+/**
+ * Where a file lives, in a shape REST may carry: place class + whose HOME it
+ * is relative to + the home-relative path. `absPath` is the full path — only
+ * the CLI prints it; `toRestDoctorReport` strips it (plan task 8).
+ */
+export type DoctorPlaceClass =
+  /** The service user's HOME. */
+  | "service_home"
+  /** A per-session Codex home under the service's companion dir. */
+  | "codex_session_home"
+  /** root's HOME when the service is not root. */
+  | "root_home"
+  /** Another `/home/*` user. */
+  | "other_user_home"
+  /** Outside any HOME (e.g. `/usr/bin`); the path carries no user topology. */
+  | "system";
+
+export const DOCTOR_PLACE_CLASSES: readonly DoctorPlaceClass[] = [
+  "service_home", "codex_session_home", "root_home", "other_user_home", "system",
+];
+
+export interface DoctorPlace {
+  place: DoctorPlaceClass;
+  /** User whose HOME `relPath` is relative to; null for `system` (then `relPath` is absolute). */
+  homeUser: string | null;
+  relPath: string;
+  /** Full path. Present in-process and in the CLI; never in REST payloads. */
+  absPath?: string;
+}
+
+export interface DoctorFile extends DoctorPlace {
+  /** Owner user name, or `uid:<n>` when the uid has no passwd entry. */
+  owner: string;
+  /** Permission bits (`mode & 0o777`). */
+  mode: number;
+}
+
+export interface DoctorBinary {
+  /** The command path as resolved on PATH (may be a symlink). */
+  location: DoctorFile;
+  /** Resolved target of `location` (the file actually executed). */
+  target: DoctorFile;
+  version: Known<string>;
+  /** "path" = read from the install path (no exec); "exec" = `--version`; "none" = unknown. */
+  versionSource: "path" | "exec" | "none";
+}
+
+export type DoctorFinding =
+  | {
+      kind: "binary_divergence";
+      provider: ProviderId;
+      launched: DoctorBinary;
+      /** The service user's own install; null when the launched CLI is another user's install and none exists. */
+      reference: DoctorBinary | null;
+    }
+  | { kind: "cli_outdated"; provider: ProviderId; launched: DoctorBinary; required: string }
+  | { kind: "credential_copy"; provider: ProviderId; copy: DoctorFile }
+  | { kind: "credential_foreign_owner"; provider: ProviderId; file: DoctorFile; serviceUser: string }
+  | { kind: "credential_unreadable"; provider: ProviderId; file: DoctorFile; serviceUser: string };
+
+/** A check that could not run. Fail-closed: "not checked" is never "nothing found" (EC-17). */
+export type DoctorUncheckedReason =
+  /** EACCES / EPERM on a directory or file in the scan list. */
+  | "permission_denied"
+  /** The launched CLI version could not be determined without an unsafe exec. */
+  | "version_unknown"
+  /** Any other filesystem error. */
+  | "io_error";
+
+export const DOCTOR_UNCHECKED_REASONS: readonly DoctorUncheckedReason[] = [
+  "permission_denied", "version_unknown", "io_error",
+];
+
+export type DoctorCheck = "binary" | "cli_version" | "credential_copies" | "credential_access";
+
+export interface DoctorUnchecked {
+  provider: ProviderId;
+  check: DoctorCheck;
+  reason: DoctorUncheckedReason;
+  place?: DoctorPlace;
+}
+
+export interface ProviderDoctorResult {
+  provider: ProviderId;
+  /** CLI the service launches sessions with; null when not found on its PATH. */
+  launched: DoctorBinary | null;
+  /** Minimum CLI version sessions need; unknown when no floor is recorded (Codex). */
+  requiredVersion: Known<string>;
+  findings: DoctorFinding[];
+  unchecked: DoctorUnchecked[];
+}
+
+export interface DoctorReport {
+  checkedAt: number;
+  computedBy: "service" | "local_cli";
+  serviceUser: string | null;
+  providers: Record<ProviderId, ProviderDoctorResult>;
+}
+
 // ─── Turn failures (classified in 1c; vocabulary fixed here) ──────────────────
 
 export type TurnFailureKind =
