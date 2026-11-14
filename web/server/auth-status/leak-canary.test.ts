@@ -192,7 +192,11 @@ afterAll(() => {
   rmSync(ROOT, { recursive: true, force: true });
 });
 
-describe("leak canary: synthetic credentials never leave as content", () => {
+// macOS reads the Claude token from the login Keychain, not from the file
+// (credential-locator.ts), so the synthetic file would not be used — and the
+// probe would touch the developer's real Keychain. The file-based canary is
+// Linux-only (the server target); the turn-failure part below is portable.
+describe.skipIf(process.platform === "darwin")("leak canary: synthetic credentials never leave as content", () => {
   it("REST /api/llm-auth/* (status, per-provider, recheck, doctor) carries no credential content", async () => {
     const bodies: string[] = [];
     for (const [method, path] of [
