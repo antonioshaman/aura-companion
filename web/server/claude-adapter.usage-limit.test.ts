@@ -82,6 +82,16 @@ describe("ClaudeAdapter usage-limit detection", () => {
     expect(events[0]).toMatchObject({ resetAt: 1791979200 * 1000, resetSource: "rate_limit_event", limitType: "seven_day_overage_included" });
   });
 
+  // LLM auth task 13: the event carries which allowance was hit, so the
+  // scheduler stores it as a fact and skips guessed extra-usage resumes.
+  it("the event names the window: five_hour for the session limit, extra_usage for overage", () => {
+    adapter.handleRawMessage(fixture("claude-session-limit-2026-10-14.ndjson"));
+    expect(events[0]).toMatchObject({ window: "five_hour" });
+    vi.setSystemTime(1791959859885);
+    adapter.handleRawMessage(fixture("claude-out-of-usage-credits-2026-10-14.ndjson"));
+    expect(events[1]).toMatchObject({ window: "extra_usage" });
+  });
+
   it("result text alone (no rate_limit_event) still emits, parsed from the text", () => {
     const lines = fixture("claude-session-limit-2026-10-14.ndjson").trim().split("\n");
     adapter.handleRawMessage(`${lines[2]}\n`);

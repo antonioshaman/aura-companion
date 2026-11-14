@@ -165,6 +165,19 @@ export interface CompanionEventMap {
     resetAt: number;
     resetSource: import("./usage-limit-parse.js").UsageLimitResetSource;
     limitType: string | null;
+    /** Which allowance was hit (task 13); absent from older emitters. */
+    window?: import("./auth-status/auth-types.js").UsageWindow;
+  };
+
+  /**
+   * A browser opened a session, or a message arrived, while its persisted
+   * usage-limit banner names a window that already reset — the orchestrator
+   * clears it for every tab (`hide`) or also drops a schedule that will
+   * never fire (`cancel`). See `auto-resume-visibility.ts`.
+   */
+  "session:auto-resume-stale": {
+    sessionId: string;
+    action: "hide" | "cancel";
   };
 
   /**

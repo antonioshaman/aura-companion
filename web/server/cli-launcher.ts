@@ -17,7 +17,10 @@ import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
-import { CodexAdapter } from "./codex-adapter.js";
+import { CodexAdapter, type CodexAdapterOptions } from "./codex-adapter.js";
+import { captureCredentialGeneration, compareCredentialGeneration, statGeneration } from "./session-credential-generation.js";
+import { locateCodexAuth } from "./auth-status/credential-locator.js";
+import { recordCodexProviderEvidence } from "./auth-status/codex-provider-evidence.js";
 import type { ClaudeAdapter } from "./claude-adapter.js";
 import type { CliTransport } from "./cli-transport.js";
 import { StdioCliTransport, pumpStdoutLines } from "./cli-transport.js";
@@ -2446,6 +2449,36 @@ export class CliLauncher {
    * Spawn a Codex app-server subprocess for a session.
    * Transport (stdio vs WebSocket) is selected by `COMPANION_CODEX_TRANSPORT`.
    */
+  /**
+   * Credential hooks for a host Codex session (LLM auth task 11), taken right
+   * after `prepareCodexHome`: the generation the session launched with (for
+   * "stale copy" vs "dead primary") and the provider-evidence sink for the
+   * Codex status. Metadata only, except the primary's fingerprint, which the
+   * status locator already derives. Containers have their own CODEX_HOME →
+   * no hooks (classifier says "could not compare").
+   */
+  private codexCredentialHooks(codexHome: string, isContainerized: boolean): Pick<CodexAdapterOptions, "credentialGeneration" | "onProviderCheck"> {
+    if (isContainerized) return {};
+    const primaryHome = getLegacyCodexHome();
+    const primaryPath = join(primaryHome, "auth.json");
+    const sessionPath = join(codexHome, "auth.json");
+    const launch = captureCredentialGeneration(sessionPath);
+    const readsPrimary = (): boolean => {
+      const a = statGeneration(sessionPath);
+      const b = statGeneration(primaryPath);
+      return a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
+    };
+    const fingerprint = readsPrimary() ? locateCodexAuth({ ...process.env, CODEX_HOME: primaryHome })?.credentialFingerprint ?? null : null;
+    return {
+      credentialGeneration: () => compareCredentialGeneration({ launch, sessionAuthPath: sessionPath, primaryAuthPath: primaryPath }),
+      // Vouch for the primary only while this session still reads it: once an
+      // in-session refresh replaced the symlink, its answers prove its own copy.
+      onProviderCheck: fingerprint
+        ? (checkedAt) => { if (readsPrimary()) recordCodexProviderEvidence({ checkedAt, credentialFingerprint: fingerprint }); }
+        : undefined,
+    };
+  }
+
   private prepareCodexHome(codexHome: string): void {
     mkdirSync(codexHome, { recursive: true });
 
@@ -2646,6 +2679,7 @@ export class CliLauncher {
     if (!isContainerized) {
       this.prepareCodexHome(codexHome);
     }
+    const credentialHooks = this.codexCredentialHooks(codexHome, isContainerized);
     options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);
 
     let spawnCmd: string[];
@@ -2765,6 +2799,7 @@ export class CliLauncher {
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
       systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
+      ...credentialHooks,
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -2928,6 +2963,7 @@ export class CliLauncher {
     if (!isContainerized) {
       this.prepareCodexHome(codexHome);
     }
+    const credentialHooks = this.codexCredentialHooks(codexHome, isContainerized);
     options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);
 
     let spawnCmd: string[];
@@ -3022,6 +3058,7 @@ export class CliLauncher {
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
       systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
+      ...credentialHooks,
     });
 
     // Handle init errors — mark session as exited so UI shows failure.

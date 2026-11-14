@@ -60,10 +60,15 @@ import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
 import {
+  claudeLimitWindow,
+  parseClaudeOverageInfo,
   parseClaudeRateLimitEvent,
   resolveClaudeUsageLimit,
+  type ClaudeOverageInfo,
   type ClaudeRateLimitInfo,
 } from "./usage-limit-parse.js";
+import { classifyClaudeTurnFailure } from "./turn-failure.js";
+import { describeTurnFailure } from "./auth-status/auth-catalog.js";
 import { resolveModelSubstitution } from "./broken-model-substitution.js";
 import { parseGuardDenial } from "./guard-denial.js";
 
@@ -373,6 +378,15 @@ export class ClaudeAdapter implements IBackendAdapter {
    * by any non-rejected event and by a successful `result`.
    */
   private lastRejectedRateLimit: ClaudeRateLimitInfo | null = null;
+
+  /**
+   * Per-turn protocol facts for the turn-failure classifier (task 10): the
+   * latest `rate_limit_event` (any status), the synthetic assistant frame's
+   * `error` tag and the latest `api_retry`. Reset on every `result`.
+   */
+  private turnRateLimit: (ClaudeRateLimitInfo & ClaudeOverageInfo) | null = null;
+  private turnAssistantError: string | null = null;
+  private turnLastRetry: { errorStatus: number | null } | null = null;
 
   /**
    * Init-frame health canary timer handle. Armed in
@@ -1206,6 +1220,10 @@ export class ClaudeAdapter implements IBackendAdapter {
     // kills the CLI and every task it still runs). `task_started` has no
     // browser mapping and is otherwise dropped below.
     const subtype = (msg as { subtype?: string }).subtype;
+    if (subtype === "api_retry") {
+      const status = (msg as { error_status?: unknown }).error_status;
+      this.turnLastRetry = { errorStatus: typeof status === "number" ? status : null };
+    }
     if (subtype === "task_started" || subtype === "task_notification") {
       deliveryMetrics.recordTaskFrame(this.sessionId, msg as { subtype?: unknown; task_id?: unknown; task_type?: unknown });
     }
@@ -1409,6 +1427,8 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- Assistant, result, stream ----------------------------------------------
 
   private handleAssistantMessage(msg: CLIAssistantMessage): void {
+    // Closed-enum `error` tag on the CLI's synthetic error frame (task 10).
+    if (typeof msg.error === "string" && msg.error) this.turnAssistantError = msg.error;
     // Rate-limit-class classification. The Claude CLI fabricates a
     // synthetic assistant message (`model: "<synthetic>"`) containing
     // the human-readable error string ("You've hit your session limit
@@ -1507,6 +1527,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   private noteRateLimitEvent(msg: { rate_limit_info?: Record<string, unknown> }): void {
     const parsed = parseClaudeRateLimitEvent(msg.rate_limit_info);
     this.lastRejectedRateLimit = parsed.rejected ? parsed : null;
+    this.turnRateLimit = { ...parsed, ...parseClaudeOverageInfo(msg.rate_limit_info) };
   }
 
   /**
@@ -1537,11 +1558,52 @@ export class ClaudeAdapter implements IBackendAdapter {
       resetAt: resolved.resetAt,
       resetSource: resolved.resetSource,
       limitType: resolved.limitType,
+      window: claudeLimitWindow(resolved.limitType, this.turnRateLimit?.isUsingOverage === true, text),
+    });
+  }
+
+  /**
+   * Classify a failed turn from its protocol frames and, when recognised,
+   * send the typed failure on an `error` frame BEFORE the `result` frame so
+   * the browser knows the cause when it decides on model fallback (task 12).
+   */
+  private maybeEmitTurnFailure(msg: CLIResultMessage): void {
+    const signal = {
+      apiErrorStatus: typeof msg.api_error_status === "number" ? msg.api_error_status : null,
+      resultText: typeof msg.result === "string" ? msg.result : "",
+      errors: Array.isArray(msg.errors) ? msg.errors.filter((e): e is string => typeof e === "string") : [],
+      assistantError: this.turnAssistantError,
+      rateLimit: this.turnRateLimit,
+      lastRetry: this.turnLastRetry,
+    };
+    this.turnRateLimit = null;
+    this.turnAssistantError = null;
+    this.turnLastRetry = null;
+    // A user Stop / restart bookkeeping frame is not a provider failure.
+    if (!msg.is_error || msg.terminal_reason === "aborted_streaming") return;
+    const outcome = classifyClaudeTurnFailure(signal, Date.now());
+    if (outcome.kind !== "classified") return;
+    const { failure } = outcome;
+    log.info("claude-adapter", "turn failure classified", {
+      event: "turn_failure.classified",
+      sessionId: this.sessionId,
+      provider: "claude",
+      kind: failure.kind,
+      window: failure.window ?? null,
+      apiErrorStatus: signal.apiErrorStatus,
+    });
+    this.browserMessageCb?.({
+      type: "error",
+      message: `${describeTurnFailure(failure.kind, "claude").title}: ${failure.providerMessage}`,
+      turnFailure: failure,
     });
   }
 
   private handleResultMessage(msg: CLIResultMessage): void {
+    // Usage limit first: it reads the turn's rate-limit facts that the
+    // turn-failure classifier consumes (and resets) right after.
     this.maybeEmitUsageLimit(msg);
+    this.maybeEmitTurnFailure(msg);
     // Council Mode auto-wake: `result` is the documented per-turn
     // terminator in the Claude Code NDJSON protocol. When we see one
     // and the observer was mid-flight from an auto-wake, flip back to

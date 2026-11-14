@@ -1,3 +1,4 @@
+import type { TurnFailure } from "../server/auth-status/auth-types.js";
 import type {
   SessionState,
   PermissionRequest,
@@ -99,7 +100,9 @@ export interface ChatMessage {
    * into a single expandable row when 2+ of them land back to back with no
    * other content between them.
    */
-  systemVariant?: "error" | "resume-interrupted" | "drift-recovery";
+  systemVariant?: "error" | "resume-interrupted" | "drift-recovery" | "turn-failure";
+  /** With `systemVariant: "turn-failure"`: the classified failure the card renders (LLM auth task 14). */
+  turnFailure?: TurnFailure;
   /**
    * Set on a user-role message the server sent on the user's behalf —
    * currently only the usage-limit auto-resume continuation prompt. The

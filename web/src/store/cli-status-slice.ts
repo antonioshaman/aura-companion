@@ -14,6 +14,7 @@
 // relaunch flows call `clearCliFailure` so a fresh subprocess does
 // not inherit the prior failure state.
 
+import type { TurnFailure } from "../../server/auth-status/auth-types.js";
 import type { StateCreator } from "zustand";
 import type { CliFailedReason, ModelFallbackReason } from "../types.js";
 import type { AppState } from "./index.js";
@@ -100,8 +101,22 @@ export interface ModelAvailabilityAnnouncement {
   firedAt: number;
 }
 
+/**
+ * The current turn's classified failure (LLM auth task 12), set from the
+ * `error` frame's `turnFailure` and consumed by the next `result` frame so a
+ * sign-in / limit / outdated-CLI / network failure never triggers model
+ * fallback. Per turn: the `result` handler deletes it.
+ */
+export interface TurnFailureNotice {
+  failure: TurnFailure;
+  firedAt: number;
+}
+
 export interface CliStatusSlice {
   cliFailures: Map<string, CliFailure>;
+  turnFailures: Map<string, TurnFailureNotice>;
+  setTurnFailure: (sessionId: string, failure: TurnFailure) => void;
+  clearTurnFailure: (sessionId: string) => void;
   pendingCodexModelSwitches: Map<string, PendingCodexModelSwitch>;
   pendingClaudeModelSwitches: Map<string, PendingClaudeModelSwitch>;
   modelSubstitutionNotices: Map<string, ModelSubstitutionNotice>;
@@ -122,6 +137,7 @@ export interface CliStatusSlice {
 
 export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice> = (set) => ({
   cliFailures: new Map(),
+  turnFailures: new Map(),
   pendingCodexModelSwitches: new Map(),
   pendingClaudeModelSwitches: new Map(),
   modelSubstitutionNotices: new Map(),
@@ -133,6 +149,21 @@ export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice
       const cliFailures = new Map(s.cliFailures);
       cliFailures.set(sessionId, failure);
       return { cliFailures };
+    }),
+
+  setTurnFailure: (sessionId, failure) =>
+    set((s) => {
+      const turnFailures = new Map(s.turnFailures);
+      turnFailures.set(sessionId, { failure, firedAt: Date.now() });
+      return { turnFailures };
+    }),
+
+  clearTurnFailure: (sessionId) =>
+    set((s) => {
+      if (!s.turnFailures.has(sessionId)) return {};
+      const turnFailures = new Map(s.turnFailures);
+      turnFailures.delete(sessionId);
+      return { turnFailures };
     }),
 
   clearCliFailure: (sessionId) =>

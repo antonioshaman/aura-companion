@@ -1295,6 +1295,69 @@ describe("handleMessage: result", () => {
     expect(msgs.some((m) => m.role === "system" && m.content.includes("claude-fable-5") && m.content.includes("claude-opus-4-8"))).toBe(true);
   });
 
+  // LLM auth task 12: the server's typed failure (sent on the `error` frame
+  // right before the result) is checked BEFORE classifyModelRuntimeError. A
+  // 403 that is really "your org disabled subscription access" must not
+  // revert the model nor raise the model-fallback banner.
+  it("a typed auth failure before a 403 result does not revert the model (task 12)", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "error",
+      message: "Claude rejected the sign-in: Your organization has disabled Claude subscription access",
+      turnFailure: { kind: "auth_rejected", provider: "claude", providerMessage: "Your organization has disabled Claude subscription access", credentialsCompared: true },
+    });
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result", subtype: "success", is_error: true, api_error_status: 403,
+        result: "Your organization has disabled Claude subscription access", duration_ms: 1, duration_api_ms: 0,
+        num_turns: 1, total_cost_usd: 0, stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u-auth", session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // No revert: the optimistic model stays, no set_model, no fallback banner.
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-5");
+    expect(lastWs.send.mock.calls.map((c) => JSON.parse(c[0] as string)).filter((m) => m.type === "set_model")).toHaveLength(0);
+    expect(state.modelSubstitutionNotices.has("s1")).toBe(false);
+    // The card message carries the typed failure; the per-turn notice is consumed.
+    const msgs = state.messages.get("s1")!;
+    expect(msgs.some((m) => m.systemVariant === "turn-failure" && m.turnFailure?.kind === "auth_rejected")).toBe(true);
+    expect(state.turnFailures.has("s1")).toBe(false);
+  });
+
+  it("without a typed failure the same 403 still takes the model-fallback path", () => {
+    // Guard: task 12 must not swallow genuine model refusals.
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-5" });
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result", subtype: "success", is_error: true, api_error_status: 403,
+        result: "model blocked", duration_ms: 1, duration_api_ms: 0,
+        num_turns: 1, total_cost_usd: 0, stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u-model", session_id: "s1",
+      },
+    });
+    expect(useStore.getState().sessions.get("s1")!.model).toBe("claude-opus-4-8");
+  });
+
   it("a reactive revert also raises the persistent fallback banner naming from→to and why (Task A.2)", () => {
     // The system message scrolls away; the banner stays until dismissed.
     useStore.setState({

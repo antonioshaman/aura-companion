@@ -222,6 +222,54 @@ describe("Session management", () => {
     expect(removeSpy).toHaveBeenCalledWith("s1");
   });
 
+  // LLM auth task 13 (S3-AC4): a persisted usage-limit banner whose window
+  // has reset is cleared when a browser opens the session — before its
+  // session_init — and an orchestrator-side clear reaches every tab.
+  it("browser open with a stale auto-resume banner → clear before session_init, broadcast to all tabs", () => {
+    const stale: string[] = [];
+    companionBus.on("session:auto-resume-stale", ({ sessionId, action }) => {
+      stale.push(`${sessionId}:${action}`);
+      bridge.setAutoResumeState(sessionId, null); // what the orchestrator does (via cancel → publish)
+    });
+    const other = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(other, "s1");
+    bridge.setAutoResumeState("s1", { resetAt: Date.now() - 60_000, fireAt: Date.now() - 60_000, resetSource: "rate_limit_event", paused: true });
+    other.send.mockClear();
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    expect(stale).toEqual(["s1:cancel"]); // paused → nothing will fire
+    const init = JSON.parse(browser.send.mock.calls[0][0]);
+    expect(init.type).toBe("session_init");
+    expect(init.session.auto_resume).toBeNull();
+    const toOther = other.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(toOther.some((m: { type: string; session?: { auto_resume?: unknown } }) => m.type === "session_update" && m.session?.auto_resume === null)).toBe(true);
+  });
+
+  // Observer STOP (checkpoint 199): visibility ends at the reset, not at fire
+  // time; a pending resume is kept (`hide`), and an incoming message also
+  // triggers the check.
+  it("reset passed but the resume still pending → hide (not cancel); a message triggers it too", () => {
+    const actions: string[] = [];
+    companionBus.on("session:auto-resume-stale", ({ action }) => { actions.push(action); });
+    bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
+    bridge.setAutoResumeState("s1", { resetAt: Date.now() - 30_000, fireAt: Date.now() + 60_000, resetSource: "rate_limit_event" });
+    bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
+    expect(actions).toEqual(["hide"]);
+    bridge.injectUserMessage("s1", "continue", "server:auto-resume");
+    expect(actions).toEqual(["hide", "hide"]);
+  });
+
+  it("browser open with a live (future) banner leaves it alone", () => {
+    const stale: string[] = [];
+    companionBus.on("session:auto-resume-stale", ({ sessionId }) => { stale.push(sessionId); });
+    bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
+    bridge.setAutoResumeState("s1", { resetAt: Date.now() + 3_600_000, fireAt: Date.now() + 3_690_000, resetSource: "rate_limit_event" });
+    bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
+    expect(stale).toEqual([]);
+  });
+
   it("closeSession: closes all sockets and removes session", () => {
     const cli = makeCliSocket("s1");
     const browser1 = makeBrowserSocket("s1");

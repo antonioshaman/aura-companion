@@ -82,6 +82,30 @@ describe("AutoResumeScheduler", () => {
     expect(disk.schedules[0].sessionId).toBe("s1");
   });
 
+  // LLM auth task 13: the window is a stored fact published with the banner.
+  it("publishes the window fact with the banner state", () => {
+    const s = make();
+    s.schedule(hit({ window: "seven_day" }));
+    expect(publish).toHaveBeenCalledWith("s1", expect.objectContaining({ window: "seven_day" }));
+  });
+
+  // Extra usage is a wallet: a guessed (+5h fallback) reset would only re-hit
+  // the empty wallet, so nothing is scheduled. A stated reset still schedules.
+  it("extra usage with a guessed reset is not scheduled; with a stated reset it is", () => {
+    const s = make();
+    expect(s.schedule(hit({ window: "extra_usage", resetSource: "fallback" }))).toBeNull();
+    expect(publish).not.toHaveBeenCalled();
+    expect(s.schedule(hit({ window: "extra_usage", resetSource: "rate_limit_event" }))).not.toBeNull();
+  });
+
+  it("cancel with window_reset clears the banner for every tab (publish null)", () => {
+    const s = make();
+    s.schedule(hit());
+    publish.mockClear();
+    expect(s.cancel("s1", "window_reset")).toBe(true);
+    expect(publish).toHaveBeenCalledWith("s1", null);
+  });
+
   it("jitter is always within [60s, 120s]", () => {
     for (const r of [0, 0.999999]) {
       const s = make({ random: () => r });

@@ -304,16 +304,22 @@ export async function probeCodexAuth(deps: ProviderProbeDeps): Promise<ProviderA
     cliPath: unknownField,
     cliVersion: unknownField,
   };
-  if (hasNonEmptyEnvVar(deps.env, "OPENAI_API_KEY") || hasNonEmptyEnvVar(deps.env, "CODEX_API_KEY")) {
-    seed.method = knownField("env_token");
-    return skip(seed, "no_provider_check", deps);
-  }
-  if (deps.settings.openaiApiKey.trim()) {
-    seed.method = knownField("api_key");
-    return skip(seed, "no_provider_check", deps);
-  }
+  // A stored sign-in wins: with a ChatGPT auth.json present, codex 0.162.1
+  // runs in "auth mode chatgpt" even when OPENAI_API_KEY is in its env
+  // (proven offline 2026-11-14), and Aura's settings key reaches Codex only
+  // as that env var. The key decides only when nothing is stored.
   const loc = deps.locateCodex(deps.env);
-  if (!loc) return result(seed, "not_signed_in", null, deps.now(), "local");
+  if (!loc) {
+    if (hasNonEmptyEnvVar(deps.env, "OPENAI_API_KEY") || hasNonEmptyEnvVar(deps.env, "CODEX_API_KEY")) {
+      seed.method = knownField("env_token");
+      return skip(seed, "no_provider_check", deps);
+    }
+    if (deps.settings.openaiApiKey.trim()) {
+      seed.method = knownField("api_key");
+      return skip(seed, "no_provider_check", deps);
+    }
+    return result(seed, "not_signed_in", null, deps.now(), "local");
+  }
 
   if (loc.authMode === "chatgpt") seed.method = knownField("subscription");
   else if (loc.authMode === "api_key") seed.method = knownField("api_key");

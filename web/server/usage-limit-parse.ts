@@ -29,6 +29,8 @@
  * the likely cause) → `now + NO_ZONE_SAFE_FALLBACK_MS` with source `fallback`.
  */
 
+import type { UsageWindow } from "./auth-status/auth-types.js";
+
 export const USAGE_LIMIT_FALLBACK_MS = 5 * 60 * 60 * 1000;
 /** A zoneless reset closer than this (or past) is treated as untrustworthy. */
 export const NO_ZONE_MIN_LEAD_MS = 15 * 60 * 1000;
@@ -248,6 +250,65 @@ export function parseClaudeRateLimitEvent(info: Record<string, unknown> | null |
     resetAt: toEpochMs(info.resetsAt),
     limitType: typeof info.rateLimitType === "string" ? info.rateLimitType : null,
   };
+}
+
+/** Overage (extra usage) facts from the same `rate_limit_info`. */
+export interface ClaudeOverageInfo {
+  /** The request was billed to extra usage, not the subscription window. */
+  isUsingOverage: boolean;
+  /** Extra usage is rejected (empty wallet, disabled by org, …). */
+  overageRejected: boolean;
+  /** Subscription window utilisation (1 = exhausted), null when not reported. */
+  fiveHourUtilization: number | null;
+  sevenDayUtilization: number | null;
+}
+
+function utilization(windows: unknown, name: string): number | null {
+  if (!windows || typeof windows !== "object") return null;
+  const w = (windows as Record<string, unknown>)[name];
+  if (!w || typeof w !== "object") return null;
+  const u = (w as Record<string, unknown>).utilization;
+  return typeof u === "number" && Number.isFinite(u) ? u : null;
+}
+
+export function parseClaudeOverageInfo(info: Record<string, unknown> | null | undefined): ClaudeOverageInfo {
+  if (!info || typeof info !== "object") {
+    return { isUsingOverage: false, overageRejected: false, fiveHourUtilization: null, sevenDayUtilization: null };
+  }
+  return {
+    isUsingOverage: info.isUsingOverage === true,
+    overageRejected: info.overageStatus === "rejected",
+    fiveHourUtilization: utilization(info.unifiedWindows, "five_hour"),
+    sevenDayUtilization: utilization(info.unifiedWindows, "seven_day"),
+  };
+}
+
+/**
+ * Map a limit to the allowance it hit. The structured `rateLimitType` (Claude)
+ * decides first; frame text only when the type is missing. Overage-flavoured
+ * types (`seven_day_overage_included`, `overage`) are the extra-usage wallet,
+ * not a subscription window. Pure.
+ */
+export function claudeLimitWindow(limitType: string | null, isUsingOverage: boolean, text: string): UsageWindow {
+  const type = (limitType ?? "").toLowerCase();
+  if (type.includes("overage") || isUsingOverage) return "extra_usage";
+  if (type === "five_hour") return "five_hour";
+  if (type.startsWith("seven_day")) return "seven_day";
+  const lower = text.toLowerCase();
+  if (lower.includes("extra usage") || lower.includes("usage credits")) return "extra_usage";
+  if (/hit your session limit/.test(lower)) return "five_hour";
+  if (/hit your weekly limit/.test(lower)) return "seven_day";
+  return "unknown_window";
+}
+
+/**
+ * Codex windows by duration: the app-server reports `primary` (300 min) and
+ * `secondary` (10080 min) — the duration, not the slot, names the window.
+ */
+export function codexWindowByDuration(windowDurationMins: number): UsageWindow {
+  if (windowDurationMins === 300) return "five_hour";
+  if (windowDurationMins === 10080) return "seven_day";
+  return "unknown_window";
 }
 
 /**

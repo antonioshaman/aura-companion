@@ -80,6 +80,7 @@ import {
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import { autoResumeStaleAction } from "./auto-resume-visibility.js";
 import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
 import {
   contextTokensFromUsage,
@@ -1791,6 +1792,8 @@ export class WsBridge {
       return;
     }
     const session = this.getOrCreateSession(sessionId);
+    // LLM auth task 13 (S3-AC4): cleared BEFORE this browser's session_init.
+    this.flagStaleAutoResume(session);
     const browserData = ws.data as BrowserSocketData;
     browserData.subscribed = false;
     browserData.lastAckSeq = 0;
@@ -1960,6 +1963,18 @@ export class WsBridge {
    * browser gets it in `session_init`, and broadcast as `session_update` for
    * the live banner. No-op for an unknown session.
    */
+  /**
+   * Ask the orchestrator to clear a usage-limit banner whose window already
+   * reset (task 13). Synchronous bus → the state is updated before the
+   * caller continues (e.g. before session_init is sent).
+   */
+  private flagStaleAutoResume(session: Session): void {
+    const autoResume = session.state.auto_resume;
+    if (!autoResume) return;
+    const action = autoResumeStaleAction(autoResume, Date.now());
+    if (action !== "none") companionBus.emit("session:auto-resume-stale", { sessionId: session.id, action });
+  }
+
   setAutoResumeState(sessionId: string, state: SessionState["auto_resume"]): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -2671,6 +2686,9 @@ export class WsBridge {
       // structurally for forensics.
       // Bidirectional pipeline: `council:peer` frames are inter-half
       // coordination, not user typing — same skip semantic.
+      // LLM auth task 13 (S3-AC4): a message arriving after the window reset
+      // clears the stale banner for every tab (any origin).
+      this.flagStaleAutoResume(session);
       const isServerOrigin = origin !== undefined && origin.startsWith("server:");
       const isCouncilPeer = origin === "council:peer";
       const skipUserFrameObservers = isServerOrigin || isCouncilPeer;
