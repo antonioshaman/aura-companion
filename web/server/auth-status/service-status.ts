@@ -1,4 +1,5 @@
 import { accessSync, constants, readdirSync, readFileSync } from "node:fs";
+import { latestCodexProviderEvidence } from "./codex-provider-evidence.js";
 import { userInfo } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { log } from "../logger.js";
@@ -118,6 +119,6 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
 let serviceCore: StatusCore | null = null;
 /** The server's single status core (lazy; `mode: "service"`). */
 export function getServiceAuthStatusCore(): StatusCore {
-  serviceCore ??= createAuthStatusCore({ mode: "service" });
+  serviceCore ??= createAuthStatusCore({ mode: "service", codexProviderEvidence: latestCodexProviderEvidence });
   return serviceCore;
 }

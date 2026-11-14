@@ -298,8 +298,25 @@ describe("probeCodexAuth", () => {
     expect(await probeCodexAuth({ ...deps, statMeta: () => meta() })).toMatchObject({ reason: "rotation_detected" });
   });
 
-  it("no auth.json → not_signed_in; env key → no_provider_check", async () => {
+  it("no auth.json → not_signed_in; env key without auth.json → no_provider_check", async () => {
     expect((await probeCodexAuth(makeDeps({ locateCodex: () => null }).deps)).state).toBe("not_signed_in");
-    expect(await probeCodexAuth(makeDeps({ env: { OPENAI_API_KEY: "sk-synthetic" } }).deps)).toMatchObject({ reason: "no_provider_check" });
+    // 1c: the env key only counts when there is no stored sign-in (see the next test).
+    expect(await probeCodexAuth(makeDeps({ locateCodex: () => null, env: { OPENAI_API_KEY: "sk-synthetic" } }).deps))
+      .toMatchObject({ reason: "no_provider_check", method: { known: true, value: "env_token" } });
+    expect(await probeCodexAuth(makeDeps({ locateCodex: () => null, settings: { claudeCodeOAuthToken: "", anthropicApiKey: "", openaiApiKey: "sk-synthetic" } }).deps))
+      .toMatchObject({ reason: "no_provider_check", method: { known: true, value: "api_key" } });
+  });
+
+  it("stored ChatGPT auth.json wins over an env / settings API key (codex 0.162.1, proven 2026-11-14)", async () => {
+    // Synthetic CODEX_HOME with a chatgpt auth.json + OPENAI_API_KEY in env,
+    // offline: `codex doctor` reported "auth mode chatgpt" and
+    // `codex login status` "Logged in using ChatGPT". Aura's settings key is
+    // injected as that same env var, so it does not change what the session uses.
+    const { deps } = makeDeps({
+      env: { OPENAI_API_KEY: "sk-synthetic" },
+      settings: { claudeCodeOAuthToken: "", anthropicApiKey: "", openaiApiKey: "sk-synthetic" },
+      runProbe: codexRun(exited("", 0, "Logged in using ChatGPT")),
+    });
+    expect(await probeCodexAuth(deps)).toMatchObject({ method: { known: true, value: "subscription" } });
   });
 });

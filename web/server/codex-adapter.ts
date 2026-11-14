@@ -212,6 +212,12 @@ export interface CodexAdapterOptions {
    * "incomparable" (the card says the comparison was not possible).
    */
   credentialGeneration?: () => CredentialGenerationVerdict;
+  /**
+   * Called with the time the provider answered an account rate-limit read /
+   * update — evidence that this session's credentials work (Codex status,
+   * `codexProviderEvidence`).
+   */
+  onProviderCheck?: (checkedAt: number) => void;
 }
 
 // ─── Stdio JSON-RPC Transport ────────────────────────────────────────────────
@@ -3342,6 +3348,7 @@ export class CodexAdapter implements IBackendAdapter {
   private updateRateLimits(data: Record<string, unknown>): void {
     const rl = data?.rateLimits as Record<string, unknown> | undefined;
     if (!rl) return;
+    this.options.onProviderCheck?.(Date.now());
     const toEpochMs = (value: unknown): number => {
       if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
         return 0;

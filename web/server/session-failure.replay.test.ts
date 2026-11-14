@@ -199,6 +199,17 @@ describe("Codex replay → turnFailure", () => {
     expect(failures(messages).map((f) => f.kind)).toEqual(["network"]);
   });
 
+  it("real account/rateLimits/updated → onProviderCheck (Codex status evidence, task 11)", async () => {
+    streams = createStreams();
+    const checks: number[] = [];
+    const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-codex-evidence");
+    new CodexAdapter(transport, "sess-codex-evidence", { model: "gpt-6.1-sol", cwd: "/tmp", onProviderCheck: (at) => checks.push(at) });
+    const [rateLimitsLine] = fixture("turn-failure", "codex-usage-limit-2026-10-30.ndjson").trim().split("\n");
+    streams.pushRaw(rateLimitsLine);
+    await flush();
+    expect(checks).toHaveLength(1);
+  });
+
   it("negative: auth phrases inside a command's output → no card", async () => {
     start();
     streams.pushRaw(JSON.stringify({ method: "item/completed", params: { threadId: "t", turnId: "u", item: { type: "commandExecution", id: "exec-1", command: "/bin/bash -lc 'curl -i api'", cwd: "/tmp", status: "completed", aggregatedOutput: "HTTP/1.1 401 Unauthorized\nYou've hit your usage limit", exitCode: 0 } } }));
