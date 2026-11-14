@@ -249,7 +249,7 @@ describe("Session management", () => {
 
   it("browser open with a live (future) banner leaves it alone", () => {
     const stale: string[] = [];
-    companionBus.on("session:auto-resume-stale", ({ sessionId }) => stale.push(sessionId));
+    companionBus.on("session:auto-resume-stale", ({ sessionId }) => { stale.push(sessionId); });
     bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
     bridge.setAutoResumeState("s1", { resetAt: Date.now() + 3_600_000, fireAt: Date.now() + 3_690_000, resetSource: "rate_limit_event" });
     bridge.handleBrowserOpen(makeBrowserSocket("s1"), "s1");
