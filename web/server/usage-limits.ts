@@ -1,10 +1,10 @@
 import { classifyFetchError, usageLimitsUpstream } from "./diagnostics/upstream-status.js";
-import { execSync, execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { writeAtomicJson } from "./atomic-write.js";
 import { log } from "./logger.js";
+import { readClaudeOAuthSecret, type ClaudeOAuthSecret } from "./auth-status/credential-locator.js";
 
 export interface UsageLimits {
   five_hour: { utilization: number; resets_at: string | null } | null;
@@ -25,71 +25,8 @@ const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CACHE_DURATION_MS = 60 * 1000;
 let cache: { data: UsageLimits; timestamp: number } | null = null;
 
-interface OAuthCredentials {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-  [key: string]: unknown;
-}
-
-interface RawCredentials {
-  raw: string;
-  parsed: Record<string, unknown>;
-  oauth: OAuthCredentials;
-  sourcePath?: string;
-}
-
-// Credential file candidates - matches claude-container-auth.ts
-const CREDENTIAL_FILE_NAMES = [
-  ".credentials.json",
-  "auth.json",
-  ".auth.json",
-  "credentials.json",
-];
-
-function readCredentialsFromFile(): RawCredentials | null {
-  const home =
-    process.env.USERPROFILE || process.env.HOME || homedir() || "";
-  const claudeDir = join(home, ".claude");
-
-  for (const fileName of CREDENTIAL_FILE_NAMES) {
-    const credPath = join(claudeDir, fileName);
-    if (!existsSync(credPath)) continue;
-    try {
-      const raw = readFileSync(credPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (!parsed?.claudeAiOauth?.accessToken) continue;
-      return { raw, parsed, oauth: parsed.claudeAiOauth, sourcePath: credPath };
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-function readRawCredentials(): RawCredentials | null {
-  try {
-    // macOS: use Keychain via security command
-    if (process.platform === "darwin") {
-      const raw = execSync(
-        'security find-generic-password -s "Claude Code-credentials" -w',
-        { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
-      ).trim();
-
-      const decoded = raw.startsWith("{")
-        ? raw
-        : Buffer.from(raw, "hex").toString("utf-8");
-
-      const parsed = JSON.parse(decoded);
-      if (!parsed?.claudeAiOauth?.accessToken) return null;
-      return { raw: decoded, parsed, oauth: parsed.claudeAiOauth };
-    }
-
-    // Windows, Linux, Docker, and other platforms: read from credential files
-    return readCredentialsFromFile();
-  } catch {
-    return null;
-  }
+function readRawCredentials(): ClaudeOAuthSecret | null {
+  return readClaudeOAuthSecret();
 }
 
 function writeCredentials(creds: Record<string, unknown>, sourcePath?: string): void {
@@ -157,29 +94,27 @@ async function refreshAccessToken(refreshToken: string): Promise<{
 
 export function getCredentials(): string | null {
   const creds = readRawCredentials();
-  return creds?.oauth.accessToken ?? null;
+  return creds?.accessToken ?? null;
 }
 
 async function getValidAccessToken(): Promise<string | null> {
   const creds = readRawCredentials();
   if (!creds) return null;
 
-  const { oauth } = creds;
-
   // Token still valid (with 5min buffer)
-  if (oauth.expiresAt && Date.now() < oauth.expiresAt - 5 * 60 * 1000) {
-    return oauth.accessToken;
+  if (creds.expiresAt && Date.now() < creds.expiresAt - 5 * 60 * 1000) {
+    return creds.accessToken;
   }
 
   // Token expired - try to refresh
-  if (!oauth.refreshToken) return null;
+  if (!creds.refreshToken) return null;
 
-  const refreshed = await refreshAccessToken(oauth.refreshToken);
+  const refreshed = await refreshAccessToken(creds.refreshToken);
   if (!refreshed) return null;
 
   // Update stored credentials
   creds.parsed.claudeAiOauth = {
-    ...oauth,
+    ...(creds.parsed.claudeAiOauth as Record<string, unknown>),
     accessToken: refreshed.accessToken,
     refreshToken: refreshed.refreshToken,
     expiresAt: Date.now() + refreshed.expiresIn * 1000,
