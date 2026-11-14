@@ -5,7 +5,7 @@ import "@testing-library/jest-dom";
 import "vitest-axe/extend-expect";
 import { axe } from "vitest-axe";
 import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
-import { describeLimitsPending, describeUsageLimitsReason } from "../../server/auth-status/auth-catalog.js";
+import { describeLimitsPending, describeUsageLimitsReason, formatAction } from "../../server/auth-status/auth-catalog.js";
 import { USAGE_LIMITS_REASONS } from "../../server/auth-status/auth-types.js";
 
 /**
@@ -56,5 +56,24 @@ describe("UsageLimitsReasonNote", () => {
       </div>,
     );
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Every AuthAction kind renders (the switch is exhaustive, EC-10): the
+  // usage reasons only use open_status / retry / none today, but an entry
+  // with a command-style action must show it as plain text, not vanish.
+  it("renders command-style actions as plain text", () => {
+    const cases = [
+      { kind: "relogin" as const, command: "claude auth login", docRef: "docs/x.mdx" },
+      { kind: "update_cli" as const, command: "claude update" },
+      { kind: "run_as_root" as const, command: "sudo aura-companion doctor --offline" },
+      { kind: "run_as_service_user" as const },
+      { kind: "restart_session" as const },
+    ];
+    for (const action of cases) {
+      const { container, unmount } = render(<UsageLimitsReasonNote entry={{ title: "T", detail: "D", action }} />);
+      expect(container.textContent).toContain(formatAction(action));
+      expect(screen.queryByRole("button")).toBeNull();
+      unmount();
+    }
   });
 });
