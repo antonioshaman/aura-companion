@@ -29,6 +29,19 @@ import type {
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { TurnFailureCard } from "./chat/TurnFailureCard.js";
+import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
+import { LlmAuthView } from "./diagnostics/LlmAuthCard.js";
+import { doctorReport, LLM_AUTH_NOW, statusSnapshot } from "./diagnostics/llm-auth-fixtures.js";
+import { describeLimitsPending, describeUsageLimitsReason } from "../../server/auth-status/auth-catalog.js";
+import {
+  PROVIDER_AUTH_STATES,
+  PROVIDER_IDS,
+  TURN_FAILURE_KINDS,
+  USAGE_LIMITS_REASONS,
+  type TurnFailure,
+  type TurnFailureKind,
+} from "../../server/auth-status/auth-types.js";
 import { ContextAdvisoryBanner } from "./ContextAdvisoryBanner.js";
 import { GuardDenialBanner } from "./GuardDenialBanner.js";
 import type { GuardDenial } from "../types.js";
@@ -1232,6 +1245,9 @@ export function Playground() {
             </Card>
           </div>
         </Section>
+
+        {/* ─── LLM sign-in: turn failures, limits reasons, status (LLM auth task 14) ─── */}
+        <LlmAuthPlaygroundSection />
 
         {/* ─── Messages ──────────────────────────────── */}
         <Section
@@ -5195,4 +5211,84 @@ function UiuxToolkitPlaygroundDemo() {
 function SecondReviewerPlaygroundDemo() {
   const [value, setValue] = useState<SecondReviewerConfig>({ reviewer: "auto", scope: "review-implement" });
   return <SecondReviewerSettings value={value} onChange={setValue} />;
+}
+
+// ─── LLM auth phase 1 (task 14) ─────────────────────────────────────────────
+
+/** Representative facts per kind so each card shows its secondary lines. */
+function playgroundTurnFailure(kind: TurnFailureKind, provider: TurnFailure["provider"]): TurnFailure {
+  const base: TurnFailure = { kind, provider, providerMessage: `${provider} provider text for ${kind}` };
+  switch (kind) {
+    case "limit_window":
+      return { ...base, window: "five_hour", resetAt: LLM_AUTH_NOW + 2 * 3_600_000, providerMessage: "You've hit your session limit · resets 2pm (UTC)" };
+    case "extra_usage_exhausted":
+      return { ...base, window: "extra_usage", resetAt: null, likelyCause: "model_outside_plan", providerMessage: "You're out of extra usage" };
+    case "auth_rejected":
+      return { ...base, credentialsCompared: provider === "codex" ? false : true, providerMessage: "401 Unauthorized" };
+    case "cli_outdated":
+      return { ...base, requiredVersion: "2.1.280", providerMessage: "This model requires Claude Code version 2.1.280 or later" };
+    case "network":
+    case "stale_session_credentials":
+      return base;
+    default: {
+      const never: never = kind;
+      return never;
+    }
+  }
+}
+
+function LlmAuthPlaygroundSection() {
+  return (
+    <Section
+      title="LLM sign-in"
+      description="Turn-failure cards (every kind × provider), usage-limit reasons, and the Diagnostics sign-in card in each provider state"
+    >
+      <div className="space-y-4 max-w-3xl">
+        {PROVIDER_IDS.flatMap((provider) =>
+          TURN_FAILURE_KINDS.map((kind) => (
+            <Card key={`${provider}-${kind}`} label={`TurnFailureCard — ${provider} / ${kind}`}>
+              <TurnFailureCard
+                failure={playgroundTurnFailure(kind, provider)}
+                retry={kind === "network" ? "ready" : "unavailable"}
+                onRetry={() => {}}
+                onRestart={() => {}}
+              />
+            </Card>
+          )),
+        )}
+        {USAGE_LIMITS_REASONS.map((reason) => (
+          <Card key={reason} label={`UsageLimitsReasonNote — ${reason}`}>
+            <UsageLimitsReasonNote entry={describeUsageLimitsReason(reason)} onRetry={() => {}} />
+          </Card>
+        ))}
+        <Card label="UsageLimitsReasonNote — Codex, no windows yet">
+          <UsageLimitsReasonNote entry={describeLimitsPending("codex")} />
+        </Card>
+        {PROVIDER_AUTH_STATES.map((state) => {
+          const reason = state === "not_verified" ? ("token_expired_locally" as const) : null;
+          return (
+            <Card key={state} label={`LlmAuthView — both providers ${state}`}>
+              <LlmAuthView
+                status={{ tag: "ready", data: statusSnapshot({ state, reason }, { state, reason }) }}
+                doctor={{ tag: "ready", data: state === "working" ? doctorReport(false) : doctorReport() }}
+                now={LLM_AUTH_NOW}
+                onCheck={() => {}}
+                onDoctor={() => {}}
+              />
+            </Card>
+          );
+        })}
+        <Card label="LlmAuthView — nothing checked yet, rate-limited notice">
+          <LlmAuthView
+            status={{ tag: "ready", data: null }}
+            doctor={{ tag: "ready", data: null }}
+            now={LLM_AUTH_NOW}
+            notice="Checked recently — showing that result. You can check again in 20s."
+            onCheck={() => {}}
+            onDoctor={() => {}}
+          />
+        </Card>
+      </div>
+    </Section>
+  );
 }

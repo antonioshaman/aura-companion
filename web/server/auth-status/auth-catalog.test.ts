@@ -8,8 +8,11 @@ import {
   describeNotVerified,
   describeTurnFailure,
   describeUsageLimitsReason,
+  describeLimitsPending,
   formatAction,
   formatKnown,
+  turnFailureFacts,
+  usageWindowLabel,
 } from "./auth-catalog.js";
 import {
   DOCTOR_FINDING_KINDS,
@@ -20,6 +23,7 @@ import {
   PROVIDER_IDS,
   TURN_FAILURE_KINDS,
   USAGE_LIMITS_REASONS,
+  USAGE_WINDOWS,
   knownField,
   unknownField,
 } from "./auth-types.js";
@@ -96,6 +100,49 @@ describe("auth catalog", () => {
       }
     }
     for (const place of DOCTOR_PLACE_CLASSES) expect(doctorPlaceLabel(place).length).toBeGreaterThan(0);
+  });
+
+  // Task 14: the turn-failure card's secondary lines come from the catalog
+  // too, so the card has no free-text of its own (one text source for UI/CLI).
+  it("has a label for every usage window", () => {
+    for (const w of USAGE_WINDOWS) expect(usageWindowLabel(w).length).toBeGreaterThan(0);
+  });
+
+  it("turnFailureFacts names the window + reset, likely cause, uncompared credentials and required version", () => {
+    const at = (ms: number) => `T${ms}`;
+    expect(
+      turnFailureFacts({ kind: "limit_window", provider: "claude", providerMessage: "x", window: "five_hour", resetAt: 42 }, at),
+    ).toEqual(["Window: 5-hour window · resets T42"]);
+    // A limit failure without a known reset says so instead of going blank.
+    expect(
+      turnFailureFacts({ kind: "limit_window", provider: "codex", providerMessage: "x", window: "seven_day", resetAt: null }, at),
+    ).toEqual(["Window: 7-day window · reset time unknown"]);
+    expect(
+      turnFailureFacts(
+        { kind: "extra_usage_exhausted", provider: "claude", providerMessage: "x", window: "extra_usage", resetAt: 7, likelyCause: "model_outside_plan" },
+        at,
+      ),
+    ).toEqual(["Window: extra usage · resets T7", "Likely cause: the selected model is not included in the plan."]);
+    expect(
+      turnFailureFacts({ kind: "auth_rejected", provider: "codex", providerMessage: "x", credentialsCompared: false }, at),
+    ).toEqual(["Could not compare this session's credentials with the main sign-in."]);
+    expect(turnFailureFacts({ kind: "cli_outdated", provider: "claude", providerMessage: "x", requiredVersion: "2.1.280" }, at)).toEqual([
+      "Required CLI version: 2.1.280 or newer",
+    ]);
+    expect(turnFailureFacts({ kind: "cli_outdated", provider: "claude", providerMessage: "x", requiredVersion: null }, at)).toEqual([
+      "Required CLI version: unknown",
+    ]);
+    // Network / compared auth failures carry no extra facts.
+    expect(turnFailureFacts({ kind: "network", provider: "codex", providerMessage: "x" }, at)).toEqual([]);
+    expect(turnFailureFacts({ kind: "auth_rejected", provider: "claude", providerMessage: "x", credentialsCompared: true }, at)).toEqual([]);
+  });
+
+  it("names the 'no limit data yet' state for both providers (Codex parity for the limits panel)", () => {
+    for (const provider of PROVIDER_IDS) {
+      const entry = describeLimitsPending(provider);
+      expect(entry.title).toMatch(/^No data yet/);
+      expect(entry.detail.length).toBeGreaterThan(0);
+    }
   });
 });
 

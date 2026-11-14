@@ -1,4 +1,5 @@
 import type { ProviderId, TurnFailure } from "./auth-status/auth-types.js";
+import { maskSecrets } from "./logger.js";
 import { REQUIRED_CLI_VERSIONS } from "./auth-status/doctor-checks.js";
 import {
   claudeLimitWindow,
@@ -44,8 +45,13 @@ function clip(text: string): string {
   return t.length > PROVIDER_MESSAGE_MAX ? `${t.slice(0, PROVIDER_MESSAGE_MAX)}…` : t;
 }
 
+/**
+ * Provider text goes to the browser, the recording and the logs verbatim, so
+ * a token the provider echoes ("Bearer …", `access_token=…`, `sk-ant-…`) is
+ * masked here, once, with the logger's policy (task 15 leak canary).
+ */
 function classified(failure: TurnFailure): TurnClassification {
-  return { kind: "classified", failure: { ...failure, providerMessage: clip(failure.providerMessage) } };
+  return { kind: "classified", failure: { ...failure, providerMessage: clip(maskSecrets(failure.providerMessage)) } };
 }
 
 function authFailure(provider: ProviderId, providerMessage: string, generation: CredentialGenerationVerdict): TurnClassification {

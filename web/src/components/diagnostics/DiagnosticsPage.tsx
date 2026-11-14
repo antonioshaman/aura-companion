@@ -4,6 +4,7 @@ import { SectionErrorBoundary } from "../SectionErrorBoundary.js";
 import type { FrameSource } from "./CardFrame.js";
 import { KbFindingsCard, KbHealthCard, MemoryReportCard, type FindingUi, type RunUi } from "./KbCards.js";
 import { BackendCard, ContextAdvisoryCard, DriftCard, PairsCard, UsageCard } from "./StatusCards.js";
+import { LlmAuthCard } from "./LlmAuthCard.js";
 
 
 /**
@@ -314,6 +315,10 @@ export function DiagnosticsPage({ embedded = false }: { embedded?: boolean }) {
       </SectionErrorBoundary>
       <SectionErrorBoundary label="Usage upstream">
         <UsageCard frame={frameOf(ov, "usage")} {...cardProps} />
+      </SectionErrorBoundary>
+      {/* Own fetch, no polling: GET is a cache, checks are explicit POSTs (LLM auth task 14). */}
+      <SectionErrorBoundary label="LLM sign-in">
+        <LlmAuthCard />
       </SectionErrorBoundary>
 
       {state.kb.tag === "loading" && (

@@ -23,7 +23,7 @@ import type {
 } from "./session-types.js";
 import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
-import { log } from "./logger.js";
+import { log, maskSecrets } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 import { codexWindowByDuration, resolveCodexUsageLimit } from "./usage-limit-parse.js";
 import { classifyCodexTurnFailure, type CodexTurnSignal, type CredentialGenerationVerdict } from "./turn-failure.js";
@@ -2351,7 +2351,9 @@ export class CodexAdapter implements IBackendAdapter {
       message += " Codex will retry.";
     }
 
-    console.error(`[codex-adapter] Codex error notification: ${message}`);
+    // Through the logger, not raw console: provider text can echo a token
+    // and only the logger masks secrets (LLM auth leak canary, task 15).
+    log.error("codex-adapter", "Codex error notification", { message });
     this.emitErrorWithFailure(message, {
       source: "error_notification",
       message: baseMessage,
@@ -3544,11 +3546,13 @@ export class CodexAdapter implements IBackendAdapter {
         });
       }
     }
+    // The browser (and the recording of this frame) never gets an echoed token.
+    const safeMessage = maskSecrets(message);
     if (!turnFailure) {
-      this.emit({ type: "error", message });
+      this.emit({ type: "error", message: safeMessage });
       return;
     }
-    this.emit({ type: "error", message: `${describeTurnFailure(turnFailure.kind, "codex").title}: ${message}`, turnFailure });
+    this.emit({ type: "error", message: `${describeTurnFailure(turnFailure.kind, "codex").title}: ${safeMessage}`, turnFailure });
   }
 
   private emit(msg: BrowserIncomingMessage): void {

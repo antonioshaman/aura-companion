@@ -10,6 +10,8 @@ import { formatResetTime, formatCodexResetTime, formatWindowDuration, formatToke
 import { timeAgo } from "../utils/time-ago.js";
 import { captureException } from "../analytics.js";
 import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
+import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
+import { describeLimitsPending, describeUsageLimitsReason } from "../../server/auth-status/auth-catalog.js";
 
 const EMPTY_TASKS: TaskItem[] = [];
 const COUNTDOWN_REFRESH_MS = 30_000;
@@ -183,13 +185,17 @@ function ProgressMeter({ label, pct, detail }: { label: string; pct: number; det
 
 function UsageLimitsSection({ sessionId }: { sessionId: string }) {
   const [limits, setLimits] = useState<UsageLimits | null>(null);
+  // The request itself failed (no answer from Aura's own server). Shown as the
+  // catalog's "unknown" reason with a retry, never as an empty panel (S4).
+  const [fetchFailed, setFetchFailed] = useState(false);
 
   const fetchLimits = useCallback(async () => {
     try {
       const data = await api.getSessionUsageLimits(sessionId);
       setLimits(data);
+      setFetchFailed(false);
     } catch {
-      // silent
+      setFetchFailed(true);
     }
   }, [sessionId]);
 
@@ -207,7 +213,9 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
     return () => clearInterval(id);
   }, [fetchLimits]);
 
-  if (!limits) return null;
+  if (!limits) {
+    return fetchFailed ? <UsageLimitsReasonNote entry={describeUsageLimitsReason("unknown")} onRetry={fetchLimits} /> : null;
+  }
 
   const has5h = limits.five_hour !== null;
   const has7d = limits.seven_day !== null;
@@ -221,7 +229,10 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
     extra != null && extra.is_enabled === false && !!extra.disabled_reason;
   const hasExtra = showExtraMeter || showExtraDisabled;
 
-  if (!has5h && !has7d && !hasExtra) return null;
+  // LLM auth task 14 (S4-AC1/AC2): no windows → say why instead of vanishing.
+  if (!has5h && !has7d && !hasExtra) {
+    return <UsageLimitsReasonNote entry={describeUsageLimitsReason(limits.reason ?? "unknown")} onRetry={fetchLimits} />;
+  }
 
   return (
     <div className="shrink-0 px-4 py-2.5 space-y-2">
@@ -288,9 +299,11 @@ function CodexRateLimitsSection({ sessionId }: { sessionId: string }) {
     return () => clearInterval(id);
   }, [rateLimits]);
 
-  if (!rateLimits) return null;
+  // Codex parity for S4: no windows reported yet → say so, not blank.
+  if (!rateLimits || (!rateLimits.primary && !rateLimits.secondary)) {
+    return <UsageLimitsReasonNote entry={describeLimitsPending("codex")} />;
+  }
   const { primary, secondary } = rateLimits;
-  if (!primary && !secondary) return null;
 
   return (
     <div className="shrink-0 px-4 py-2.5 space-y-2">

@@ -366,22 +366,25 @@ describe("TasksSection — Codex", () => {
 });
 
 describe("CodexRateLimitsSection", () => {
-  it("renders nothing when no rate limits data", () => {
+  // LLM auth task 14 (S4, Codex parity): an empty panel used to read as
+  // "all fine". With no windows yet the section names the state instead.
+  it("says 'No data yet' (not blank) when there is no rate limits data", () => {
     // Session exists but has no codex_rate_limits
     resetStore({ sessions: new Map([["s1", { backend_type: "codex" }]]) });
-    const { container } = render(<CodexRateLimitsSection sessionId="s1" />);
-    expect(container.firstChild).toBeNull();
+    render(<CodexRateLimitsSection sessionId="s1" />);
+    expect(screen.getByTestId("usage-limits-reason")).toHaveTextContent(/No data yet/);
+    expect(screen.getByText(/Codex reports its usage windows/)).toBeInTheDocument();
   });
 
-  it("renders nothing when both primary and secondary are null", () => {
+  it("says 'No data yet' (not blank) when both primary and secondary are null", () => {
     resetStore({
       sessions: new Map([["s1", {
         backend_type: "codex",
         codex_rate_limits: { primary: null, secondary: null },
       }]]),
     });
-    const { container } = render(<CodexRateLimitsSection sessionId="s1" />);
-    expect(container.firstChild).toBeNull();
+    render(<CodexRateLimitsSection sessionId="s1" />);
+    expect(screen.getByTestId("usage-limits-reason")).toHaveTextContent(/No data yet/);
   });
 
   it("renders primary rate limit bar with percentage and window label", () => {
@@ -1432,6 +1435,46 @@ describe("UsageLimitsSection (Claude Code sessions)", () => {
     // Math.min(120, 100) = 100
     const bar = container.querySelector("[style*='width: 100%']");
     expect(bar).toBeTruthy();
+  });
+
+  // LLM auth task 14 — spec story 4 (S4-AC1 / S4-AC2). The panel used to
+  // render nothing without windows, which reads as "all fine". Now it shows
+  // the server's typed `reason` through the catalog, with its one action.
+  it("S4-AC1: auth failure → 'No data: Claude sign-in is invalid' with a link to the status", async () => {
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({ five_hour: null, seven_day: null, extra_usage: null, reason: "auth_invalid" });
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("No data: Claude sign-in is invalid")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open provider status" })).toHaveAttribute("href", "#/diagnostics");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("S4-AC2: API-key sign-in → subscription windows do not apply", async () => {
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({ five_hour: null, seven_day: null, extra_usage: null, reason: "api_key_login" });
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("Subscription windows do not apply")).toBeInTheDocument();
+  });
+
+  it("no windows and no reason (older server) → 'No data' with Retry that refetches", async () => {
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({ five_hour: null, seven_day: null, extra_usage: null });
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("No data")).toBeInTheDocument();
+    const calls = mockApi.getSessionUsageLimits.mock.calls.length;
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({
+      five_hour: { utilization: 10, resets_at: null }, seven_day: null, extra_usage: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("5h Limit")).toBeInTheDocument();
+    expect(mockApi.getSessionUsageLimits.mock.calls.length).toBe(calls + 1);
+  });
+
+  it("a failed request is not a blank panel either", async () => {
+    mockApi.getSessionUsageLimits.mockRejectedValueOnce(new Error("offline"));
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByTestId("usage-limits-reason")).toHaveTextContent("No data");
   });
 });
 

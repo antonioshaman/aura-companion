@@ -23,10 +23,14 @@ const mocks = vi.hoisted(() => ({
   kbAnalysisLatest: vi.fn(),
   kbAnalysisRun: vi.fn(),
   kbAnalysisDecide: vi.fn(),
+  llmAuthStatus: vi.fn(),
+  llmAuthDoctor: vi.fn(),
+  llmAuthRecheck: vi.fn(),
+  llmAuthDoctorRecheck: vi.fn(),
 }));
 vi.mock("../../api.js", () => ({ api: mocks }));
 
-import { DiagnosticsPage } from "./DiagnosticsPage.js";
+import { DiagnosticsPage, POLL_MS } from "./DiagnosticsPage.js";
 
 beforeEach(() => {
   // Pin the clock to the fixtures' time (only Date — real timers keep findBy* working).
@@ -36,6 +40,10 @@ beforeEach(() => {
   mocks.kbAnalysisLatest.mockReset().mockResolvedValue(kbStatus());
   mocks.kbAnalysisRun.mockReset();
   mocks.kbAnalysisDecide.mockReset();
+  mocks.llmAuthStatus.mockReset().mockResolvedValue({ status: null });
+  mocks.llmAuthDoctor.mockReset().mockResolvedValue({ report: null });
+  mocks.llmAuthRecheck.mockReset();
+  mocks.llmAuthDoctorRecheck.mockReset();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -135,5 +143,22 @@ describe("DiagnosticsPage", () => {
     });
     expect(screen.getByText("No live council pairs.")).toBeInTheDocument();
     expect(screen.queryByText(/1 with a silent observer/)).toBeNull();
+  });
+
+  // LLM auth task 14: the sign-in card sits on the page and reads the
+  // status/doctor caches once — the page's 30 s poll must not re-GET them
+  // and must never POST a check on its own.
+  it("shows the LLM sign-in card and never polls or auto-checks it", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(NOW);
+    render(<DiagnosticsPage />);
+    expect(await screen.findByRole("region", { name: "LLM sign-in" })).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS * 3);
+    });
+    expect(mocks.llmAuthStatus).toHaveBeenCalledTimes(1);
+    expect(mocks.llmAuthDoctor).toHaveBeenCalledTimes(1);
+    expect(mocks.llmAuthRecheck).not.toHaveBeenCalled();
+    expect(mocks.llmAuthDoctorRecheck).not.toHaveBeenCalled();
   });
 });

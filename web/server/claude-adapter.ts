@@ -52,7 +52,7 @@ import { WebSocketCliTransport } from "./cli-transport.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
-import { log } from "./logger.js";
+import { log, maskSecrets } from "./logger.js";
 import { deliveryMetrics } from "./delivery-metrics.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
@@ -1457,7 +1457,7 @@ export class ClaudeAdapter implements IBackendAdapter {
 
     this.browserMessageCb?.({
       type: "assistant",
-      message: msg.message,
+      message: maskSyntheticErrorMessage(msg),
       parent_tool_use_id: msg.parent_tool_use_id,
       timestamp: Date.now(),
     });
@@ -1646,7 +1646,8 @@ export class ClaudeAdapter implements IBackendAdapter {
     }
     this.browserMessageCb?.({
       type: "result",
-      data: msg,
+      // An error result repeats the provider's error text (task 15 canary).
+      data: msg.is_error && typeof msg.result === "string" ? { ...msg, result: maskSecrets(msg.result) } : msg,
     });
   }
 
@@ -2562,4 +2563,20 @@ export class ClaudeAdapter implements IBackendAdapter {
       );
     }
   }
+}
+
+/**
+ * The CLI's synthetic error frame (`error` tag set, `model: "<synthetic>"`)
+ * carries the provider's error text, which can echo a token. Mask its text
+ * blocks before the browser, the history and the recording see them (LLM
+ * auth leak canary, task 15). Real model output is never rewritten.
+ */
+function maskSyntheticErrorMessage(msg: CLIAssistantMessage): CLIAssistantMessage["message"] {
+  if (!(typeof msg.error === "string" && msg.error) || !Array.isArray(msg.message?.content)) return msg.message;
+  return {
+    ...msg.message,
+    content: msg.message.content.map((b) =>
+      b && typeof b === "object" && b.type === "text" && typeof b.text === "string" ? { ...b, text: maskSecrets(b.text) } : b,
+    ),
+  };
 }
