@@ -4919,7 +4919,8 @@ describe("GET /api/sessions/:id/usage-limits", () => {
 
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null });
+    // LLM-auth phase 1 (S4 parity): empty windows carry an explicit reason.
+    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null, reason: "unknown" });
   });
 
   it("maps Codex rate limits when bridge still returns second-based timestamps", async () => {
