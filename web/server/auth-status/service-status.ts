@@ -94,7 +94,8 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
       requestClaudeUsage: (token) => requestClaudeUsage(token),
       statMeta,
       codexProviderEvidence: opts.codexProviderEvidence,
-      onEvent: logProbeEvent,
+      // The offline CLI must not print log lines into its output.
+      onEvent: opts.mode === "service" ? logProbeEvent : undefined,
     };
   };
 
@@ -112,4 +113,11 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
     persist: opts.mode === "service",
     computedBy: opts.mode === "service" ? "service" : "local_cli",
   });
+}
+
+let serviceCore: StatusCore | null = null;
+/** The server's single status core (lazy; `mode: "service"`). */
+export function getServiceAuthStatusCore(): StatusCore {
+  serviceCore ??= createAuthStatusCore({ mode: "service" });
+  return serviceCore;
 }

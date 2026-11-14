@@ -2,7 +2,10 @@ import {
   assertNever,
   type AuthAction,
   type CatalogEntry,
+  type DoctorCheck,
   type DoctorFindingKind,
+  type DoctorPlaceClass,
+  type DoctorUncheckedReason,
   type Known,
   type NotVerifiedReason,
   type ProviderAuthState,
@@ -159,6 +162,54 @@ export function describeDoctorFinding(kind: DoctorFindingKind, provider: Provide
   }
 }
 
+export function describeDoctorClear(provider: ProviderId): CatalogEntry {
+  return { title: `${providerLabel(provider)}: no problems found`, detail: "All doctor checks passed.", action: { kind: "none" } };
+}
+
+function doctorCheckLabel(check: DoctorCheck): string {
+  switch (check) {
+    case "binary": return "CLI binary";
+    case "cli_version": return "CLI version";
+    case "credential_copies": return "credential copies";
+    case "credential_access": return "credential owner and permissions";
+    default: return assertNever(check);
+  }
+}
+
+/** A check that did not run. Never phrased as "nothing found" (fail-closed). */
+export function describeDoctorUnchecked(check: DoctorCheck, reason: DoctorUncheckedReason, provider: ProviderId): CatalogEntry {
+  const title = `${providerLabel(provider)}: ${doctorCheckLabel(check)} not checked`;
+  switch (reason) {
+    case "permission_denied":
+      return {
+        title,
+        detail: "Permission denied for this location, so it was not checked. This is not the same as \"nothing found\".",
+        action: { kind: "run_as_root", command: "sudo aura-companion doctor --offline" },
+      };
+    case "version_unknown":
+      return {
+        title,
+        detail: "The CLI version could not be read from its install path, and running another user's binary is not allowed.",
+        action: { kind: "run_as_service_user" },
+      };
+    case "io_error":
+      return { title, detail: "The location could not be read.", action: { kind: "retry" } };
+    default:
+      return assertNever(reason);
+  }
+}
+
+export function doctorPlaceLabel(place: DoctorPlaceClass): string {
+  switch (place) {
+    case "service_home": return "service user's home";
+    case "codex_session_home": return "Codex session home";
+    case "root_home": return "root's home";
+    case "other_user_home": return "another user's home";
+    case "system": return "system path";
+    default: return assertNever(place);
+  }
+}
+
 export function describeTurnFailure(kind: TurnFailureKind, provider: ProviderId): CatalogEntry {
   const name = providerLabel(provider);
   switch (kind) {
@@ -216,6 +267,7 @@ export function formatAction(action: AuthAction): string {
     case "restart_session": return "Restart the session";
     case "update_cli": return `Update the CLI: \`${action.command}\``;
     case "run_as_service_user": return "Run as the service user";
+    case "run_as_root": return `Re-run as root to include it: \`${action.command}\``;
     case "open_status": return "Open provider status";
     case "none": return "";
     default: return assertNever(action);
