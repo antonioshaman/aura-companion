@@ -77,3 +77,38 @@ describe("auth catalog", () => {
     expect(formatKnown(knownField(0), (n) => `t=${n}`)).toBe("t=0");
   });
 });
+
+describe("formatAction", () => {
+  // Every action kind renders to the exact CLI/UI line — UI and CLI both go through
+  // this one function (S1-AC5 "same texts"), so each branch is pinned here. "none"
+  // renders empty so callers can omit the action row instead of printing a blank hint.
+  it("renders each action kind", () => {
+    expect(formatAction({ kind: "relogin", command: "claude auth login", docRef: "docs/x.mdx" })).toBe(
+      "Sign in again as the service user: `claude auth login` (see docs/x.mdx)",
+    );
+    expect(formatAction({ kind: "retry" })).toBe("Retry");
+    expect(formatAction({ kind: "restart_session" })).toBe("Restart the session");
+    expect(formatAction({ kind: "update_cli", command: "claude update" })).toBe("Update the CLI: `claude update`");
+    expect(formatAction({ kind: "run_as_service_user" })).toBe("Run as the service user");
+    expect(formatAction({ kind: "open_status" })).toBe("Open provider status");
+    expect(formatAction({ kind: "none" })).toBe("");
+  });
+
+  it("formats every catalog action without throwing, for both providers", () => {
+    // Sweep: every entry the catalog can produce must format (no unhandled action
+    // kind), and actionable entries must yield a non-empty hint.
+    for (const provider of PROVIDER_IDS) {
+      const entries = [
+        ...PROVIDER_AUTH_STATES.map((s) => describeAuthState(s, provider)),
+        ...NOT_VERIFIED_REASONS.map((r) => describeNotVerified(r, provider)),
+        ...DOCTOR_FINDING_KINDS.map((k) => describeDoctorFinding(k, provider)),
+        ...TURN_FAILURE_KINDS.map((k) => describeTurnFailure(k, provider)),
+        ...USAGE_LIMITS_REASONS.map((r) => describeUsageLimitsReason(r)),
+      ];
+      for (const entry of entries) {
+        const line = formatAction(entry.action);
+        expect(entry.action.kind === "none" ? line === "" : line.length > 0).toBe(true);
+      }
+    }
+  });
+});
