@@ -253,8 +253,12 @@ describe("ChatView", () => {
     const today = new Date();
     const resetAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 0).getTime();
     const fireAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 1).getTime();
+    // Pin "now" before the reset: since task 13 the banner hides once the window resets.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(today.getFullYear(), today.getMonth(), today.getDate(), 14, 0));
     setupStore({ autoResume: { resetAt, fireAt, resetSource: "rate_limit_event" } });
     render(<ChatView sessionId="s1" />);
+    vi.useRealTimers();
     expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение в 15:01");
     fireEvent.click(screen.getByRole("button", { name: "Отменить" }));
     expect(mockCancelAutoResume).toHaveBeenCalledWith("s1");
@@ -275,6 +279,12 @@ describe("ChatView", () => {
     render(<ChatView sessionId="s1" />);
     expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("hides a scheduled banner once the window reset, even before the resume fires (observer STOP cp 199)", () => {
+    setupStore({ autoResume: { resetAt: Date.now() - 30_000, fireAt: Date.now() + 60_000, resetSource: "rate_limit_event" } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
   });
 
   it("hides a scheduled banner whose resume is long overdue (lost timer)", () => {

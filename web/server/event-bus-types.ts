@@ -170,11 +170,14 @@ export interface CompanionEventMap {
   };
 
   /**
-   * A browser opened a session whose persisted auto-resume banner is stale
-   * (`isAutoResumeStale`) — the orchestrator clears it for every tab.
+   * A browser opened a session, or a message arrived, while its persisted
+   * usage-limit banner names a window that already reset — the orchestrator
+   * clears it for every tab (`hide`) or also drops a schedule that will
+   * never fire (`cancel`). See `auto-resume-visibility.ts`.
    */
   "session:auto-resume-stale": {
     sessionId: string;
+    action: "hide" | "cancel";
   };
 
   /**

@@ -36,7 +36,7 @@ describe("compareCredentialGeneration", () => {
   it("symlinked session, primary unchanged → same (a dead primary sign-in: re-login)", () => {
     symlinkSync(primary, join(sessionHome, "auth.json"));
     const launch = captureCredentialGeneration(join(sessionHome, "auth.json"));
-    expect(compareCredentialGeneration({ launch, primaryAuthPath: primary })).toBe("same");
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("same");
   });
 
   it("primary re-written by a re-login after launch (atomic rename, newer) → renewed (restart the session)", () => {
@@ -47,7 +47,7 @@ describe("compareCredentialGeneration", () => {
     writeFileSync(tmp, '{"synthetic":"v2-after-relogin"}');
     setMtime(tmp, 1_700_000_500);
     renameSync(tmp, primary);
-    expect(compareCredentialGeneration({ launch, primaryAuthPath: primary })).toBe("renewed");
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("renewed");
   });
 
   it("session holds its own regular copy older than the primary → renewed", () => {
@@ -55,7 +55,7 @@ describe("compareCredentialGeneration", () => {
     writeFileSync(copy, '{"synthetic":"old-copy"}');
     setMtime(copy, 1_600_000_000);
     const launch = captureCredentialGeneration(copy);
-    expect(compareCredentialGeneration({ launch, primaryAuthPath: primary })).toBe("renewed");
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("renewed");
   });
 
   it("session rotated its own copy (newer than primary) → same: the primary is not the fix", () => {
@@ -63,14 +63,32 @@ describe("compareCredentialGeneration", () => {
     writeFileSync(copy, '{"synthetic":"rotated-in-session"}');
     setMtime(copy, 1_800_000_000);
     const launch = captureCredentialGeneration(copy);
-    expect(compareCredentialGeneration({ launch, primaryAuthPath: primary })).toBe("same");
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("same");
+  });
+
+  it("observer STOP (cp 199): primary renewed after launch, then the session rotated its own copy → same", () => {
+    // t1 launch on the shared symlink, t2 re-login rewrites the primary,
+    // t3 the session refreshes and rename(2)s its own newer file over the
+    // symlink. The session's copy is the newest — restarting it is not the fix.
+    const sessionPath = join(sessionHome, "auth.json");
+    symlinkSync(primary, sessionPath);
+    const launch = captureCredentialGeneration(sessionPath);
+    const tmp = join(dir, "tmp-auth.json");
+    writeFileSync(tmp, '{"synthetic":"v2-relogin"}');
+    setMtime(tmp, 1_700_000_500);
+    renameSync(tmp, primary);
+    const rotated = join(sessionHome, "rotated.tmp");
+    writeFileSync(rotated, '{"synthetic":"v3-session-rotated"}');
+    setMtime(rotated, 1_700_000_900);
+    renameSync(rotated, sessionPath);
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: sessionPath, primaryAuthPath: primary })).toBe("same");
   });
 
   it("no launch snapshot or primary gone → incomparable", () => {
-    expect(compareCredentialGeneration({ launch: null, primaryAuthPath: primary })).toBe("incomparable");
+    expect(compareCredentialGeneration({ launch: null, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("incomparable");
     const launch = captureCredentialGeneration(primary);
     rmSync(primary);
-    expect(compareCredentialGeneration({ launch, primaryAuthPath: primary })).toBe("incomparable");
+    expect(compareCredentialGeneration({ launch, sessionAuthPath: join(sessionHome, "auth.json"), primaryAuthPath: primary })).toBe("incomparable");
   });
 
   it("dangling session symlink at launch → no snapshot", () => {

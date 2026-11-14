@@ -47,21 +47,32 @@ function sameFile(a: CredentialGeneration, b: CredentialGeneration): boolean {
 }
 
 /**
- * `renewed` when the primary file is a different generation than the one the
- * session launched with AND strictly newer (a re-login after the session
- * started). A session that rotated its own copy has a NEWER copy than the
- * primary → `same` (the primary is not the fix). Missing metadata on either
- * side → `incomparable`.
+ * `renewed` when the session runs on an older generation than the primary
+ * sign-in (a re-login happened after it took its credentials), `same` when
+ * the primary is not newer, `incomparable` without metadata.
+ *
+ * The session file is looked at NOW, not only at launch (observer STOP,
+ * checkpoint 199): an in-session refresh replaces the shared symlink with the
+ * session's own, newer regular file — then the session holds the newest
+ * credentials and restarting it is not the fix.
+ * - Session file is a distinct file: renewed iff primary is strictly newer.
+ * - Session still reads the primary (same dev/ino): Codex cached the token at
+ *   start, so compare the primary with the launch snapshot.
  */
 export function compareCredentialGeneration(input: {
   launch: CredentialGeneration | null;
+  sessionAuthPath: string;
   primaryAuthPath: string;
   stat?: GenerationStat;
 }): CredentialGenerationVerdict {
   const stat = input.stat ?? statGeneration;
-  if (!input.launch) return "incomparable";
   const primary = stat(input.primaryAuthPath);
   if (!primary) return "incomparable";
+  const session = stat(input.sessionAuthPath);
+  if (session && !(session.dev === primary.dev && session.ino === primary.ino)) {
+    return primary.mtimeMs > session.mtimeMs ? "renewed" : "same";
+  }
+  if (!input.launch) return "incomparable";
   if (sameFile(primary, input.launch)) return "same";
   return primary.mtimeMs > input.launch.mtimeMs ? "renewed" : "same";
 }

@@ -1063,8 +1063,10 @@ export class SessionOrchestrator {
       this.handleUsageLimit(event);
     });
     // Task 13: a browser opened a session whose banner outlived its window.
-    companionBus.on("session:auto-resume-stale", ({ sessionId }) => {
-      if (!this.autoResume?.cancel(sessionId, "window_reset")) this.wsBridge.setAutoResumeState(sessionId, null);
+    companionBus.on("session:auto-resume-stale", ({ sessionId, action }) => {
+      // `hide`: the window reset but the resume still fires shortly — only the banner goes.
+      if (action === "cancel" && this.autoResume?.cancel(sessionId, "window_reset")) return;
+      this.wsBridge.setAutoResumeState(sessionId, null);
     });
     companionBus.on("settings:auto-resume-changed", ({ enabled }) => {
       if (!enabled) this.autoResume?.cancelAll("disabled");

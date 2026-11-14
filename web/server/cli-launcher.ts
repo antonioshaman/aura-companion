@@ -2470,7 +2470,7 @@ export class CliLauncher {
     };
     const fingerprint = readsPrimary() ? locateCodexAuth({ ...process.env, CODEX_HOME: primaryHome })?.credentialFingerprint ?? null : null;
     return {
-      credentialGeneration: () => compareCredentialGeneration({ launch, primaryAuthPath: primaryPath }),
+      credentialGeneration: () => compareCredentialGeneration({ launch, sessionAuthPath: sessionPath, primaryAuthPath: primaryPath }),
       // Vouch for the primary only while this session still reads it: once an
       // in-session refresh replaced the symlink, its answers prove its own copy.
       onProviderCheck: fingerprint

@@ -1,4 +1,4 @@
-import { isAutoResumeStale } from "../../server/auto-resume-visibility.js";
+import { isAutoResumeBannerVisible } from "../../server/auto-resume-visibility.js";
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
@@ -295,7 +295,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
       {/* Usage-limit auto-resume notice — additive info banner (own slot,
           like the model-fallback notice below): the session will continue by
           itself after the reset unless the user cancels. */}
-      {autoResume && !isAutoResumeStale(autoResume, Date.now()) && (
+      {autoResume && isAutoResumeBannerVisible(autoResume, Date.now()) && (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
           <AutoResumeBanner
             resetAt={autoResume.resetAt}
