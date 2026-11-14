@@ -15,7 +15,7 @@ b64() { printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='; }
 HDR=$(b64 '{"alg":"none","typ":"JWT"}')
 EXP=$(( $(date +%s) - 86400*30 ))
 CLAIMS=$(b64 "{\"exp\":$EXP,\"email\":\"synthetic@example.invalid\",\"https://api.openai.com/auth\":{\"chatgpt_plan_type\":\"plus\"}}")
-printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SYNTHETIC","refreshToken":"sk-ant-ort01-SYNTHETIC","expiresAt":%s,"scopes":["user:inference","user:profile"],"subscriptionType":"pro"}}\n' "$((NOW-86400000))" > "$H/.claude/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SYNTHETIC","refreshToken":"sk-ant-ort01-SYNTHETIC","expiresAt":%s,"scopes":["user:inference","user:profile"],"subscriptionType":"pro"}}\n' "$((NOW-86400000))" > "$H/.claude/.credentials.json" # aura-check: ignore[secrets.in-file] synthetic SYNTHETIC tokens, never real
 printf '{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"%s","access_token":"%s","refresh_token":"SYNTHETIC","account_id":"synthetic"},"last_refresh":"%s"}\n' \
   "$HDR.$CLAIMS.c2ln" "$HDR.$CLAIMS.c2ln" "$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)" > "$H/.codex/auth.json"
 echo '{"hasCompletedOnboarding":true}' > "$H/.claude.json"
