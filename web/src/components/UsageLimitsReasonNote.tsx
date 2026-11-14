@@ -27,7 +27,7 @@ export function UsageLimitsReasonNote({ entry, onRetry }: { entry: CatalogEntry;
         </button>
       ) : null;
       break;
-    case "relogin":
+    case "sign_in":
     case "update_cli":
     case "run_as_root":
     case "run_as_service_user":

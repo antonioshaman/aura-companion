@@ -61,6 +61,9 @@ export const NOT_VERIFIED_REASONS: readonly NotVerifiedReason[] = [
 
 export type AuthLoginMethod = "subscription" | "api_key" | "env_token";
 
+export type VerifiedBy = "provider" | "local" | "login";
+export const VERIFIED_BY: readonly VerifiedBy[] = ["provider", "local", "login"];
+
 export interface ProviderAuthStatus {
   provider: ProviderId;
   state: ProviderAuthState;
@@ -75,8 +78,12 @@ export interface ProviderAuthStatus {
   lastSuccessAt: number | null;
   /** Epoch ms of this result's check. */
   checkedAt: number;
-  /** "provider" = asked the provider; "local" = files/env only. */
-  verifiedBy: "provider" | "local";
+  /**
+   * "provider" = asked the provider; "local" = files/env only; "login" = an
+   * official CLI sign-in just succeeded and the current credential file is the
+   * one it wrote (bound to its fingerprint, phase 2 D8).
+   */
+  verifiedBy: VerifiedBy;
   /** CLI that produced (or would produce) the result. Unknown when not run. */
   cli: { path: Known<string>; version: Known<string> };
   /** For `wrong_user`: the service user the status must be computed as. */
@@ -258,11 +265,89 @@ export const USAGE_LIMITS_REASONS: readonly UsageLimitsReason[] = [
   "auth_invalid", "api_key_login", "network", "no_credentials", "unknown",
 ];
 
+// ─── Sign-in from the UI (phase 2, `specs/llm-auth-phase2-sign-in-from-ui.md`) ─
+
+/** Lifecycle of one sign-in attempt. The last four are terminal. */
+export type LoginAttemptState =
+  /** The official CLI is starting; link/code not parsed yet. */
+  | "starting"
+  /** Link (and Codex device code) shown; waiting for the owner. */
+  | "awaiting_user"
+  /** The CLI finished; credentials are being checked and promoted. */
+  | "verifying"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+export const LOGIN_ATTEMPT_STATES: readonly LoginAttemptState[] = [
+  "starting", "awaiting_user", "verifying", "succeeded", "failed", "cancelled", "expired",
+];
+
+export type TerminalLoginAttemptState = "succeeded" | "failed" | "cancelled" | "expired";
+
+export function isTerminalLoginState(state: LoginAttemptState): state is TerminalLoginAttemptState {
+  switch (state) {
+    case "succeeded": case "failed": case "cancelled": case "expired": return true;
+    case "starting": case "awaiting_user": case "verifying": return false;
+    default: return assertNever(state);
+  }
+}
+
+/** Why an attempt ended `failed` (or why a submitted code was refused). */
+export type LoginFailureReason =
+  /** The provider refused the reply code. */
+  | "code_rejected"
+  /** The reply code is not shaped like a code (refused before reaching the CLI). */
+  | "code_format"
+  /** The reply code belongs to another attempt (state suffix mismatch). */
+  | "attempt_mismatch"
+  /** The attempt's time ran out. */
+  | "expired"
+  /** The CLI could not reach the provider. */
+  | "network"
+  /** The CLI printed something the strict parser does not recognise (fail-closed). */
+  | "cli_output_unrecognised"
+  | "cli_missing"
+  /** The server is not running as the service user. */
+  | "wrong_service_user"
+  /** In-UI sign-in is not supported here (Claude on macOS, D6). */
+  | "unsupported_platform"
+  /** The CLI succeeded but the new credentials could not be checked or moved in place. */
+  | "promotion_failed";
+
+export const LOGIN_FAILURE_REASONS: readonly LoginFailureReason[] = [
+  "code_rejected", "code_format", "attempt_mismatch", "expired", "network", "cli_output_unrecognised",
+  "cli_missing", "wrong_service_user", "unsupported_platform", "promotion_failed",
+];
+
+/** The signed-in plan against the owner's optional expectation. `unknown` is never `match`. */
+export type PlanCheck = "unset" | "match" | "mismatch" | "unknown";
+export const PLAN_CHECKS: readonly PlanCheck[] = ["unset", "match", "mismatch", "unknown"];
+
+/** Where the credentials sessions actually use come from. */
+export type EffectiveAuthSource =
+  /** The stored sign-in (subscription) of the service user. */
+  | "sign_in"
+  /** An environment variable of the service. */
+  | "environment"
+  /** A value in Aura or CLI settings. */
+  | "settings";
+
+export const EFFECTIVE_AUTH_SOURCES: readonly EffectiveAuthSource[] = ["sign_in", "environment", "settings"];
+
+export interface EffectiveAuthMethod {
+  method: AuthLoginMethod;
+  source: EffectiveAuthSource;
+  /** Name (never the value) of the variable/setting, for `environment` / `settings`. */
+  variable?: string;
+}
+
 // ─── Catalog shape ────────────────────────────────────────────────────────────
 
-/** One action per message. `docRef` points at the current manual instruction (phase 2 replaces it). */
+/** One action per message. `sign_in` starts (or resumes) the sign-in for that provider. */
 export type AuthAction =
-  | { kind: "relogin"; command: string; docRef: string }
+  | { kind: "sign_in"; provider: ProviderId }
   | { kind: "retry" }
   | { kind: "restart_session" }
   | { kind: "update_cli"; command: string }

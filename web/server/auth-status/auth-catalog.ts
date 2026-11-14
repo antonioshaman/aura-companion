@@ -6,7 +6,11 @@ import {
   type DoctorFindingKind,
   type DoctorPlaceClass,
   type DoctorUncheckedReason,
+  type EffectiveAuthMethod,
   type Known,
+  type LoginAttemptState,
+  type LoginFailureReason,
+  type PlanCheck,
   type NotVerifiedReason,
   type ProviderAuthState,
   type ProviderId,
@@ -14,6 +18,7 @@ import {
   type TurnFailureKind,
   type UsageLimitsReason,
   type UsageWindow,
+  type VerifiedBy,
 } from "./auth-types.js";
 
 /**
@@ -26,7 +31,7 @@ import {
  * exhaustive — adding a kind to `auth-types.ts` without text here fails tsc.
  */
 
-/** Manual re-login instruction in force until phase 2 ships in-UI sign-in. */
+/** Manual sign-in instruction: the CLI fallback when the server is down, and Claude on macOS (D6). */
 export const RELOGIN_DOC_REF = "docs/deploy/vps-systemd.mdx#prerequisites";
 
 export function providerLabel(provider: ProviderId): string {
@@ -38,13 +43,41 @@ export function providerLabel(provider: ProviderId): string {
 }
 
 export function reloginAction(provider: ProviderId): AuthAction {
+  return { kind: "sign_in", provider };
+}
+
+/** The official CLI command that signs the service user in by hand. */
+export function manualSignInCommand(provider: ProviderId): string {
   switch (provider) {
-    case "claude":
-      return { kind: "relogin", command: "claude auth login", docRef: RELOGIN_DOC_REF };
-    case "codex":
-      return { kind: "relogin", command: "codex login --device-auth", docRef: RELOGIN_DOC_REF };
-    default:
-      return assertNever(provider);
+    case "claude": return "claude auth login";
+    case "codex": return "codex login --device-auth";
+    default: return assertNever(provider);
+  }
+}
+
+function manualSignInLine(provider: ProviderId): string {
+  return `Sign in again as the service user: \`${manualSignInCommand(provider)}\` (see ${RELOGIN_DOC_REF})`;
+}
+
+/** The manual instruction as a catalog entry (CLI fallback when the server is unreachable; macOS, D6). */
+export function describeManualSignIn(provider: ProviderId): CatalogEntry {
+  return {
+    title: `Sign in to ${providerLabel(provider)} manually`,
+    detail: manualSignInLine(provider),
+    action: { kind: "none" },
+  };
+}
+
+/**
+ * Which steps the sign-in window shows. Claude prints a link and reads a reply
+ * code from stdin; Codex prints a link plus a one-time device code and polls
+ * the provider itself — no reply code (Verified CLI behaviour 2026-11-14).
+ */
+export function signInSteps(provider: ProviderId): { replyCode: boolean; deviceCode: boolean } {
+  switch (provider) {
+    case "claude": return { replyCode: true, deviceCode: false };
+    case "codex": return { replyCode: false, deviceCode: true };
+    default: return assertNever(provider);
   }
 }
 
@@ -307,10 +340,145 @@ export function describeUsageLimitsReason(reason: UsageLimitsReason): CatalogEnt
   }
 }
 
+export function verifiedByLabel(verifiedBy: VerifiedBy): string {
+  switch (verifiedBy) {
+    case "provider": return "with the provider";
+    case "local": return "local only";
+    case "login": return "by sign-in";
+    default: return assertNever(verifiedBy);
+  }
+}
+
+// ─── Sign-in (phase 2) ────────────────────────────────────────────────────────
+
+export function describeLoginAttempt(state: LoginAttemptState, provider: ProviderId): CatalogEntry {
+  const name = providerLabel(provider);
+  switch (state) {
+    case "starting":
+      return { title: `Signing in to ${name}…`, detail: `Starting the official ${name} CLI sign-in.`, action: { kind: "none" } };
+    case "awaiting_user":
+      return {
+        title: `Sign in to ${name} in your browser`,
+        detail: signInSteps(provider).replyCode
+          ? "Open the link, confirm the sign-in, then paste the code the page shows here."
+          : "Open the link, sign in, and enter the code shown here. This window updates by itself.",
+        action: { kind: "none" },
+      };
+    case "verifying":
+      return { title: `Checking the new ${name} sign-in…`, detail: "Verifying the account and plan before using the new credentials.", action: { kind: "none" } };
+    case "succeeded":
+      return { title: `Signed in to ${name}`, detail: "The new credentials are in place for the service user.", action: { kind: "none" } };
+    case "failed":
+      return { title: `${name} sign-in failed`, detail: "The previous credentials were left unchanged.", action: reloginAction(provider) };
+    case "cancelled":
+      return { title: `${name} sign-in cancelled`, detail: "Nothing was changed.", action: reloginAction(provider) };
+    case "expired":
+      return { title: `${name} sign-in expired`, detail: "The attempt ran out of time. Nothing was changed.", action: reloginAction(provider) };
+    default:
+      return assertNever(state);
+  }
+}
+
+export function describeLoginFailure(reason: LoginFailureReason, provider: ProviderId): CatalogEntry {
+  const name = providerLabel(provider);
+  const unchanged = "The previous credentials were left unchanged.";
+  const invalid = `${name}: the code is invalid or expired`;
+  switch (reason) {
+    case "code_rejected":
+      return { title: invalid, detail: `${name} did not accept the code. ${unchanged}`, action: reloginAction(provider) };
+    case "code_format":
+      return { title: invalid, detail: `That does not look like a ${name} sign-in code. Copy the whole code from the page.`, action: reloginAction(provider) };
+    case "attempt_mismatch":
+      return { title: invalid, detail: "The code belongs to a different sign-in attempt. Start again and use the new link.", action: reloginAction(provider) };
+    case "expired":
+      return { title: invalid, detail: `The sign-in attempt ran out of time. ${unchanged}`, action: reloginAction(provider) };
+    case "network":
+      return { title: `${name}: sign-in could not reach the provider`, detail: `Check the server's connection and start again. ${unchanged}`, action: reloginAction(provider) };
+    case "cli_output_unrecognised":
+      return {
+        title: `${name}: sign-in output not recognised`,
+        detail: `The ${name} CLI printed something this version of Aura does not understand, so the sign-in was stopped. ${unchanged}`,
+        action: reloginAction(provider),
+      };
+    case "cli_missing":
+      return { title: `${name}: CLI not found`, detail: `The ${name} CLI was not found on the service PATH.`, action: updateCliAction(provider) };
+    case "wrong_service_user":
+      return {
+        title: `${name}: sign-in must run as the service user`,
+        detail: "The server is not running as the service user, so the sign-in was not started.",
+        action: { kind: "run_as_service_user" },
+      };
+    case "unsupported_platform":
+      return {
+        title: `${name}: sign-in from the browser is not available on this system`,
+        detail: `Sign in in the server's Terminal instead: ${manualSignInLine(provider)}`,
+        action: { kind: "none" },
+      };
+    case "promotion_failed":
+      return {
+        title: `${name}: new sign-in could not be put in place`,
+        detail: `The sign-in finished, but the new credentials could not be verified or moved in place. ${unchanged}`,
+        action: reloginAction(provider),
+      };
+    default:
+      return assertNever(reason);
+  }
+}
+
+/** `expected` is the owner's setting (null = not set); `actual` the plan the provider reported. */
+export function describePlanCheck(check: PlanCheck, provider: ProviderId, expected: string | null, actual: Known<string>): CatalogEntry {
+  const name = providerLabel(provider);
+  switch (check) {
+    case "unset":
+      return { title: `${name} plan: ${formatKnown(actual)}`, detail: "No expected plan is set.", action: { kind: "none" } };
+    case "match":
+      return { title: `${name} plan as expected`, detail: `Plan: ${formatKnown(actual)} (expected ${expected ?? "unknown"}).`, action: { kind: "none" } };
+    case "mismatch":
+      return {
+        title: `${name}: signed in with a different plan`,
+        detail: `Expected ${expected ?? "unknown"}, signed in with ${formatKnown(actual)}. Sign in with another account to change it.`,
+        action: reloginAction(provider),
+      };
+    case "unknown":
+      return {
+        title: `${name}: plan not determined`,
+        detail: `The provider did not report the plan, so it cannot be compared with the expected ${expected ?? "plan"}.`,
+        action: { kind: "none" },
+      };
+    default:
+      return assertNever(check);
+  }
+}
+
+/** Which credentials sessions really use. Names a variable, never its value. */
+export function describeEffectiveMethod(effective: EffectiveAuthMethod, provider: ProviderId): CatalogEntry {
+  const name = providerLabel(provider);
+  const variable = effective.variable ?? "a credential";
+  switch (effective.source) {
+    case "sign_in":
+      return { title: `${name} sessions use the stored sign-in`, detail: "Sessions use the service user's sign-in.", action: { kind: "none" } };
+    case "environment":
+      return {
+        title: `${name} sessions use ${variable} instead of the sign-in`,
+        detail: `${variable} is set in the service environment and takes priority over the sign-in.`,
+        action: { kind: "none" },
+      };
+    case "settings":
+      return {
+        title: `${name} sessions use ${variable} instead of the sign-in`,
+        detail: `${variable} is set in the settings and takes priority over the sign-in.`,
+        action: { kind: "none" },
+      };
+    default:
+      return assertNever(effective.source);
+  }
+}
+
 /** One-line plain-text rendering of an action, shared by CLI and UI tooltips. */
 export function formatAction(action: AuthAction): string {
   switch (action.kind) {
-    case "relogin": return `Sign in again as the service user: \`${action.command}\` (see ${action.docRef})`;
+    // Until the sign-in panel ships (phase 2c) the action renders as the manual instruction.
+    case "sign_in": return manualSignInLine(action.provider);
     case "retry": return "Retry";
     case "restart_session": return "Restart the session";
     case "update_cli": return `Update the CLI: \`${action.command}\``;
