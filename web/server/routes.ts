@@ -74,6 +74,7 @@ import { originalRequest } from "./middleware/body-limit.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
+import { makeLegacyProbeRunner } from "./auth-status/probe-runner.js";
 import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMethod } from "./host-auth-status.js";
 import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
@@ -91,63 +92,11 @@ const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "133
 const PROBE_CACHE_TTL_MS = 60_000;
 
 /**
- * Spawn timeout for a single `<binary> --version` call. Keeps a wedged binary
- * from stalling the GET /api/backends request indefinitely. On expiry the
- * child is killed and the result is treated as `available: false`.
+ * `<binary> --version` runner for the pairing probe: bounded by the shared
+ * probe runner (timeout → SIGTERM → SIGKILL, reaped, output capped), so a
+ * wedged binary cannot stall GET /api/backends.
  */
-const PROBE_SPAWN_TIMEOUT_MS = 5_000;
-
-const runProbeCommand: ProbeRunner = async (binary, args) => {
-  const resolved = resolveBinary(binary);
-  if (!resolved) {
-    return { ok: false, stdout: "", stderr: "binary not found", exitCode: null };
-  }
-  const proc = Bun.spawn([resolved, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "ignore",
-  });
-
-  // Part A: bounded spawn timeout — kill the child and return a failure result
-  // if `--version` hasn't finished within PROBE_SPAWN_TIMEOUT_MS. Without this
-  // a hung binary stalls the GET /api/backends request indefinitely.
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<"timeout">((resolve) => {
-    timeoutHandle = setTimeout(() => resolve("timeout"), PROBE_SPAWN_TIMEOUT_MS);
-  });
-
-  try {
-    const race = await Promise.race([
-      Promise.all([
-        proc.stdout ? new Response(proc.stdout).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
-        proc.stderr ? new Response(proc.stderr).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
-        proc.exited,
-      ]).then(([stdoutBuf, stderrBuf, exitCode]) => ({ kind: "done" as const, stdoutBuf, stderrBuf, exitCode })),
-      timeoutPromise,
-    ]);
-
-    if (race === "timeout") {
-      try { proc.kill(); } catch { /* ignore kill errors on already-exited processes */ }
-      return {
-        ok: false,
-        stdout: "",
-        stderr: `probe timed out after ${PROBE_SPAWN_TIMEOUT_MS}ms`,
-        exitCode: null,
-      };
-    }
-
-    return {
-      ok: race.exitCode === 0,
-      stdout: new TextDecoder().decode(race.stdoutBuf).trim(),
-      stderr: new TextDecoder().decode(race.stderrBuf).trim(),
-      exitCode: race.exitCode,
-    };
-  } finally {
-    // P5 hygiene: clear timer on every exit path so it doesn't fire against a
-    // settled promise and trigger a spurious kill on a finished process.
-    clearTimeout(timeoutHandle);
-  }
-};
+const runProbeCommand: ProbeRunner = makeLegacyProbeRunner(resolveBinary);
 
 // ── Pairing-capability cache (Part B) ────────────────────────────────────────
 //
