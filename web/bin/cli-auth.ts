@@ -149,6 +149,8 @@ export async function runAuthStatusCommand(argv: readonly string[], deps: CliAut
 /** Full path: in-process `absPath`, else REST place expanded with the passwd HOME. */
 export function fullPath(place: DoctorPlace, homeOf: (user: string) => string | null): string {
   if (place.absPath) return place.absPath;
+  // REST cut a path with no HOME anchor to its tail; the full one needs --offline.
+  if (place.redacted) return `…/${place.relPath}`;
   if (place.homeUser === null) return place.relPath;
   const home = homeOf(place.homeUser);
   return home ? join(home, place.relPath) : `~${place.homeUser}/${place.relPath}`;

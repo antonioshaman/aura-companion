@@ -124,6 +124,11 @@ export interface DoctorPlace {
   relPath: string;
   /** Full path. Present in-process and in the CLI; never in REST payloads. */
   absPath?: string;
+  /**
+   * REST only: `relPath` was cut to its last segments because the place has
+   * no HOME anchor (`homeUser: null`) — an absolute path never leaves the server.
+   */
+  redacted?: true;
 }
 
 export interface DoctorFile extends DoctorPlace {

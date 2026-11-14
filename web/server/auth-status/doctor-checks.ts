@@ -136,9 +136,29 @@ export function doctorExitCode(report: DoctorReport): 0 | 1 | 2 {
   return 0;
 }
 
-/** REST projection: no absolute paths leave the process (plan task 8). */
+/** Last path segments kept in REST for a place with no HOME anchor (codex-home/<id>/auth.json = 3). */
+function restTail(place: DoctorPlace): string {
+  const parts = place.relPath.split(sep).filter(Boolean);
+  return parts.slice(place.place === "codex_session_home" ? -3 : -1).join("/");
+}
+
+function isPlace(value: unknown): value is DoctorPlace {
+  return !!value && typeof value === "object" && "place" in value && "relPath" in value && "homeUser" in value;
+}
+
+/**
+ * REST projection: no absolute path leaves the process (plan task 8). Drops
+ * `absPath`; a place without a HOME anchor (system path, a companion dir
+ * outside the service HOME) keeps only its tail and is marked `redacted`.
+ */
 export function toRestDoctorReport(report: DoctorReport): DoctorReport {
-  return JSON.parse(JSON.stringify(report, (key, value) => (key === "absPath" ? undefined : value))) as DoctorReport;
+  return JSON.parse(
+    JSON.stringify(report, (key, value) => {
+      if (key === "absPath") return undefined;
+      if (isPlace(value) && value.homeUser === null) return { ...value, relPath: restTail(value), redacted: true };
+      return value;
+    }),
+  ) as DoctorReport;
 }
 
 function within(path: string, root: string): boolean {
@@ -252,13 +272,39 @@ class DoctorRun {
     }
   }
 
-  /** Readability for the service user from mode bits alone (primary group only). */
-  serviceCanRead(st: DoctorStat): boolean {
+  /** Permission for the service user from mode bits (primary group only; supplementary groups are not resolved). */
+  serviceHas(st: DoctorStat, bit: "read" | "search"): boolean {
     const { uid, gid } = this.deps.service;
     if (uid === 0) return true;
-    if (st.uid === uid) return (st.mode & 0o400) !== 0;
-    if (st.gid === gid) return (st.mode & 0o040) !== 0;
-    return (st.mode & 0o004) !== 0;
+    const [owner, group, other] = bit === "read" ? [0o400, 0o040, 0o004] : [0o100, 0o010, 0o001];
+    if (st.uid === uid) return (st.mode & owner) !== 0;
+    if (st.gid === gid) return (st.mode & group) !== 0;
+    return (st.mode & other) !== 0;
+  }
+
+  /**
+   * Can the service user reach and read the file? Readable bits on the file
+   * are not enough: every ancestor directory of its real path needs search
+   * permission for the service identity (observer review 198 WARN — a root
+   * doctor can stat a 0600 file inside a root-only 0700 dir).
+   */
+  serviceAccess(path: string, st: DoctorStat): { ok: true; readable: boolean } | { ok: false; reason: DoctorUncheckedReason; place: DoctorPlace } {
+    const real = fsTry(() => this.deps.realpath(path));
+    if (!real.ok) return { ok: false, reason: real.absent ? "io_error" : real.reason, place: this.place(path) };
+    let dir = dirname(real.value);
+    const ancestors: string[] = [];
+    for (;;) {
+      ancestors.unshift(dir);
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    for (const ancestor of ancestors) {
+      const st = fsTry(() => this.deps.stat(ancestor));
+      if (!st.ok) return { ok: false, reason: st.absent ? "io_error" : st.reason, place: this.place(ancestor) };
+      if (!this.serviceHas(st.value, "search")) return { ok: true, readable: false };
+    }
+    return { ok: true, readable: this.serviceHas(st, "read") };
   }
 }
 
@@ -391,9 +437,9 @@ async function checkProvider(run: DoctorRun, deps: DoctorDeps, provider: Provide
     if (primary.uid !== deps.service.uid) {
       out.findings.push({ kind: "credential_foreign_owner", provider, file, serviceUser: serviceName });
     }
-    if (!run.serviceCanRead(primary)) {
-      out.findings.push({ kind: "credential_unreadable", provider, file, serviceUser: serviceName });
-    }
+    const access = run.serviceAccess(primaryPath, primary);
+    if (!access.ok) unchecked("credential_access", access.reason, access.place);
+    else if (!access.readable) out.findings.push({ kind: "credential_unreadable", provider, file, serviceUser: serviceName });
   }
 
   // S2-AC3: independent copies in the fixed scan list.

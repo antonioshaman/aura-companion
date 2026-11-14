@@ -201,11 +201,13 @@ describe("doctor routes", () => {
 });
 
 describe("helpers", () => {
-  it("homeRelativePath maps service, root and other homes; system paths stay", () => {
+  it("homeRelativePath maps service, root and other homes; other paths keep only the file name", () => {
     expect(homeRelativePath("/home/svc/.local/bin/claude", "/home/svc")).toBe("~/.local/bin/claude");
     expect(homeRelativePath("/root/.local/share/claude/versions/2.1.120", "/home/svc")).toBe("~root/.local/share/claude/versions/2.1.120");
     expect(homeRelativePath("/home/other/bin/codex", "/home/svc")).toBe("~other/bin/codex");
-    expect(homeRelativePath("/usr/bin/codex", "/home/svc")).toBe("/usr/bin/codex");
+    // Outside every HOME only the file name survives (observer review 198 STOP).
+    expect(homeRelativePath("/usr/bin/codex", "/home/svc")).toBe("…/codex");
+    expect(homeRelativePath("/srv/companion/bin/claude", "/home/svc")).toBe("…/claude");
   });
 
   it("/api/backends authState is a projection: provider verdicts win, local-only states keep the legacy value", () => {

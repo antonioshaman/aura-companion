@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import { homedir } from "node:os";
-import { relative, sep } from "node:path";
+import { basename, relative, sep } from "node:path";
 import { PROVIDER_IDS, type ProviderAuthStatus, type ProviderId } from "../auth-status/auth-types.js";
 import { toRestDoctorReport } from "../auth-status/doctor-checks.js";
 import type { DoctorRunner } from "../auth-status/doctor-service.js";
@@ -17,8 +17,9 @@ import type { AuthState, BackendAuthStatus } from "../host-auth-status.js";
  * - POST = recheck, single-flight, at most one per 30 s (owner default b).
  * - Credentials the provider rejects are `200` + `state: "invalid"`, never
  *   401/403: the browser reads 401 as "Aura login expired".
- * - No absolute paths: doctor places are class + home-relative path; a CLI
- *   path is rendered `~/…` / `~user/…`. Full paths exist only in the CLI.
+ * - No absolute paths: doctor places are class + home-relative path (or a
+ *   redacted tail); a CLI path is `~/…`, `~user/…` or `…/name`. Full paths
+ *   exist only in the CLI.
  */
 
 export interface AuthStatusRoutesDeps {
@@ -32,7 +33,11 @@ function isProviderId(value: string): value is ProviderId {
   return (PROVIDER_IDS as readonly string[]).includes(value);
 }
 
-/** `/home/svc/.local/bin/claude` → `~/.local/bin/claude`; `/root/x` → `~root/x`; system paths unchanged. */
+/**
+ * `/home/svc/.local/bin/claude` → `~/.local/bin/claude`; `/root/x` → `~root/x`;
+ * any other absolute path keeps only its file name (`…/codex`) — no absolute
+ * path leaves the server (observer review 198 STOP).
+ */
 export function homeRelativePath(path: string, serviceHome: string): string {
   const under = (root: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
   if (serviceHome && under(serviceHome)) return `~/${relative(serviceHome, path)}`;
@@ -41,7 +46,7 @@ export function homeRelativePath(path: string, serviceHome: string): string {
     const [user, ...rest] = relative("/home", path).split(sep);
     if (user) return `~${user}/${rest.join("/")}`;
   }
-  return path;
+  return `…/${basename(path)}`;
 }
 
 export function toRestProviderStatus(status: ProviderAuthStatus, serviceHome: string): ProviderAuthStatus {

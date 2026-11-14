@@ -180,6 +180,8 @@ describe("helpers", () => {
     expect(fullPath({ place: "service_home", homeUser: "svc", relPath: ".codex/auth.json", absPath: "/x/y" }, homeOf)).toBe("/x/y");
     expect(fullPath({ place: "service_home", homeUser: "svc", relPath: ".codex/auth.json" }, homeOf)).toBe("/home/svc/.codex/auth.json");
     expect(fullPath({ place: "system", homeUser: null, relPath: "/usr/bin/codex" }, homeOf)).toBe("/usr/bin/codex");
+    // A REST-redacted place renders as a tail, never as a guessed absolute path.
+    expect(fullPath({ place: "system", homeUser: null, relPath: "codex", redacted: true }, homeOf)).toBe("…/codex");
   });
 
   it("cliPort reads --port, then COMPANION_PORT, else 3456", () => {

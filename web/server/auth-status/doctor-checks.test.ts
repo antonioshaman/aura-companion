@@ -30,9 +30,17 @@ type Node =
   | { type: "symlink"; target: string; ino: number };
 
 class FakeFs {
-  nodes = new Map<string, Node>();
+  nodes = new Map<string, Node>([["/", { type: "dir", uid: 0, gid: 0, mode: 0o755, ino: 2 }]]);
   credentialReads: string[] = [];
   private nextIno = 10;
+
+  /** Replace a directory's owner/mode (traversal permission tests). */
+  chmodDir(path: string, uid: number, mode: number): this {
+    const n = this.nodes.get(path);
+    if (n?.type !== "dir") throw new Error(`no dir ${path}`);
+    this.nodes.set(path, { ...n, uid, gid: uid, mode });
+    return this;
+  }
 
   dir(path: string, opts: { uid?: number; denied?: boolean } = {}): this {
     this.nodes.set(path, { type: "dir", uid: opts.uid ?? 0, gid: opts.uid ?? 0, mode: 0o755, ino: this.nextIno++, denied: opts.denied });
@@ -347,6 +355,36 @@ describe("runDoctorChecks — owner and permissions (S2-AC4)", () => {
   });
 });
 
+describe("runDoctorChecks — reachability through parent directories (observer review 198 WARN)", () => {
+  it("a 0600 service-owned file inside a root-only 0700 directory is unreadable for the service", async () => {
+    // A root-run doctor can stat it; the service cannot traverse the directory.
+    const fs = cleanBox();
+    fs.chmodDir("/home/svc/.codex", 0, 0o700);
+    const report = await runDoctorChecks(deps(fs, { callerUid: 0 }));
+    expect(report.providers.codex.findings.map((f) => f.kind)).toEqual(["credential_unreadable"]);
+    expect(report.providers.claude.findings).toEqual([]);
+  });
+
+  it("a group-searchable parent keeps the file readable", async () => {
+    const fs = cleanBox();
+    fs.chmodDir("/home/svc/.codex", 0, 0o710);
+    (fs.nodes.get("/home/svc/.codex") as { gid: number }).gid = SVC_GID;
+    const report = await runDoctorChecks(deps(fs));
+    expect(report.providers.codex.findings).toEqual([]);
+  });
+
+  it("an ancestor the doctor itself cannot stat is 'not checked', not 'readable'", async () => {
+    const fs = cleanBox();
+    const d = deps(fs, {
+      stat: (p) => (p === "/home/svc" ? (() => { throw Object.assign(new Error("x"), { code: "EACCES" }); })() : fs.stat(p)),
+    });
+    const report = await runDoctorChecks(d);
+    expect(report.providers.claude.unchecked).toEqual([
+      expect.objectContaining({ check: "credential_access", reason: "permission_denied" }),
+    ]);
+  });
+});
+
 describe("report helpers", () => {
   it("REST projection strips every absolute path", async () => {
     const fs = cleanBox();
@@ -357,6 +395,29 @@ describe("report helpers", () => {
     expect(JSON.stringify(rest)).not.toContain("absPath");
     expect(JSON.stringify(rest)).not.toContain("/home/svc");
     expect(rest.providers.codex.findings[0]).toMatchObject({ copy: { place: "root_home", relPath: ".codex/auth.json" } });
+  });
+
+  it("REST projection carries no absolute path even for system binaries and a companion dir outside HOME", async () => {
+    // Observer review 198 STOP: relPath of a `homeUser: null` place used to be absolute.
+    const fs = cleanBox();
+    fs.file("/root/.local/share/claude/versions/2.1.120", { uid: 0, mode: 0o755 });
+    fs.link("/usr/bin/claude", "/root/.local/share/claude/versions/2.1.120");
+    fs.file("/srv/companion/codex-home/s1/auth.json", { content: CANARY });
+    const report = await runDoctorChecks(deps(fs, {
+      companionHome: "/srv/companion",
+      resolveLaunchBinary: (n) => (n === "claude" ? "/usr/bin/claude" : "/usr/bin/codex"),
+    }));
+    const rest = toRestDoctorReport(report);
+    const strings: string[] = [];
+    JSON.stringify(rest, (_k, v) => {
+      if (typeof v === "string") strings.push(v);
+      return v;
+    });
+    expect(strings.filter((v) => v.startsWith("/"))).toEqual([]);
+    const copy = rest.providers.codex.findings.find((f) => f.kind === "credential_copy");
+    expect(copy).toMatchObject({ copy: { place: "codex_session_home", homeUser: null, relPath: "codex-home/s1/auth.json", redacted: true } });
+    const div = rest.providers.claude.findings.find((f) => f.kind === "binary_divergence");
+    expect(div).toMatchObject({ launched: { location: { place: "system", relPath: "claude", redacted: true } } });
   });
 
   it("compareVersions orders numerically", () => {
