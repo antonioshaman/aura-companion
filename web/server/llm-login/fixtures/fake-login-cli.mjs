@@ -7,7 +7,7 @@
 // auth.json before anything else) — so tests prove the live paths are out of
 // its reach. Every credential it writes is synthetic and carries SYNTH-CANARY.
 //
-// Argv: [--scenario=<name>] [--grandchild] then the real CLI argv:
+// Argv: [--scenario=<name>] [--grandchild] [--grandchild-inherit] then the real CLI argv:
 //   claude: `auth login`          codex: `login --device-auth`
 // Scenarios — claude: success | reject | garbage | ignore_term | env | silent
 //             codex:  success | no_network | wait | garbage | ignore_term | env | silent
@@ -22,7 +22,7 @@ import { createInterface } from "node:readline";
 const args = process.argv.slice(2);
 const flag = (name) => args.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
 const scenario = flag("scenario") ?? "success";
-const rest = args.filter((a) => !a.startsWith("--scenario=") && a !== "--grandchild");
+const rest = args.filter((a) => !a.startsWith("--scenario=") && a !== "--grandchild" && a !== "--grandchild-inherit");
 const provider = rest[0] === "auth" && rest[1] === "login" ? "claude"
   : rest[0] === "login" && rest[1] === "--device-auth" ? "codex"
   : null;
@@ -33,6 +33,10 @@ if (!provider) {
 if (args.includes("--grandchild")) {
   // A long-lived descendant in the same process group: the runner must reap it too.
   spawn("sleep", ["300"], { stdio: "ignore" });
+}
+if (args.includes("--grandchild-inherit")) {
+  // A descendant holding the CLI's stdout/stderr open after the CLI exits.
+  spawn("sleep", ["300"], { stdio: ["ignore", "inherit", "inherit"] });
 }
 if (scenario === "ignore_term") process.on("SIGTERM", () => {});
 if (scenario === "silent") {

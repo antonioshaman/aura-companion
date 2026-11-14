@@ -62,6 +62,7 @@ function registry(scenario: Partial<Record<ProviderId, string>>, over: Partial<L
     resolveCli: (p) => (scenario[p] ? fakeCli(scenario[p]!) : null),
     platform: "linux",
     callerUser: "svc",
+    callerUid: 1000,
     serviceUser: "svc",
     serviceEnv: { PATH: process.env.PATH },
     promote: okPromotion,
@@ -280,11 +281,20 @@ describe.skipIf(!linux)("LoginAttempts", () => {
   });
 
   it("a failed promotion → promotion_failed; staging dir removed", async () => {
-    const r = registry({ codex: "success" }, { promote: async () => ({ ok: false }) });
+    const r = registry({ codex: "success" }, { promote: async () => ({ ok: false, reason: "promotion_failed" as const }) });
     await r.start("codex");
     await waitFor(() => r.current("codex")?.state === "failed");
     expect(r.current("codex")!.failure).toBe("promotion_failed");
     await waitFor(() => attemptDirs().length === 0);
+  });
+
+  it("promotion_incomplete (new credentials live, a later step failed) keeps the attempt dir for recovery", async () => {
+    const r = registry({ codex: "success" }, { promote: async () => ({ ok: false, reason: "promotion_incomplete" as const }) });
+    const a = (await r.start("codex")).attempt!;
+    await waitFor(() => r.current("codex")?.state === "failed");
+    expect(r.current("codex")!.failure).toBe("promotion_incomplete");
+    await new Promise((res) => setTimeout(res, 100));
+    expect(attemptDirs()).toContain(a.id);
   });
 
   it("cancel and expiry during verifying do not interrupt the promotion", async () => {
@@ -302,7 +312,7 @@ describe.skipIf(!linux)("LoginAttempts", () => {
   });
 
   it("preflight refusal: nothing spawned, no staging dir, the attempt is failed with the reason", async () => {
-    const r = registry({ claude: "success" }, { callerUser: "root" });
+    const r = registry({ claude: "success" }, { callerUser: "root", callerUid: 0, serviceUser: null });
     const res = await r.start("claude");
     expect(res).toMatchObject({ kind: "refused", attempt: { state: "failed", failure: "wrong_service_user" } });
     expect(attemptDirs()).toEqual([]);

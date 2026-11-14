@@ -84,6 +84,7 @@ function setup(scenario: Partial<Record<ProviderId, string>>) {
     resolveCli: (p) => (scenario[p] ? fakeCli(scenario[p]!) : null),
     platform: "linux",
     callerUser: "svc",
+    callerUid: 1000,
     serviceUser: "svc",
     serviceEnv: { PATH: process.env.PATH, HOME: liveHome },
     cooldownMs: 0,

@@ -295,6 +295,13 @@ export async function promoteCredentials(ctx: PromotionContext, deps: PromotionD
   const staged = stagedCredentialPaths(provider, ctx.stagingHome);
   const live = liveCredentialPaths(provider, deps.serviceEnv);
 
+  // A journal left by an earlier promotion is settled first (finish or drop),
+  // so a new sign-in can never overwrite a recovery that is still owed.
+  if (existsSync(journalPath(deps.stateDir, provider))) {
+    await recoverPromotions({ ...deps, attemptsRoot: dirname(ctx.attemptDir) }, [provider]);
+    if (existsSync(journalPath(deps.stateDir, provider))) return fail(provider, "recovery_pending");
+  }
+
   const check = checkStagedCredential(provider, staged.credentials, deps.uid);
   if (!check.ok) return fail(provider, "staged_invalid", check.why);
 
@@ -354,8 +361,11 @@ export async function promoteCredentials(ctx: PromotionContext, deps: PromotionD
     await finishPromotion(deps, journal, ctx.attemptDir, promotedAt, tokenFingerprint);
   } catch (err) {
     if (err instanceof CrashSimulation) throw err;
-    // The new credentials ARE live; the journal stays so startup recovery completes the epoch.
+    // The new credentials ARE live, but the account / epoch step did not
+    // complete: NOT a success. The journal and the attempt dir stay so the
+    // next start (or the next sign-in of this provider) finishes it.
     log.warn("llm-login", "credential_promotion.finish_failed", { event: "credential_promotion.finish_failed", provider, error: errName(err) });
+    return { ok: false, reason: "promotion_incomplete" };
   }
   log.info("llm-login", "credential_promotion.done", { event: "credential_promotion.done", provider, epoch: journal.targetEpoch });
   return { ok: true, account: probe.account, plan: probe.plan };
@@ -384,7 +394,12 @@ async function finishPromotion(
     }
     advance(deps, journal, "epoch_written");
   }
-  await deps.noteCredentialsPromoted({ provider, fingerprint: journal.newFingerprint, tokenFingerprint, promotedAt });
+  // The epoch is on disk: a failed status refresh only delays the status (its TTL catches up).
+  try {
+    await deps.noteCredentialsPromoted({ provider, fingerprint: journal.newFingerprint, tokenFingerprint, promotedAt });
+  } catch (err) {
+    log.warn("llm-login", "credential_promotion.status_refresh_failed", { event: "credential_promotion.status_refresh_failed", provider, error: errName(err) });
+  }
   // The journal goes only after the epoch is on disk.
   rmSync(journalPath(deps.stateDir, provider), { force: true });
 }
@@ -420,9 +435,12 @@ export type RecoveryAction = { provider: ProviderId; action: "completed" | "disc
  * any other journal is dropped with its attempt dir — the rename never
  * happened, so the live credentials are the old ones and the epoch stays.
  */
-export async function recoverPromotions(deps: PromotionDeps & { attemptsRoot: string }): Promise<RecoveryAction[]> {
+export async function recoverPromotions(
+  deps: PromotionDeps & { attemptsRoot: string },
+  providers: readonly ProviderId[] = PROVIDER_IDS,
+): Promise<RecoveryAction[]> {
   const actions: RecoveryAction[] = [];
-  for (const provider of PROVIDER_IDS) {
+  for (const provider of providers) {
     const path = journalPath(deps.stateDir, provider);
     if (!existsSync(path)) continue;
     const journal = readJournal(deps.stateDir, provider);
@@ -455,7 +473,7 @@ export class CrashSimulation extends Error {}
 
 function fail(provider: ProviderId, why: string, detail?: string): PromotionOutcome {
   log.warn("llm-login", "credential_promotion.refused", { event: "credential_promotion.refused", provider, why, ...(detail ? { detail } : {}) });
-  return { ok: false };
+  return { ok: false, reason: "promotion_failed" };
 }
 
 function errName(err: unknown): string {

@@ -112,7 +112,7 @@ describe("loginEnv / loginPreflight (pure)", () => {
   });
 
   it("refuses the wrong user, Claude on macOS, a missing or relative CLI path; Codex on macOS is fine", () => {
-    const base = { platform: "linux" as const, callerUser: "svc", serviceUser: "svc", cliPath: "/usr/bin/x" };
+    const base = { platform: "linux" as const, callerUser: "svc", callerUid: 1000, serviceUser: "svc", cliPath: "/usr/bin/x" };
     expect(loginPreflight({ ...base, provider: "claude", callerUser: "root" })).toBe("wrong_service_user");
     expect(loginPreflight({ ...base, provider: "codex", callerUser: "other" })).toBe("wrong_service_user");
     expect(loginPreflight({ ...base, provider: "claude", platform: "darwin" })).toBe("unsupported_platform");
@@ -121,6 +121,16 @@ describe("loginEnv / loginPreflight (pure)", () => {
     expect(loginPreflight({ ...base, provider: "codex", cliPath: "codex" })).toBe("cli_missing");
     // Dev without a unit: service user unknown → the caller is the service.
     expect(loginPreflight({ ...base, provider: "claude", serviceUser: null })).toBeNull();
+  });
+
+  it("never runs as root — not with an unknown service user, not when the unit itself says root (observer review 202 STOP)", () => {
+    const base = { platform: "linux" as const, cliPath: "/usr/bin/x" };
+    for (const provider of ["claude", "codex"] as const) {
+      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: null })).toBe("wrong_service_user");
+      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: "root" })).toBe("wrong_service_user");
+      // uid 0 under another name (e.g. a renamed root account) is still root.
+      expect(loginPreflight({ ...base, provider, callerUser: "toor", callerUid: 0, serviceUser: "toor" })).toBe("wrong_service_user");
+    }
   });
 });
 
@@ -236,6 +246,16 @@ describe.skipIf(!linux)("spawnLoginProcess against the fake CLI", () => {
     const exit = await proc.exited;
     expect(exit).toMatchObject({ exitCode: 1, killedByUs: false });
     await waitFor(() => sessionMembers(proc.pid).length === 0);
+  });
+
+  it("a descendant holding the CLI's pipes does not stall the exit: it is swept on exit (observer review 202 WARN)", async () => {
+    const started = Date.now();
+    const { proc } = await start({ provider: "codex", cliPath: fakeCli("no_network", ["--grandchild-inherit"]) });
+    const exit = await proc.exited;
+    expect(exit).toMatchObject({ exitCode: 1, killedByUs: false });
+    // Without the exit-time sweep `close` waits for `sleep 300`.
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(sessionMembers(proc.pid)).toEqual([]);
   });
 
   it("records the /proc start time as the identity anchor", async () => {

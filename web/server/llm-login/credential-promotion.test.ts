@@ -197,7 +197,7 @@ describe("promoteCredentials — refusals leave the live files byte-for-byte unc
       const ctx = stage(c.provider);
       c.setup(ctx);
       const d = deps(c.over);
-      expect(await promoteCredentials(ctx, d)).toEqual({ ok: false });
+      expect(await promoteCredentials(ctx, d)).toEqual({ ok: false, reason: "promotion_failed" });
       expect([sha(live.claude), sha(live.claudeConfig), sha(live.codex)]).toEqual(before);
       expect(readEpoch(stateDir, c.provider)).toBeNull();
       expect(readJournal(stateDir, c.provider)).toBeNull();
@@ -209,7 +209,7 @@ describe("promoteCredentials — refusals leave the live files byte-for-byte unc
     const live = seedLive();
     const before = sha(live.codex);
     const ctx = stage("codex", { creds: codexAuth("new") });
-    expect(await promoteCredentials(ctx, deps({ uid: UID + 1 }))).toEqual({ ok: false });
+    expect(await promoteCredentials(ctx, deps({ uid: UID + 1 }))).toEqual({ ok: false, reason: "promotion_failed" });
     expect(sha(live.codex)).toBe(before);
   });
 
@@ -278,6 +278,47 @@ describe("promotion journal and startup recovery (observer review 201 STOP)", ()
     await recoverPromotions(deps());
     expect(readEpoch(stateDir, "codex")?.epoch).toBe(1);
     expect(readJournal(stateDir, "codex")).toBeNull();
+  });
+
+  it("a failing step after the rename is NOT a success: promotion_incomplete, journal and attempt dir kept, recovery finishes later (observer review 202 STOP)", async () => {
+    const live = seedLive();
+    const newCreds = claudeCreds("new");
+    const ctx = stage("claude", { creds: newCreds, config: JSON.stringify({ oauthAccount: { emailAddress: "synthetic-owner@example.test" } }) });
+    // The epoch file cannot be written (a directory sits at its path).
+    mkdirSync(join(stateDir, "epoch-claude.json"), { recursive: true });
+    const d = deps();
+    expect(await promoteCredentials(ctx, d)).toEqual({ ok: false, reason: "promotion_incomplete" });
+    expect(readFileSync(live.claude, "utf-8")).toBe(newCreds);
+    expect(readJournal(stateDir, "claude")?.steps).toEqual(["credentials_renamed", "account_merged"]);
+    expect(existsSync(ctx.attemptDir)).toBe(true);
+    expect(d.noteCredentialsPromoted).not.toHaveBeenCalled();
+    // Obstacle gone (e.g. after a restart): recovery completes from the kept journal.
+    rmSync(join(stateDir, "epoch-claude.json"), { recursive: true });
+    expect(await recoverPromotions(deps())).toEqual([{ provider: "claude", action: "completed" }]);
+    expect(readEpoch(stateDir, "claude")?.epoch).toBe(1);
+    expect(existsSync(ctx.attemptDir)).toBe(false);
+  });
+
+  it("a failed status refresh after the epoch does not undo the success; the journal is removed", async () => {
+    seedLive();
+    const d = deps({ noteCredentialsPromoted: () => { throw new Error("status down"); } });
+    expect((await promoteCredentials(stage("codex", { creds: codexAuth("new") }), d)).ok).toBe(true);
+    expect(readEpoch(stateDir, "codex")?.epoch).toBe(1);
+    expect(readJournal(stateDir, "codex")).toBeNull();
+  });
+
+  it("a new promotion first settles a leftover journal of the same provider (never overwrites an owed recovery)", async () => {
+    const live = seedLive();
+    // Leftover: crashed before its rename (its attempt dir is another id).
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "promotion-codex.json"), JSON.stringify({
+      schemaVersion: 1, provider: "codex", attemptId: "f".repeat(32), targetEpoch: 1, newFingerprint: "0".repeat(64), steps: [],
+    }));
+    mkdirSync(join(attemptsRoot, "f".repeat(32)), { recursive: true });
+    expect((await promoteCredentials(stage("codex", { creds: codexAuth("new") }), deps())).ok).toBe(true);
+    expect(readFileSync(live.codex, "utf-8")).toBe(codexAuth("new"));
+    expect(readEpoch(stateDir, "codex")?.epoch).toBe(1);
+    expect(existsSync(join(attemptsRoot, "f".repeat(32)))).toBe(false);
   });
 
   it("no journal → recovery does nothing", async () => {

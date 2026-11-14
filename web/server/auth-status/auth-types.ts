@@ -314,11 +314,14 @@ export type LoginFailureReason =
   /** In-UI sign-in is not supported here (Claude on macOS, D6). */
   | "unsupported_platform"
   /** The CLI succeeded but the new credentials could not be checked or moved in place. */
-  | "promotion_failed";
+  | "promotion_failed"
+  /** The new credentials ARE in place, but a later step (account, epoch) failed; finished at the next server start. */
+  | "promotion_incomplete";
 
 export const LOGIN_FAILURE_REASONS: readonly LoginFailureReason[] = [
   "code_rejected", "code_format", "attempt_mismatch", "expired", "network", "cli_output_unrecognised",
   "cli_missing", "wrong_service_user", "unsupported_platform", "promotion_failed",
+  "promotion_incomplete",
 ];
 
 /** The signed-in plan against the owner's optional expectation. `unknown` is never `match`. */

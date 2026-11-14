@@ -82,7 +82,7 @@ export type LoginEvent =
  * Pure transition. Unchanged input is returned as the same object (no version
  * bump); terminal states absorb every event. Cancel and expiry do not
  * interrupt `verifying`: the promotion is a short atomic step, and its outcome
- * (success or `promotion_failed`) ends the attempt.
+ * (success or `promotion_failed` / `promotion_incomplete`) ends the attempt.
  */
 export function reduceLoginAttempt(a: LoginAttempt, e: LoginEvent): LoginAttempt {
   if (isTerminalLoginState(a.state)) return a;
@@ -146,7 +146,14 @@ export interface PromotionContext {
   stagingHome: string;
 }
 
-export type PromotionOutcome = { ok: true; account: Known<string>; plan: Known<string> } | { ok: false };
+export type PromotionOutcome =
+  | { ok: true; account: Known<string>; plan: Known<string> }
+  /**
+   * `promotion_failed`: nothing live changed. `promotion_incomplete`: the new
+   * credentials are live but a later step failed — the attempt dir is KEPT
+   * (startup recovery needs its staged account data).
+   */
+  | { ok: false; reason: Extract<LoginFailureReason, "promotion_failed" | "promotion_incomplete"> };
 
 export interface LoginAttemptsDeps {
   attemptsRoot: string;
@@ -154,6 +161,7 @@ export interface LoginAttemptsDeps {
   resolveCli: (provider: ProviderId) => string | null;
   platform: NodeJS.Platform;
   callerUser: string;
+  callerUid: number;
   serviceUser: string | null;
   serviceEnv: NodeJS.ProcessEnv;
   /** Moves verified credentials in place (credential-promotion.ts). */
@@ -191,6 +199,8 @@ interface Running {
   transcript: LoginTranscript;
   timers: ReturnType<typeof setTimeout>[];
   finalizing: Promise<void> | null;
+  /** Keep the attempt dir for the promotion recovery (`promotion_incomplete`). */
+  retainDir: boolean;
 }
 
 export class LoginAttempts {
@@ -230,7 +240,7 @@ export class LoginAttempts {
 
     const cliPath = this.deps.resolveCli(provider);
     const refusal = loginPreflight({
-      provider, platform: this.deps.platform, callerUser: this.deps.callerUser, serviceUser: this.deps.serviceUser, cliPath,
+      provider, platform: this.deps.platform, callerUser: this.deps.callerUser, callerUid: this.deps.callerUid, serviceUser: this.deps.serviceUser, cliPath,
     });
     if (refusal) {
       const failed = reduceLoginAttempt(fresh, { type: "failed", reason: refusal });
@@ -247,7 +257,7 @@ export class LoginAttempts {
     mkdirSync(stagingHome, { mode: 0o700 });
     writeSentinelExclusive(dir, { schemaVersion: ATTEMPT_SENTINEL_SCHEMA_VERSION, attemptId: id, provider, pid: null, startTime: null, expiresAt: fresh.expiresAt });
 
-    const run: Running = { attempt: fresh, dir, process: null, transcript: new LoginTranscript(provider), timers: [], finalizing: null };
+    const run: Running = { attempt: fresh, dir, process: null, transcript: new LoginTranscript(provider), timers: [], finalizing: null, retainDir: false };
     this.running.set(provider, run);
     this.last.set(provider, fresh);
 
@@ -370,9 +380,10 @@ export class LoginAttempts {
         outcome = await this.deps.promote({ attemptId: id, provider, attemptDir: run.dir, stagingHome: join(run.dir, STAGING_HOME_DIR) });
       } catch (err) {
         warn("login_attempt.promote_threw", provider, err);
-        outcome = { ok: false };
+        outcome = { ok: false, reason: "promotion_failed" };
       }
-      await this.finalize(provider, id, outcome.ok ? { type: "promoted", account: outcome.account, plan: outcome.plan } : { type: "failed", reason: "promotion_failed" });
+      if (!outcome.ok && outcome.reason === "promotion_incomplete") run.retainDir = true;
+      await this.finalize(provider, id, outcome.ok ? { type: "promoted", account: outcome.account, plan: outcome.plan } : { type: "failed", reason: outcome.reason });
       return;
     }
     // Non-zero: the transcript's reason if it has one; a Claude exit after a submitted code is the provider refusing it.
@@ -403,7 +414,7 @@ export class LoginAttempts {
         warn("login_attempt.kill_failed", provider, err);
       }
       try {
-        rmSync(run.dir, { recursive: true, force: true });
+        if (!run.retainDir) rmSync(run.dir, { recursive: true, force: true });
       } catch (err) {
         warn("login_attempt.cleanup_failed", provider, err);
       }

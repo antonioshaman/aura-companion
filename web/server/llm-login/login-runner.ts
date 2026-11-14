@@ -21,8 +21,8 @@ import { escalateKill, type KillEscalation } from "../auth-status/probe-runner.j
  *    ends the sign-in even if the server is restarted (`KillMode=process`);
  *  - both streams are read for the whole life with a 64KB cap each; the raw
  *    output is handed to `onOutput` and never stored or logged here;
- *  - "exited" only on `close` (process gone and pipes drained), then any
- *    leftover member of its session is swept.
+ *  - leftover members of its session are swept as soon as the CLI exits
+ *    (they may hold its pipes open); "exited" resolves on `close`.
  */
 
 export const LOGIN_ARGV: Readonly<Record<ProviderId, readonly string[]>> = {
@@ -69,7 +69,8 @@ export type LoginRefusal = Extract<LoginFailureReason, "wrong_service_user" | "u
 
 /**
  * Checks before any process starts. The sign-in runs only as the service
- * user (never root or another user in its place) and, for Claude, not on
+ * user — never as root (also not when the service itself runs as root) and
+ * never as another user in its place — and, for Claude, not on
  * macOS where credentials live in the Keychain (D6).
  */
 export function loginPreflight(opts: {
@@ -77,10 +78,14 @@ export function loginPreflight(opts: {
   platform: NodeJS.Platform;
   /** User this process runs as. */
   callerUser: string;
+  /** uid of this process; 0 (root) is always refused, whoever the service user is. */
+  callerUid: number;
   /** User the service runs as (`resolveServiceIdentity().user`); null when unknown (dev). */
   serviceUser: string | null;
   cliPath: string | null;
 }): LoginRefusal | null {
+  // Never as root (spec 🚫), even when no unit is known or the unit itself says root.
+  if (opts.callerUid === 0 || opts.callerUser === "root") return "wrong_service_user";
   if (opts.serviceUser !== null && opts.serviceUser !== opts.callerUser) return "wrong_service_user";
   if (opts.provider === "claude" && opts.platform === "darwin") return "unsupported_platform";
   if (!opts.cliPath || !opts.cliPath.startsWith("/")) return "cli_missing";
@@ -185,9 +190,17 @@ export function spawnLoginProcess(
       resolve({ ok: false, reason: code === "ENOENT" || code === "EACCES" ? "cli_missing" : "spawn_failed" });
     });
 
+    // On `exit` (not only `close`): a leftover descendant that inherited the
+    // CLI's stdout/stderr keeps the pipes open, so `close` would wait for the
+    // very process the sweep must kill (observer review 202 WARN).
+    child.on("exit", () => {
+      try {
+        if (pgid !== undefined) sweepSession(pgid);
+      } catch { /* EC-53: /proc read races must not escape an event handler */ }
+    });
     child.on("close", (code, signal) => {
       escalation?.cancel();
-      // The CLI is gone; anything it left in its session (grandchildren) goes too.
+      // Again after the pipes drained, for anything that slipped in between.
       if (pgid !== undefined) sweepSession(pgid);
       resolveExit({ exitCode: code, signal, killedByUs, outputCapped });
     });

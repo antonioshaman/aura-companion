@@ -420,6 +420,12 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
         detail: `The sign-in finished, but the new credentials could not be verified or moved in place. ${unchanged}`,
         action: reloginAction(provider),
       };
+    case "promotion_incomplete":
+      return {
+        title: `${name}: new sign-in in place, finishing it failed`,
+        detail: "The new credentials are already in use, but updating the account details failed. It will be completed when the server restarts.",
+        action: { kind: "none" },
+      };
     default:
       return assertNever(reason);
   }
