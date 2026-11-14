@@ -239,6 +239,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         // when the session leaves the store. Sibling of the
         // permissionPermissions cleanup above.
         cliFailures: deleteFromMap(s.cliFailures, sessionId),
+        turnFailures: deleteFromMap(s.turnFailures, sessionId),
         pendingCodexModelSwitches: deleteFromMap(s.pendingCodexModelSwitches, sessionId),
         pendingClaudeModelSwitches: deleteFromMap(s.pendingClaudeModelSwitches, sessionId),
         modelSubstitutionNotices: deleteFromMap(s.modelSubstitutionNotices, sessionId),

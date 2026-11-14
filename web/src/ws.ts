@@ -1160,8 +1160,15 @@ function handleParsedMessage(
       // An unrecognised status leaves `runtimeFailure` null → today's behaviour
       // (settle the marker, no revert).
       const resultBackend = store.sdkSessions.find((s) => s.sessionId === sessionId)?.backendType;
+      // LLM auth task 12: a failure the server already classified (sign-in,
+      // limit window, extra usage, outdated CLI, stale credentials, network)
+      // is NOT a model problem — checked before `classifyModelRuntimeError`,
+      // so it never reverts the model nor marks it retired/blocked. The
+      // typed failure arrives on the `error` frame just before this result.
+      const typedFailure = store.turnFailures.get(sessionId)?.failure ?? null;
+      if (typedFailure) store.clearTurnFailure(sessionId);
       const runtimeFailure =
-        resultBackend !== "codex" && r.is_error ? classifyModelRuntimeError(r.api_error_status) : null;
+        resultBackend !== "codex" && r.is_error && !typedFailure ? classifyModelRuntimeError(r.api_error_status) : null;
 
       const pendingClaudeSwitch = store.pendingClaudeModelSwitches.get(sessionId);
       if (pendingClaudeSwitch) {
@@ -1406,6 +1413,20 @@ function handleParsedMessage(
     }
 
     case "error": {
+      // LLM auth task 12/14: a classified turn failure renders as one card
+      // with one action, and is remembered for the `result` that follows.
+      if (data.turnFailure) {
+        store.setTurnFailure(sessionId, data.turnFailure);
+        store.appendMessage(sessionId, {
+          id: nextId(),
+          role: "system",
+          content: data.message,
+          timestamp: Date.now(),
+          systemVariant: "turn-failure",
+          turnFailure: data.turnFailure,
+        });
+        break;
+      }
       // Phase F WATCHPOINT carry-forward - when this session has a
       // live cli_failed banner, suppress the legacy chat-error
       // message (session-orchestrator.ts:3267 and :3302 fire
