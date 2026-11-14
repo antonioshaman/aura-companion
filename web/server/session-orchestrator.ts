@@ -1062,6 +1062,10 @@ export class SessionOrchestrator {
     companionBus.on("session:usage-limit", (event) => {
       this.handleUsageLimit(event);
     });
+    // Task 13: a browser opened a session whose banner outlived its window.
+    companionBus.on("session:auto-resume-stale", ({ sessionId }) => {
+      if (!this.autoResume?.cancel(sessionId, "window_reset")) this.wsBridge.setAutoResumeState(sessionId, null);
+    });
     companionBus.on("settings:auto-resume-changed", ({ enabled }) => {
       if (!enabled) this.autoResume?.cancelAll("disabled");
     });
@@ -1083,6 +1087,7 @@ export class SessionOrchestrator {
     resetAt: number;
     resetSource: AutoResumeSchedule["resetSource"];
     limitType: string | null;
+    window?: AutoResumeSchedule["window"];
   }): void {
     if (!this.autoResume) return;
     const info = this.launcher.getSession(event.sessionId);
@@ -1095,6 +1100,7 @@ export class SessionOrchestrator {
       resetAt: event.resetAt,
       resetSource: event.resetSource,
       limitType: event.limitType,
+      ...(event.window ? { window: event.window } : {}),
       role: group ? (group.observer.sessionId === event.sessionId ? "observer" : "orchestrator") : "solo",
       sessionGroupId: group?.sessionGroupId ?? null,
     });

@@ -261,9 +261,27 @@ describe("ChatView", () => {
   });
 
   it("passes the server's paused flag to the banner", () => {
-    setupStore({ autoResume: { resetAt: 1, fireAt: 1, resetSource: "fallback", paused: true } });
+    // Window still in the future: a paused banner is truthful until the reset (task 13).
+    const resetAt = Date.now() + 3_600_000;
+    setupStore({ autoResume: { resetAt, fireAt: resetAt, resetSource: "fallback", paused: true } });
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение приостановлено");
+  });
+
+  it("hides a paused banner once its window has reset, and the composer stays usable (S3-AC4)", () => {
+    // LLM auth task 13: the stale "limit still active" banner from the
+    // incident must not linger after the reset, and must never gate input.
+    setupStore({ autoResume: { resetAt: Date.now() - 60_000, fireAt: Date.now() - 60_000, resetSource: "rate_limit_event", paused: true } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
+    expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("hides a scheduled banner whose resume is long overdue (lost timer)", () => {
+    const longAgo = Date.now() - 60 * 60_000;
+    setupStore({ autoResume: { resetAt: longAgo, fireAt: longAgo, resetSource: "rate_limit_event" } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
   });
 
   it("does not show the auto-resume banner without a scheduled resume", () => {

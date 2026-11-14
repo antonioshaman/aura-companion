@@ -165,6 +165,16 @@ export interface CompanionEventMap {
     resetAt: number;
     resetSource: import("./usage-limit-parse.js").UsageLimitResetSource;
     limitType: string | null;
+    /** Which allowance was hit (task 13); absent from older emitters. */
+    window?: import("./auth-status/auth-types.js").UsageWindow;
+  };
+
+  /**
+   * A browser opened a session whose persisted auto-resume banner is stale
+   * (`isAutoResumeStale`) — the orchestrator clears it for every tab.
+   */
+  "session:auto-resume-stale": {
+    sessionId: string;
   };
 
   /**

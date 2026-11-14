@@ -80,6 +80,7 @@ import {
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import { isAutoResumeStale } from "./auto-resume-visibility.js";
 import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
 import {
   contextTokensFromUsage,
@@ -1791,6 +1792,13 @@ export class WsBridge {
       return;
     }
     const session = this.getOrCreateSession(sessionId);
+    // LLM auth task 13 (S3-AC4): a persisted usage-limit banner whose window
+    // already reset is cleared BEFORE this browser gets its session_init, and
+    // the orchestrator broadcasts the clear to every other tab.
+    const autoResume = session.state.auto_resume;
+    if (autoResume && isAutoResumeStale(autoResume, Date.now())) {
+      companionBus.emit("session:auto-resume-stale", { sessionId });
+    }
     const browserData = ws.data as BrowserSocketData;
     browserData.subscribed = false;
     browserData.lastAckSeq = 0;

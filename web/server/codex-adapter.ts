@@ -25,7 +25,7 @@ import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
-import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
+import { codexWindowByDuration, resolveCodexUsageLimit } from "./usage-limit-parse.js";
 import { classifyCodexTurnFailure, type CodexTurnSignal, type CredentialGenerationVerdict } from "./turn-failure.js";
 import { describeTurnFailure } from "./auth-status/auth-catalog.js";
 import type { TurnFailure } from "./auth-status/auth-types.js";
@@ -2389,6 +2389,10 @@ export class CodexAdapter implements IBackendAdapter {
       resetAt: resolved.resetAt,
       resetSource: resolved.resetSource,
       limitType: resolved.limitType,
+      window: (() => {
+        const slot = resolved.limitType === "primary" || resolved.limitType === "secondary" ? this._rateLimits?.[resolved.limitType] : null;
+        return slot ? codexWindowByDuration(slot.windowDurationMins) : "unknown_window";
+      })(),
     });
   }
 

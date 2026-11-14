@@ -38,6 +38,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { writeAtomicJson } from "./atomic-write.js";
 import { log } from "./logger.js";
 import type { UsageLimitResetSource } from "./usage-limit-parse.js";
+import type { UsageWindow } from "./auth-status/auth-types.js";
 
 export type AutoResumeRole = "solo" | "orchestrator" | "observer";
 
@@ -49,6 +50,8 @@ export interface AutoResumeHit {
   resetAt: number;
   resetSource: UsageLimitResetSource;
   limitType: string | null;
+  /** Which allowance was hit (task 13); absent on records persisted before 1c. */
+  window?: UsageWindow;
   role: AutoResumeRole;
   sessionGroupId: string | null;
 }
@@ -64,6 +67,7 @@ export interface AutoResumePublicState {
   resetAt: number;
   fireAt: number;
   resetSource: UsageLimitResetSource;
+  window?: UsageWindow;
   /** Set when the repeat-limit guard paused auto-resume for the session. */
   paused?: boolean;
 }
@@ -94,7 +98,9 @@ export type AutoResumeCancelReason =
   | "archived"
   | "deleted"
   | "disabled"
-  | "session_gone";
+  | "session_gone"
+  /** The window the banner named has reset (task 13). */
+  | "window_reset";
 
 export interface AutoResumeSchedulerDeps {
   filePath: string;
@@ -180,6 +186,16 @@ export class AutoResumeScheduler {
       log.info("auto-resume", "usage limit hit; auto-resume disabled", {
         event: "usage_limit.auto_resume.skipped",
         reason: "disabled",
+        ...this.logFields(hit),
+      });
+      return null;
+    }
+    // Extra usage is a wallet, not a window: its reset is not a 5-hour guess.
+    // Without a stated reset, resuming would just hit the empty wallet again.
+    if (hit.window === "extra_usage" && hit.resetSource === "fallback") {
+      log.info("auto-resume", "extra usage exhausted with no stated reset; not scheduling", {
+        event: "usage_limit.auto_resume.skipped",
+        reason: "extra_usage_unknown_reset",
         ...this.logFields(hit),
       });
       return null;
@@ -379,7 +395,7 @@ export class AutoResumeScheduler {
   }
 
   private pausedState(p: PausedRecord): AutoResumePublicState {
-    return { resetAt: p.resetAt, fireAt: p.resetAt, resetSource: p.resetSource, paused: true };
+    return { resetAt: p.resetAt, fireAt: p.resetAt, resetSource: p.resetSource, ...(p.window ? { window: p.window } : {}), paused: true };
   }
 
   private arm(schedule: AutoResumeSchedule): void {
@@ -409,7 +425,7 @@ export class AutoResumeScheduler {
   }
 
   private publicState(schedule: AutoResumeSchedule): AutoResumePublicState {
-    return { resetAt: schedule.resetAt, fireAt: schedule.fireAt, resetSource: schedule.resetSource };
+    return { resetAt: schedule.resetAt, fireAt: schedule.fireAt, resetSource: schedule.resetSource, ...(schedule.window ? { window: schedule.window } : {}) };
   }
 
   private logFields(s: AutoResumeHit): Record<string, unknown> {

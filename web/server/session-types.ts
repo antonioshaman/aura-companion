@@ -1,7 +1,7 @@
 // Types for the WebSocket bridge between Claude Code CLI and the browser
 
 import type { SessionPhase } from "./session-state-machine.js";
-import type { TurnFailure } from "./auth-status/auth-types.js";
+import type { TurnFailure, UsageWindow } from "./auth-status/auth-types.js";
 
 // ─── CLI Message Types (NDJSON from Claude Code CLI) ──────────────────────────
 
@@ -949,6 +949,8 @@ export interface SessionState {
     /** Epoch ms when the continuation prompt will be sent. */
     fireAt: number;
     resetSource: "rate_limit_event" | "codex_rate_limits" | "resets_in_seconds" | "text" | "text_no_zone" | "fallback";
+    /** Which allowance was hit (LLM auth task 13): facts, the banner's visibility is computed. */
+    window?: UsageWindow;
     /**
      * Auto-resume paused: the last two resumes immediately re-hit a limit, so
      * Aura stopped injecting until the user acts (banner: "лимит всё ещё

@@ -60,6 +60,7 @@ import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
 import {
+  claudeLimitWindow,
   parseClaudeOverageInfo,
   parseClaudeRateLimitEvent,
   resolveClaudeUsageLimit,
@@ -1557,6 +1558,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       resetAt: resolved.resetAt,
       resetSource: resolved.resetSource,
       limitType: resolved.limitType,
+      window: claudeLimitWindow(resolved.limitType, this.turnRateLimit?.isUsingOverage === true, text),
     });
   }
 
@@ -1598,8 +1600,10 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private handleResultMessage(msg: CLIResultMessage): void {
-    this.maybeEmitTurnFailure(msg);
+    // Usage limit first: it reads the turn's rate-limit facts that the
+    // turn-failure classifier consumes (and resets) right after.
     this.maybeEmitUsageLimit(msg);
+    this.maybeEmitTurnFailure(msg);
     // Council Mode auto-wake: `result` is the documented per-turn
     // terminator in the Claude Code NDJSON protocol. When we see one
     // and the observer was mid-flight from an auto-wake, flip back to
