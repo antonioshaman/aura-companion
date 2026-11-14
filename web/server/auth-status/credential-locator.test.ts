@@ -100,6 +100,19 @@ describe("locateCodexAuth", () => {
     expect(JSON.stringify(loc)).not.toContain(SYNTH_ACCESS);
   });
 
+  it("extracts expiry, email and plan from JWT claims without exposing tokens", () => {
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const jwt = (claims: object) => `${b64({ alg: "none" })}.${b64(claims)}.sig`;
+    const access = jwt({ exp: 1_800_000_000 });
+    const id = jwt({ email: "synthetic@example.invalid", "https://api.openai.com/auth": { chatgpt_plan_type: "plus" } });
+    writeCodex({ auth_mode: "chatgpt", tokens: { access_token: access, id_token: id } });
+    const loc = locateCodexAuth(env())!;
+    expect(loc.accessTokenExpiresAt).toBe(1_800_000_000_000);
+    expect(loc.email).toBe("synthetic@example.invalid");
+    expect(loc.planType).toBe("plus");
+    expect(JSON.stringify(loc)).not.toContain(access);
+  });
+
   it("classifies an API-key login", () => {
     writeCodex({ OPENAI_API_KEY: "sk-synthetic-not-real", tokens: null });
     expect(locateCodexAuth(env())!.authMode).toBe("api_key");

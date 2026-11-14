@@ -65,9 +65,27 @@ export interface CodexAuthLocation {
   authMode: CodexAuthMode;
   /** Epoch ms of the CLI's last token refresh (`last_refresh`), null when absent/unparsable. */
   lastRefreshAt: number | null;
+  /** Epoch ms from the access-token JWT `exp` claim; null when not a decodable JWT. */
+  accessTokenExpiresAt: number | null;
+  /** Allowlisted id-token claims (account identity, not secrets). */
+  email: string | null;
+  planType: string | null;
 }
 
-function statMeta(path: string): CredentialFileMeta | null {
+/** Decode a JWT payload WITHOUT verifying it — only for allowlisted metadata claims. */
+function jwtClaims(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const json: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+    return json && typeof json === "object" && !Array.isArray(json) ? (json as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function statMeta(path: string): CredentialFileMeta | null {
   try {
     const st = statSync(path);
     if (!st.isFile()) return null;
@@ -158,7 +176,20 @@ export function locateCodexAuth(env: NodeJS.ProcessEnv = process.env): CodexAuth
     }
   }
   const lastRefresh = typeof parsed?.last_refresh === "string" ? Date.parse(parsed.last_refresh) : NaN;
-  return { meta, authMode, lastRefreshAt: Number.isFinite(lastRefresh) ? lastRefresh : null };
+  const tokens = parsed?.tokens && typeof parsed.tokens === "object" ? (parsed.tokens as Record<string, unknown>) : null;
+  const accessClaims = jwtClaims(tokens?.access_token);
+  const idClaims = jwtClaims(tokens?.id_token);
+  const exp = numberOrNull(accessClaims?.exp);
+  const openaiAuth = idClaims?.["https://api.openai.com/auth"];
+  const plan = openaiAuth && typeof openaiAuth === "object" ? (openaiAuth as Record<string, unknown>).chatgpt_plan_type : null;
+  return {
+    meta,
+    authMode,
+    lastRefreshAt: Number.isFinite(lastRefresh) ? lastRefresh : null,
+    accessTokenExpiresAt: exp === null ? null : exp * 1000,
+    email: typeof idClaims?.email === "string" && idClaims.email ? idClaims.email : null,
+    planType: typeof plan === "string" && plan ? plan : null,
+  };
 }
 
 /** The ONLY token-bearing shape this module returns; see `readClaudeOAuthSecret`. */
