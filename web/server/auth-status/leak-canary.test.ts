@@ -283,7 +283,9 @@ describe("leak canary: turn failures whose provider text echoes a token", () => 
     );
     const frames = errorFrames(messages);
     expect(frames.map((f) => f.turnFailure!.kind)).toEqual(["auth_rejected"]);
-    expectNoMarker("Claude turn-failure browser frame", JSON.stringify(frames));
+    // Every browser-bound frame, not only the classified error: the
+    // synthetic assistant frame and the result echo the same text.
+    expectNoMarker("Claude browser frames", JSON.stringify(messages));
     expectNoMarker("Claude recording", readFileSync(rec.filePath, "utf-8"));
   });
 
@@ -304,7 +306,7 @@ describe("leak canary: turn failures whose provider text echoes a token", () => 
     await new Promise((r) => setTimeout(r, 30));
     const frames = errorFrames(messages);
     expect(frames.map((f) => f.turnFailure!.kind)).toEqual(["auth_rejected"]);
-    expectNoMarker("Codex turn-failure browser frame", JSON.stringify(frames));
+    expectNoMarker("Codex browser frames", JSON.stringify(messages));
     expectNoMarker("Codex recording", readFileSync(rec.filePath, "utf-8"));
   });
 

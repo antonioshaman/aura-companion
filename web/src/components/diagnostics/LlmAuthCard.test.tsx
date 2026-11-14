@@ -147,4 +147,27 @@ describe("LlmAuthCard", () => {
     await waitFor(() => expect(screen.getByText("Claude: no problems found")).toBeInTheDocument());
     expect(mocks.llmAuthDoctorRecheck).toHaveBeenCalledTimes(1);
   });
+
+  // Observer review 200: the mount-time GET may answer AFTER a Check/Run
+  // doctor POST. The late (empty-cache) GET must not overwrite the fresh result.
+  it("a late mount-time GET does not overwrite a newer Check / Run doctor result", async () => {
+    let resolveStatus!: (v: unknown) => void;
+    let resolveDoctor!: (v: unknown) => void;
+    mocks.llmAuthStatus.mockReturnValue(new Promise((r) => { resolveStatus = r; }));
+    mocks.llmAuthDoctor.mockReturnValue(new Promise((r) => { resolveDoctor = r; }));
+    mocks.llmAuthRecheck.mockResolvedValue({ status: 200, body: { status: statusSnapshot() } });
+    mocks.llmAuthDoctorRecheck.mockResolvedValue({ status: 200, body: { report: doctorReport(false) } });
+    render(<LlmAuthCard />);
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    expect(await screen.findByText("Claude: working")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Run doctor" }));
+    expect(await screen.findByText("Claude: no problems found")).toBeInTheDocument();
+    resolveStatus({ status: null });
+    resolveDoctor({ report: null });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("Claude: working")).toBeInTheDocument();
+    expect(screen.getByText("Claude: no problems found")).toBeInTheDocument();
+    expect(screen.queryByText(/Not checked yet/)).toBeNull();
+    expect(screen.queryByText(/No doctor report yet/)).toBeNull();
+  });
 });

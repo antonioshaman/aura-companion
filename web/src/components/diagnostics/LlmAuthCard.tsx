@@ -244,16 +244,23 @@ export function LlmAuthCard() {
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const mounted = useRef(true);
+  // Every request takes a number; only the latest one per source may write.
+  // A slow mount-time GET (empty cache) must not overwrite a newer Check /
+  // Run doctor result (observer review 200).
+  const seq = useRef({ status: 0, doctor: 0 });
 
   useEffect(() => {
     mounted.current = true;
+    const statusReq = ++seq.current.status;
+    const doctorReq = ++seq.current.doctor;
+    const live = (src: "status" | "doctor", req: number) => mounted.current && seq.current[src] === req;
     api.llmAuthStatus().then(
-      (r) => mounted.current && setStatus({ tag: "ready", data: r.status }),
-      (e) => mounted.current && setStatus({ tag: "failed", message: errText(e) }),
+      (r) => live("status", statusReq) && setStatus({ tag: "ready", data: r.status }),
+      (e) => live("status", statusReq) && setStatus({ tag: "failed", message: errText(e) }),
     );
     api.llmAuthDoctor().then(
-      (r) => mounted.current && setDoctor({ tag: "ready", data: r.report }),
-      (e) => mounted.current && setDoctor({ tag: "failed", message: errText(e) }),
+      (r) => live("doctor", doctorReq) && setDoctor({ tag: "ready", data: r.report }),
+      (e) => live("doctor", doctorReq) && setDoctor({ tag: "failed", message: errText(e) }),
     );
     return () => {
       mounted.current = false;
@@ -263,10 +270,11 @@ export function LlmAuthCard() {
   const onCheck = useCallback(() => {
     setBusy("status");
     setNotice(null);
+    const req = ++seq.current.status;
     api
       .llmAuthRecheck()
       .then(({ status: code, body }) => {
-        if (!mounted.current) return;
+        if (!mounted.current || seq.current.status !== req) return;
         setNow(Date.now());
         if (code === 200 || code === 429) {
           if (body.status !== undefined) setStatus({ tag: "ready", data: body.status ?? null });
@@ -282,10 +290,11 @@ export function LlmAuthCard() {
   const onDoctor = useCallback(() => {
     setBusy("doctor");
     setNotice(null);
+    const req = ++seq.current.doctor;
     api
       .llmAuthDoctorRecheck()
       .then(({ status: code, body }) => {
-        if (!mounted.current) return;
+        if (!mounted.current || seq.current.doctor !== req) return;
         setNow(Date.now());
         if (code === 200 || code === 429) {
           if (body.report !== undefined) setDoctor({ tag: "ready", data: body.report ?? null });
