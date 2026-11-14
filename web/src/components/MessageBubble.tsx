@@ -7,10 +7,24 @@ import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ObserverFindingsBlock, parseObserverFindingsMessage } from "./chat/ObserverFindingsBlock.js";
 import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
 import { GuardDenialCard } from "./GuardDenialBanner.js";
+import { TurnFailureCard, TurnFailureNotice } from "./chat/TurnFailureCard.js";
 
-export function MessageBubble({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
+export function MessageBubble({
+  message,
+  isObserverSession = false,
+  sessionId,
+}: {
+  message: ChatMessage;
+  isObserverSession?: boolean;
+  /** Needed by interactive system cards (turn-failure Retry / Restart). */
+  sessionId?: string;
+}) {
   if (message.role === "system" && message.guardDenial) {
     return <GuardDenialCard denial={message.guardDenial} />;
+  }
+
+  if (message.role === "system" && message.systemVariant === "turn-failure" && message.turnFailure) {
+    return sessionId ? <TurnFailureNotice sessionId={sessionId} message={message} /> : <TurnFailureCard failure={message.turnFailure} />;
   }
 
   if (message.role === "system" && message.systemVariant === "resume-interrupted") {

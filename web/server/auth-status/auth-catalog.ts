@@ -10,8 +10,10 @@ import {
   type NotVerifiedReason,
   type ProviderAuthState,
   type ProviderId,
+  type TurnFailure,
   type TurnFailureKind,
   type UsageLimitsReason,
+  type UsageWindow,
 } from "./auth-types.js";
 
 /**
@@ -235,6 +237,52 @@ export function describeTurnFailure(kind: TurnFailureKind, provider: ProviderId)
       };
     default:
       return assertNever(kind);
+  }
+}
+
+export function usageWindowLabel(window: UsageWindow): string {
+  switch (window) {
+    case "five_hour": return "5-hour window";
+    case "seven_day": return "7-day window";
+    case "extra_usage": return "extra usage";
+    case "unknown_window": return "unknown window";
+    default: return assertNever(window);
+  }
+}
+
+/**
+ * The secondary lines of a turn-failure card (task 14): which window and when
+ * it resets, the likely cause, an uncompared credential generation, the
+ * required CLI version. `formatTime` renders an epoch-ms instant (the UI uses
+ * the browser locale, the CLI ISO). Empty when the kind carries no facts.
+ */
+export function turnFailureFacts(failure: TurnFailure, formatTime: (ms: number) => string): string[] {
+  const facts: string[] = [];
+  if (failure.window) {
+    const reset = failure.resetAt == null ? "reset time unknown" : `resets ${formatTime(failure.resetAt)}`;
+    facts.push(`Window: ${usageWindowLabel(failure.window)} · ${reset}`);
+  }
+  if (failure.likelyCause === "model_outside_plan") facts.push("Likely cause: the selected model is not included in the plan.");
+  if (failure.credentialsCompared === false) facts.push("Could not compare this session's credentials with the main sign-in.");
+  if (failure.kind === "cli_outdated") {
+    facts.push(`Required CLI version: ${failure.requiredVersion ? `${failure.requiredVersion} or newer` : "unknown"}`);
+  }
+  return facts;
+}
+
+/**
+ * The limits panel before any window data exists. Claude's panel normally
+ * carries a `UsageLimitsReason` instead; Codex reports its windows only with a
+ * turn's `account/rateLimits/*`, so a fresh Codex session has none yet.
+ */
+export function describeLimitsPending(provider: ProviderId): CatalogEntry {
+  switch (provider) {
+    case "claude":
+      return { title: "No data yet", detail: "Waiting for the first usage answer from Claude.", action: { kind: "none" } };
+    case "codex":
+      return { title: "No data yet", detail: "Codex reports its usage windows with its first response in this session.", action: { kind: "none" } };
+    default:
+      return assertNever(provider);
   }
 }
 

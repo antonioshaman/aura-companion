@@ -1022,6 +1022,21 @@ export type {
   UpstreamStatus,
 } from "../server/diagnostics/diagnostics-types.js";
 import type { Decision, DiagnosticsOverview, KbAnalysisStatus } from "../server/diagnostics/diagnostics-types.js";
+import type { DoctorReport } from "../server/auth-status/auth-types.js";
+import type { StatusSnapshot } from "../server/auth-status/status-core.js";
+
+/** `POST /api/llm-auth/recheck`: 200 `{status}` or 429 `{error:"too_soon", retryAfterMs, status}`. */
+export interface LlmAuthRecheckResponse {
+  status?: StatusSnapshot | null;
+  error?: string;
+  retryAfterMs?: number;
+}
+/** `POST /api/llm-auth/doctor/recheck`: same shape as the status recheck, with `report`. */
+export interface LlmAuthDoctorRecheckResponse {
+  report?: DoctorReport | null;
+  error?: string;
+  retryAfterMs?: number;
+}
 
 export interface KbAnalysisRunResponse {
   runId?: string;
@@ -1258,6 +1273,13 @@ export const api = {
     },
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
+
+  // LLM auth status + doctor (phase 1 task 8/14). GET = server cache only
+  // (null before the first check); POST runs a check, rate-limited (429 carries data).
+  llmAuthStatus: () => get<{ status: StatusSnapshot | null }>("/llm-auth/status"),
+  llmAuthRecheck: () => postWithStatus<LlmAuthRecheckResponse>("/llm-auth/recheck"),
+  llmAuthDoctor: () => get<{ report: DoctorReport | null }>("/llm-auth/doctor"),
+  llmAuthDoctorRecheck: () => postWithStatus<LlmAuthDoctorRecheckResponse>("/llm-auth/doctor/recheck"),
 
   // Sweep orphans — preview is read-only; execute must echo the preview token.
   sweepPreview: () => get<SweepPreview>("/sweep/preview"),

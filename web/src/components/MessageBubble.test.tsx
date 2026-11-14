@@ -90,6 +90,21 @@ describe("MessageBubble - result error variants", () => {
     expect(text.className).toContain("text-cc-error");
   });
 
+  // LLM auth task 14: a classified turn failure is a card with a title and
+  // one action, not the plain "system line" it was in phase 1c. Without a
+  // sessionId (Playground) the presentational card renders, no buttons wired.
+  it("renders a turn-failure message as the turn-failure card, not a system line", () => {
+    const msg = makeMessage({
+      role: "system",
+      content: "Claude rejected the sign-in: 401",
+      systemVariant: "turn-failure",
+      turnFailure: { kind: "auth_rejected", provider: "claude", providerMessage: "401 Unauthorized" },
+    });
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByTestId("turn-failure-card").getAttribute("data-kind")).toBe("auth_rejected");
+    expect(screen.queryByText("Claude rejected the sign-in: 401")).toBeNull();
+  });
+
   it("renders the --resume bookkeeping frame as a muted, collapsed note (not an error)", () => {
     const msg = makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" });
     const { container } = render(<MessageBubble message={msg} />);

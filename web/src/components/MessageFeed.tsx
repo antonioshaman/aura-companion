@@ -410,7 +410,7 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity, isObserverSession = false, probeIds }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean; probeIds?: ReadonlySet<string> }) {
+function FeedEntries({ entries, toolActivity, isObserverSession = false, probeIds, sessionId }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean; probeIds?: ReadonlySet<string>; sessionId?: string }) {
   return (
     <>
       {entries.map((entry, i) => {
@@ -427,7 +427,7 @@ function FeedEntries({ entries, toolActivity, isObserverSession = false, probeId
             const only = entry.items[0];
             return (
               <div key={only.id}>
-                <MessageBubble message={only} isObserverSession={isObserverSession} />
+                <MessageBubble message={only} isObserverSession={isObserverSession} sessionId={sessionId} />
               </div>
             );
           }
@@ -457,7 +457,7 @@ function FeedEntries({ entries, toolActivity, isObserverSession = false, probeId
         const allComplete = matchingActivity.length > 0 && matchingActivity.every((a) => a.completedAt);
         return (
           <div key={msg.id}>
-            <MessageBubble message={msg} isObserverSession={isObserverSession} />
+            <MessageBubble message={msg} isObserverSession={isObserverSession} sessionId={sessionId} />
             {allComplete && <ToolTurnSummary entries={matchingActivity} />}
           </div>
         );
@@ -973,7 +973,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} probeIds={probeIds} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} probeIds={probeIds} sessionId={sessionId} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (
