@@ -111,6 +111,26 @@ describe("StatusCore — acceptance", () => {
   });
 });
 
+describe("StatusCore — lastSuccessAt without persistence (observer WARN, checkpoint 197)", () => {
+  // The in-process history must not depend on the disk write succeeding.
+  it.each([
+    ["persist=false", { persist: false }],
+    ["a failing atomic write", { writeAtomic: () => { throw new Error("EACCES"); } }],
+  ])("working → no_network keeps lastSuccessAt with %s", async (_label, over) => {
+    const { core, probes } = makeCore({ ...(over as Partial<StatusCoreDeps>), lastCheckPath: join(dir, "absent", "x.json") });
+    await core.get();
+    now += STATUS_TTL_MS + 1;
+    probes.claude.mockResolvedValueOnce(status("claude", "no_network"));
+    expect((await core.get()).providers.claude).toMatchObject({ state: "no_network", lastSuccessAt: T0 });
+  });
+
+  it("a working probe's own lastSuccessAt (provider answer time) wins over checkedAt", async () => {
+    const { core, probes } = makeCore();
+    probes.codex.mockResolvedValueOnce(status("codex", "working", { lastSuccessAt: T0 - 60_000 }));
+    expect((await core.get()).providers.codex.lastSuccessAt).toBe(T0 - 60_000);
+  });
+});
+
 describe("StatusCore — cost bounds", () => {
   it("serves the cache within the TTL and recomputes after it", async () => {
     const { core, probes } = makeCore();

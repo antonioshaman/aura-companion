@@ -9,7 +9,7 @@ import type { ProviderId } from "./auth-types.js";
 import { requestClaudeUsage } from "./claude-usage-request.js";
 import { locateClaudeOAuth, locateCodexAuth, readClaudeOAuthSecret, statMeta } from "./credential-locator.js";
 import { runBoundedProbe } from "./probe-runner.js";
-import { probeClaudeAuth, probeCodexAuth, type ProbeEvent, type ProviderProbeDeps } from "./provider-probes.js";
+import { probeClaudeAuth, probeCodexAuth, type CodexProviderEvidence, type ProbeEvent, type ProviderProbeDeps } from "./provider-probes.js";
 import { LAST_CHECK_FILE, StatusCore, resolveServiceIdentity, type CallerInfo } from "./status-core.js";
 
 /**
@@ -60,8 +60,8 @@ function logProbeEvent(event: ProbeEvent): void {
 
 export interface CreateAuthStatusCoreOptions {
   mode: "service" | "local_cli";
-  /** Live-session evidence for Codex (`account/rateLimits/read`), service mode only. */
-  codexRateLimitsReadAt?: () => number | null;
+  /** Live-session evidence for Codex (`account/rateLimits/read`), service mode only (wired in 1b/1c). */
+  codexProviderEvidence?: () => CodexProviderEvidence | null;
   unitTexts?: readonly string[];
   companionHome?: string;
 }
@@ -93,7 +93,7 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
       readClaudeSecret: (e) => readClaudeOAuthSecret(e),
       requestClaudeUsage: (token) => requestClaudeUsage(token),
       statMeta,
-      codexRateLimitsReadAt: opts.codexRateLimitsReadAt,
+      codexProviderEvidence: opts.codexProviderEvidence,
       onEvent: logProbeEvent,
     };
   };

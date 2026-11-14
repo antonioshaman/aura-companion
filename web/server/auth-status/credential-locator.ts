@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -70,6 +71,17 @@ export interface CodexAuthLocation {
   /** Allowlisted id-token claims (account identity, not secrets). */
   email: string | null;
   planType: string | null;
+  /**
+   * Generation fingerprint: first 16 hex of sha256(access_token). Changes on
+   * every refresh / re-login, so it tells "the credentials a check used" apart
+   * from the current primary ones without revealing the token.
+   */
+  credentialFingerprint: string | null;
+}
+
+/** First 16 hex chars of sha256 — the only token-derived value allowed out (spec: hash prefixes). */
+export function credentialFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
 }
 
 /** Decode a JWT payload WITHOUT verifying it — only for allowlisted metadata claims. */
@@ -189,6 +201,8 @@ export function locateCodexAuth(env: NodeJS.ProcessEnv = process.env): CodexAuth
     accessTokenExpiresAt: exp === null ? null : exp * 1000,
     email: typeof idClaims?.email === "string" && idClaims.email ? idClaims.email : null,
     planType: typeof plan === "string" && plan ? plan : null,
+    credentialFingerprint:
+      typeof tokens?.access_token === "string" && tokens.access_token ? credentialFingerprint(tokens.access_token) : null,
   };
 }
 

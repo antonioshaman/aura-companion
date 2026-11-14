@@ -39,7 +39,7 @@ const claudeLoc = (over: Partial<ClaudeOAuthLocation> = {}): ClaudeOAuthLocation
 
 const codexLoc = (over: Partial<CodexAuthLocation> = {}): CodexAuthLocation => ({
   meta: meta(), authMode: "chatgpt", lastRefreshAt: null, accessTokenExpiresAt: FRESH,
-  email: "codex@example.invalid", planType: "plus", ...over,
+  email: "codex@example.invalid", planType: "plus", credentialFingerprint: "fp-primary", ...over,
 });
 
 const exited = (stdout: string, exitCode = 0, stderr = ""): BoundedProbeResult => ({
@@ -218,12 +218,14 @@ describe("probeCodexAuth", () => {
     vi.fn(async (_p: string, args: readonly string[]): Promise<BoundedProbeResult> =>
       args[0] === "--version" ? exited("codex-cli 0.162.1") : status);
 
-  it("S1-AC1 (parity): working when a live app-server rate-limits read is recent", async () => {
+  it("S1-AC1 (parity): working when a recent rate-limits read used the primary credentials", async () => {
     const runProbe = codexRun(exited("", 0, "Logged in using ChatGPT"));
-    const { deps } = makeDeps({ runProbe, codexRateLimitsReadAt: () => NOW - 60_000 });
+    const { deps } = makeDeps({ runProbe, codexProviderEvidence: () => ({ checkedAt: NOW - 60_000, credentialFingerprint: "fp-primary" }) });
     const s = await probeCodexAuth(deps);
     expect(s).toMatchObject({
       provider: "codex", state: "working", verifiedBy: "provider",
+      // lastSuccessAt is when the provider answered, not when we looked (observer STOP, checkpoint 197).
+      lastSuccessAt: NOW - 60_000, checkedAt: NOW,
       account: { known: true, value: "codex@example.invalid" },
       plan: { known: true, value: "plus" },
       method: { known: true, value: "subscription" },
@@ -237,9 +239,28 @@ describe("probeCodexAuth", () => {
     expect(await probeCodexAuth(deps)).toMatchObject({ state: "not_verified", reason: "no_provider_check", method: { known: true, value: "subscription" } });
   });
 
-  it("EC-38: a future-dated rate-limits read is not evidence", async () => {
-    const { deps } = makeDeps({ runProbe: codexRun(exited("", 0, "Logged in using ChatGPT")), codexRateLimitsReadAt: () => NOW + 60_000 });
-    expect((await probeCodexAuth(deps)).state).toBe("not_verified");
+  it("a session on another credential generation does not vouch for the primary sign-in (observer STOP, checkpoint 197)", async () => {
+    // Incident: each Codex session keeps its own copy; a live session on an
+    // old-but-working copy must not mark a revoked/renewed primary as working.
+    const run = () => codexRun(exited("", 0, "Logged in using ChatGPT"));
+    const other = makeDeps({ runProbe: run(), codexProviderEvidence: () => ({ checkedAt: NOW - 1000, credentialFingerprint: "fp-session-copy" }) });
+    expect(await probeCodexAuth(other.deps)).toMatchObject({ state: "not_verified", reason: "no_provider_check", lastSuccessAt: null });
+    const noPrimaryFp = makeDeps({
+      runProbe: run(),
+      locateCodex: () => codexLoc({ credentialFingerprint: null }),
+      codexProviderEvidence: () => ({ checkedAt: NOW - 1000, credentialFingerprint: "fp-primary" }),
+    });
+    expect((await probeCodexAuth(noPrimaryFp.deps)).state).toBe("not_verified");
+  });
+
+  it("EC-38: stale or future-dated evidence is not evidence", async () => {
+    for (const checkedAt of [NOW + 60_000, NOW - 6 * 60_000]) {
+      const { deps } = makeDeps({
+        runProbe: codexRun(exited("", 0, "Logged in using ChatGPT")),
+        codexProviderEvidence: () => ({ checkedAt, credentialFingerprint: "fp-primary" }),
+      });
+      expect((await probeCodexAuth(deps)).state).toBe("not_verified");
+    }
   });
 
   it("S1-AC4 (parity): unproven codex version → login status never spawned", async () => {
@@ -258,7 +279,7 @@ describe("probeCodexAuth", () => {
   it("an API-key auth.json has no expiring token and is not blocked by the expiry guard", async () => {
     const { deps } = makeDeps({
       runProbe: codexRun(exited("", 0, "Logged in using an API key - sk-***")),
-      locateCodex: () => codexLoc({ authMode: "api_key", accessTokenExpiresAt: null, email: null, planType: null }),
+      locateCodex: () => codexLoc({ authMode: "api_key", accessTokenExpiresAt: null, email: null, planType: null, credentialFingerprint: null }),
     });
     expect(await probeCodexAuth(deps)).toMatchObject({
       reason: "no_provider_check", method: { known: true, value: "api_key" }, plan: { known: false },

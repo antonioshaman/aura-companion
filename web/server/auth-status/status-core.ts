@@ -221,6 +221,8 @@ export class StatusCore {
   private inFlight: Promise<StatusSnapshot> | null = null;
   private lastForcedAt: number | null = null;
   private stored: LastCheckFile | null | undefined;
+  /** In-memory last success per provider; independent of whether persistence works. */
+  private lastSuccess: Partial<Record<ProviderId, number>> = {};
 
   constructor(private readonly deps: StatusCoreDeps) {}
 
@@ -285,9 +287,11 @@ export class StatusCore {
     const stored = this.lastStored();
     const providers = {} as Record<ProviderId, ProviderAuthStatus>;
     for (const status of results) {
-      const prior = stored?.providers[status.provider]?.lastSuccessAt ?? null;
-      // S1-AC3: a later failure keeps the last success time; a success advances it.
-      const lastSuccessAt = status.state === "working" ? status.checkedAt : prior;
+      const prior = this.lastSuccess[status.provider] ?? stored?.providers[status.provider]?.lastSuccessAt ?? null;
+      // S1-AC3: a later failure keeps the last success time; a success advances it
+      // to when the provider actually accepted the credentials.
+      const lastSuccessAt = status.state === "working" ? status.lastSuccessAt ?? status.checkedAt : prior;
+      if (lastSuccessAt !== null) this.lastSuccess[status.provider] = lastSuccessAt;
       providers[status.provider] = { ...status, lastSuccessAt };
     }
     const snapshot: StatusSnapshot = { providers, computedBy: this.deps.computedBy };
@@ -305,7 +309,8 @@ export class StatusCore {
       (this.deps.writeAtomic ?? defaultWriteAtomic)(this.deps.lastCheckPath, file);
       this.stored = file;
     } catch {
-      // Persistence is best-effort: a failed write only loses "last success" across restarts.
+      // Persistence is best-effort: a failed write only loses "last success" across restarts
+      // (the in-memory `lastSuccess` keeps it for this process).
     }
   }
 }

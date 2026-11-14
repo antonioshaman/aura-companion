@@ -75,6 +75,13 @@ export interface ProbeEvent {
   cliVersion?: string;
 }
 
+export interface CodexProviderEvidence {
+  /** Epoch ms the provider answered. */
+  checkedAt: number;
+  /** `credentialFingerprint()` of the access token the session used. */
+  credentialFingerprint: string;
+}
+
 export interface ProviderProbeDeps {
   env: NodeJS.ProcessEnv;
   settings: { claudeCodeOAuthToken: string; anthropicApiKey: string; openaiApiKey: string };
@@ -88,10 +95,12 @@ export interface ProviderProbeDeps {
   statMeta: (path: string) => CredentialFileMeta | null;
   /**
    * Codex has no token-free provider endpoint we call directly; its app-server
-   * returns `account/rateLimits/read` inside live sessions. Epoch ms of the
-   * latest successful read across sessions, or null.
+   * returns `account/rateLimits/read` inside live sessions. Latest successful
+   * read, with the fingerprint of the credentials that session used. It only
+   * counts when that fingerprint equals the PRIMARY auth.json's — a session
+   * running on its own (older) copy must not vouch for the main sign-in.
    */
-  codexRateLimitsReadAt?: () => number | null;
+  codexProviderEvidence?: () => CodexProviderEvidence | null;
   provenVersions?: Readonly<Record<ProviderId, readonly string[]>>;
   onEvent?: (event: ProbeEvent) => void;
 }
@@ -129,6 +138,8 @@ function result(
   reason: NotVerifiedReason | null,
   checkedAt: number,
   verifiedBy: "provider" | "local",
+  /** When the provider actually accepted the credentials, if earlier than `checkedAt`. */
+  successAt: number = checkedAt,
 ): ProviderAuthStatus {
   return {
     provider: seed.provider,
@@ -138,7 +149,7 @@ function result(
     plan: seed.plan,
     method: seed.method,
     tokenExpiresAt: seed.tokenExpiresAt,
-    lastSuccessAt: state === "working" ? checkedAt : null,
+    lastSuccessAt: state === "working" ? successAt : null,
     checkedAt,
     verifiedBy,
     cli: { path: seed.cliPath, version: seed.cliVersion },
@@ -325,13 +336,21 @@ export async function probeCodexAuth(deps: ProviderProbeDeps): Promise<ProviderA
   if (!login || login === "not_logged_in") return skip(seed, "probe_inconclusive", deps);
   seed.method = knownField(login === "chatgpt" ? "subscription" : "api_key");
 
-  // Provider evidence: a recent app-server `account/rateLimits/read` from a
-  // live session. Without it Codex stays honestly `not_verified`.
-  const readAt = deps.codexRateLimitsReadAt?.() ?? null;
+  // Provider evidence: a recent app-server `account/rateLimits/read` made
+  // with the SAME credential generation as the primary auth.json. Anything
+  // else (no evidence, other generation, stale, future-dated) stays honestly
+  // `not_verified`.
+  const evidence = deps.codexProviderEvidence?.() ?? null;
   const now = deps.now();
-  // EC-38 (anomaly form): a future-dated read is not evidence, so clock skew can never keep it fresh.
-  if (readAt !== null && readAt <= now && now - readAt <= STATUS_TTL_FOR_EVIDENCE_MS) {
-    return result(seed, "working", null, now, "provider");
+  if (
+    evidence !== null
+    && loc.credentialFingerprint !== null
+    && evidence.credentialFingerprint === loc.credentialFingerprint
+    // EC-38 (anomaly form): a future-dated read is not evidence, so clock skew can never keep it fresh.
+    && evidence.checkedAt <= now
+    && now - evidence.checkedAt <= STATUS_TTL_FOR_EVIDENCE_MS
+  ) {
+    return result(seed, "working", null, now, "provider", evidence.checkedAt);
   }
   return result(seed, "not_verified", "no_provider_check", now, "local");
 }

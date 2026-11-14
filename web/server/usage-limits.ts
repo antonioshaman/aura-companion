@@ -82,13 +82,27 @@ export async function fetchUsageLimits(token: string): Promise<UsageLimits | nul
   return "limits" in result ? result.limits : null;
 }
 
-/** API-key sign-ins have no subscription windows (S4-AC2). */
-function isApiKeyLogin(env: NodeJS.ProcessEnv, settings: Pick<CompanionSettings, "anthropicApiKey">): boolean {
-  return hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY") || settings.anthropicApiKey.trim().length > 0;
+/**
+ * Is an API key the EFFECTIVE Claude sign-in? Mirrors the CLI / spawn
+ * precedence (provider-auth-env.ts, host-auth-status.ts): an `ANTHROPIC_API_KEY`
+ * env var beats every OAuth source; a companion-managed API key beats the OAuth
+ * file but loses to a companion-managed OAuth token. Checked BEFORE the OAuth
+ * file, so a stale leftover file never masks an active API-key login (S4-AC2).
+ */
+function isApiKeyLogin(
+  env: NodeJS.ProcessEnv,
+  settings: Pick<CompanionSettings, "anthropicApiKey" | "claudeCodeOAuthToken">,
+): boolean {
+  if (hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY")) return true;
+  return settings.anthropicApiKey.trim().length > 0 && !settings.claudeCodeOAuthToken.trim();
 }
 
 export async function getUsageLimits(
-  opts: { env?: NodeJS.ProcessEnv; settings?: Pick<CompanionSettings, "anthropicApiKey">; now?: number } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    settings?: Pick<CompanionSettings, "anthropicApiKey" | "claudeCodeOAuthToken">;
+    now?: number;
+  } = {},
 ): Promise<UsageLimits> {
   const empty = (reason: UsageLimitsReason): UsageLimits => ({
     five_hour: null,
@@ -104,10 +118,14 @@ export async function getUsageLimits(
     }
 
     const env = opts.env ?? process.env;
+    if (isApiKeyLogin(env, opts.settings ?? getSettings())) {
+      // Not an upstream failure: there are simply no subscription windows.
+      return empty("api_key_login");
+    }
     const secret = readClaudeOAuthSecret(env);
     if (!secret) {
       usageLimitsUpstream.recordFailure("no-credentials");
-      return empty(isApiKeyLogin(env, opts.settings ?? getSettings()) ? "api_key_login" : "no_credentials");
+      return empty("no_credentials");
     }
     // Only a token that is not expired locally is used; never refreshed here.
     if (secret.expiresAt === null || now >= secret.expiresAt - EXPIRY_BUFFER_MS) {

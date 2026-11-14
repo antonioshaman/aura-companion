@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CLAUDE_CREDENTIAL_FILE_NAMES,
   codexAuthPath,
+  credentialFingerprint,
   locateClaudeOAuth,
   locateCodexAuth,
   readClaudeOAuthSecret,
@@ -110,6 +111,9 @@ describe("locateCodexAuth", () => {
     expect(loc.accessTokenExpiresAt).toBe(1_800_000_000_000);
     expect(loc.email).toBe("synthetic@example.invalid");
     expect(loc.planType).toBe("plus");
+    // Generation fingerprint: a 16-hex sha256 prefix, stable for the same token.
+    expect(loc.credentialFingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(loc.credentialFingerprint).toBe(credentialFingerprint(access));
     expect(JSON.stringify(loc)).not.toContain(access);
   });
 

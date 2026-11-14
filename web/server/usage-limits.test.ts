@@ -16,7 +16,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Settings are mocked so the API-key branch never depends on the real ~/.companion.
-const mockSettings = vi.hoisted(() => ({ anthropicApiKey: "" }));
+const mockSettings = vi.hoisted(() => ({ anthropicApiKey: "", claudeCodeOAuthToken: "" }));
 vi.mock("./settings-manager.js", () => ({ getSettings: () => ({ ...mockSettings }) }));
 
 // Mock global fetch at the module level (persists across tests)
@@ -391,8 +391,25 @@ describe("getUsageLimits", () => {
       throw new Error("no keychain");
     });
     expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
-    expect(await darwinMod.getUsageLimits({ env: {}, settings: { anthropicApiKey: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    expect(await darwinMod.getUsageLimits({ env: {}, settings: { anthropicApiKey: "sk-synthetic", claudeCodeOAuthToken: "" } })).toEqual(withReason("api_key_login"));
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("S4-AC2: an active API key wins over a leftover OAuth file (observer STOP, checkpoint 197)", async () => {
+    // A stale OAuth file next to an active ANTHROPIC_API_KEY must not be used:
+    // neither its (old subscription's) windows nor its expired-token reason.
+    vi.resetModules();
+    mockFetch.mockReset();
+    const darwinMod = await import("./usage-limits.js");
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN, { expired: true }));
+    expect(await darwinMod.getUsageLimits({ env: { ANTHROPIC_API_KEY: "sk-synthetic" } })).toEqual(withReason("api_key_login"));
+    expect(mockFetch).not.toHaveBeenCalled();
+    // A companion-managed OAuth token outranks a companion-managed API key (CLI precedence).
+    mockExecSync.mockReturnValue(makeCredentialsJson(SAMPLE_TOKEN));
+    mockFetch.mockReturnValueOnce(makeFetchResponse(SAMPLE_LIMITS));
+    expect(await darwinMod.getUsageLimits({ env: {}, settings: { anthropicApiKey: "sk-synthetic", claudeCodeOAuthToken: "synthetic-oauth" } })).toEqual(SAMPLE_LIMITS);
   });
 
   it("S4-AC1: a rejected token reports auth_invalid and is not cached", async () => {
