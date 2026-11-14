@@ -65,6 +65,8 @@ describe("LlmAuthView", () => {
     expect(within(screen.getByTestId("llm-auth-status-claude")).getByText(/claude auth login/)).toBeInTheDocument();
     const codex = screen.getByTestId("llm-auth-status-codex");
     expect(within(codex).getByText("Codex: no connection")).toBeInTheDocument();
+    // Its retry action is the Check button, not a stray "Retry" line.
+    expect(within(codex).queryByText("Retry")).toBeNull();
     expect(within(codex).getByText(/1m ago/)).toBeInTheDocument();
   });
 

@@ -71,7 +71,8 @@ function findingFact(f: DoctorFinding): string {
 
 function ProviderStatus({ s, now }: { s: ProviderAuthStatus; now: number }) {
   const entry = describeAuthState(s.state, s.provider, s.reason);
-  const action = formatAction(entry.action);
+  // "retry" IS the card's Check button; repeating the bare word adds nothing.
+  const action = entry.action.kind === "retry" ? "" : formatAction(entry.action);
   const bad = s.state === "invalid" || s.state === "not_signed_in";
   return (
     <div className="space-y-1" data-testid={`llm-auth-status-${s.provider}`} data-state={s.state}>
