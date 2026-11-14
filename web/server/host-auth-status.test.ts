@@ -92,6 +92,26 @@ describe("getCodexAuthStatus", () => {
     expect(getCodexAuthStatus(env, NO_SETTINGS)).toEqual({ authState: "authorized", authMethod: "oauth" });
   });
 
+  // LLM auth follow-up (1c open question): codex 0.162.1 keeps a stored
+  // ChatGPT sign-in even when OPENAI_API_KEY is set (`codex doctor`: "auth
+  // mode chatgpt", `codex login status`: "Logged in using ChatGPT"), and
+  // Aura injects the settings key as that env var. So the badge must say
+  // "oauth" for that case, matching the provider status probe.
+  it("ChatGPT auth.json wins over an env or settings OpenAI key (oauth)", () => {
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "synthetic" } }));
+    const env = { HOME: home, OPENAI_API_KEY: "sk-oai" } as NodeJS.ProcessEnv;
+    expect(getCodexAuthStatus(env, NO_SETTINGS)).toEqual({ authState: "authorized", authMethod: "oauth" });
+    expect(getCodexAuthStatus({ HOME: home } as NodeJS.ProcessEnv, { ...NO_SETTINGS, openaiApiKey: "sk-oai" }))
+      .toEqual({ authState: "authorized", authMethod: "oauth" });
+  });
+
+  it("an API-key auth.json with no env/settings key → authorized (api_key)", () => {
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "synthetic" }));
+    expect(getCodexAuthStatus({ HOME: home } as NodeJS.ProcessEnv, NO_SETTINGS)).toEqual({ authState: "authorized", authMethod: "api_key" });
+  });
+
   it("nothing anywhere → unauthorized (Codex has no expired state)", () => {
     const env = { HOME: home } as NodeJS.ProcessEnv;
     expect(getCodexAuthStatus(env, NO_SETTINGS)).toEqual({ authState: "unauthorized" });
