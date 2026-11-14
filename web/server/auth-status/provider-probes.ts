@@ -8,6 +8,7 @@ import {
   type ProviderAuthState,
   type ProviderAuthStatus,
   type ProviderId,
+  type VerifiedBy,
 } from "./auth-types.js";
 import type { ClaudeUsageOutcome } from "./claude-usage-request.js";
 import type {
@@ -101,6 +102,8 @@ export interface ProviderProbeDeps {
    * running on its own (older) copy must not vouch for the main sign-in.
    */
   codexProviderEvidence?: () => CodexProviderEvidence | null;
+  /** Phase 2 D8: evidence from a just-completed official sign-in, bound to the token fingerprint. */
+  codexLoginEvidence?: () => CodexProviderEvidence | null;
   provenVersions?: Readonly<Record<ProviderId, readonly string[]>>;
   onEvent?: (event: ProbeEvent) => void;
 }
@@ -137,7 +140,7 @@ function result(
   state: ProviderAuthState,
   reason: NotVerifiedReason | null,
   checkedAt: number,
-  verifiedBy: "provider" | "local",
+  verifiedBy: VerifiedBy,
   /** When the provider actually accepted the credentials, if earlier than `checkedAt`. */
   successAt: number = checkedAt,
 ): ProviderAuthStatus {
@@ -357,6 +360,13 @@ export async function probeCodexAuth(deps: ProviderProbeDeps): Promise<ProviderA
     && now - evidence.checkedAt <= STATUS_TTL_FOR_EVIDENCE_MS
   ) {
     return result(seed, "working", null, now, "provider", evidence.checkedAt);
+  }
+  // D8: the official sign-in that wrote THIS file is the provider's acceptance.
+  // No age limit: it stays valid exactly as long as the file carries the token
+  // the sign-in produced (the local-expiry gate above still applies).
+  const signIn = deps.codexLoginEvidence?.() ?? null;
+  if (signIn !== null && loc.credentialFingerprint !== null && signIn.credentialFingerprint === loc.credentialFingerprint && signIn.checkedAt <= now) {
+    return result(seed, "working", null, now, "login", signIn.checkedAt);
   }
   return result(seed, "not_verified", "no_provider_check", now, "local");
 }

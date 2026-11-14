@@ -253,6 +253,20 @@ export class StatusCore {
     return { kind: "ok", snapshot: await this.compute() };
   }
 
+  /**
+   * A sign-in just replaced the credentials (phase 2 task 6): drop the cache
+   * and recompute now — NOT rate-limited like `recheck()` (the owner did not
+   * ask for a check; the old verdict is simply about other credentials). An
+   * in-flight computation started before the promotion is awaited first so
+   * its stale result cannot win (EC-41).
+   */
+  async noteCredentialsPromoted(): Promise<StatusSnapshot> {
+    this.cache = null;
+    if (this.inFlight) await this.inFlight.catch(() => undefined);
+    this.cache = null;
+    return this.compute();
+  }
+
   /** Last persisted result (for "last successful check" when nothing ran yet). */
   lastStored(): LastCheckFile | null {
     if (this.stored === undefined) {

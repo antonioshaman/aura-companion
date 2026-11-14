@@ -253,6 +253,19 @@ describe("probeCodexAuth", () => {
     expect((await probeCodexAuth(noPrimaryFp.deps)).state).toBe("not_verified");
   });
 
+  it("phase 2 D8: a just-completed official sign-in vouches for exactly the file it wrote (verifiedBy login)", async () => {
+    // Codex has no free provider probe; the device-auth exit is the provider's
+    // acceptance, bound to the promoted token's fingerprint. Another file
+    // (a session's rotated copy, or a later replacement) is not covered.
+    const run = () => codexRun(exited("", 0, "Logged in using ChatGPT"));
+    const same = makeDeps({ runProbe: run(), codexLoginEvidence: () => ({ checkedAt: NOW - 10 * 60_000, credentialFingerprint: "fp-primary" }) });
+    expect(await probeCodexAuth(same.deps)).toMatchObject({ state: "working", verifiedBy: "login", lastSuccessAt: NOW - 10 * 60_000 });
+    const other = makeDeps({ runProbe: run(), codexLoginEvidence: () => ({ checkedAt: NOW - 1000, credentialFingerprint: "fp-other" }) });
+    expect(await probeCodexAuth(other.deps)).toMatchObject({ state: "not_verified", verifiedBy: "local" });
+    const future = makeDeps({ runProbe: run(), codexLoginEvidence: () => ({ checkedAt: NOW + 60_000, credentialFingerprint: "fp-primary" }) });
+    expect((await probeCodexAuth(future.deps)).state).toBe("not_verified");
+  });
+
   it("EC-38: stale or future-dated evidence is not evidence", async () => {
     for (const checkedAt of [NOW + 60_000, NOW - 6 * 60_000]) {
       const { deps } = makeDeps({

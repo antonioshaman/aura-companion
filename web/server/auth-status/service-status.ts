@@ -1,12 +1,12 @@
 import { accessSync, constants, readdirSync, readFileSync } from "node:fs";
-import { latestCodexProviderEvidence } from "./codex-provider-evidence.js";
+import { latestCodexLoginEvidence, latestCodexProviderEvidence } from "./codex-provider-evidence.js";
 import { userInfo } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { log } from "../logger.js";
 import { COMPANION_HOME } from "../paths.js";
 import { resolveBinary } from "../path-resolver.js";
 import { getSettings } from "../settings-manager.js";
-import type { ProviderId } from "./auth-types.js";
+import type { ProviderAuthStatus, ProviderId } from "./auth-types.js";
 import { requestClaudeUsage } from "./claude-usage-request.js";
 import { locateClaudeOAuth, locateCodexAuth, readClaudeOAuthSecret, statMeta } from "./credential-locator.js";
 import { runBoundedProbe } from "./probe-runner.js";
@@ -63,6 +63,8 @@ export interface CreateAuthStatusCoreOptions {
   mode: "service" | "local_cli";
   /** Live-session evidence for Codex (`account/rateLimits/read`), service mode only (wired in 1b/1c). */
   codexProviderEvidence?: () => CodexProviderEvidence | null;
+  /** Phase 2 D8: evidence of a just-completed official Codex sign-in. */
+  codexLoginEvidence?: () => CodexProviderEvidence | null;
   unitTexts?: readonly string[];
   companionHome?: string;
 }
@@ -95,6 +97,7 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
       requestClaudeUsage: (token) => requestClaudeUsage(token),
       statMeta,
       codexProviderEvidence: opts.codexProviderEvidence,
+      codexLoginEvidence: opts.codexLoginEvidence,
       // The offline CLI must not print log lines into its output.
       onEvent: opts.mode === "service" ? logProbeEvent : undefined,
     };
@@ -119,6 +122,40 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
 let serviceCore: StatusCore | null = null;
 /** The server's single status core (lazy; `mode: "service"`). */
 export function getServiceAuthStatusCore(): StatusCore {
-  serviceCore ??= createAuthStatusCore({ mode: "service", codexProviderEvidence: latestCodexProviderEvidence });
+  serviceCore ??= createAuthStatusCore({
+    mode: "service",
+    codexProviderEvidence: latestCodexProviderEvidence,
+    codexLoginEvidence: latestCodexLoginEvidence,
+  });
   return serviceCore;
+}
+
+/**
+ * Phase 2 task 6: the phase-1 probe pointed at a sign-in attempt's staging
+ * home (account / plan of the NEW credentials before they go live). Only
+ * HOME, PATH and the CLI config dir reach it: no env tokens, no Aura
+ * settings keys (they would mask the staged sign-in), no live-session
+ * evidence (it belongs to the old credentials).
+ */
+export function probeStagedCredentials(provider: ProviderId, stagingHome: string, serviceEnv: NodeJS.ProcessEnv): Promise<ProviderAuthStatus> {
+  const env: NodeJS.ProcessEnv = {
+    HOME: stagingHome,
+    PATH: serviceEnv.PATH,
+    ...(provider === "claude" ? { CLAUDE_CONFIG_DIR: join(stagingHome, ".claude") } : { CODEX_HOME: join(stagingHome, ".codex") }),
+  };
+  const deps: ProviderProbeDeps = {
+    env,
+    settings: { claudeCodeOAuthToken: "", anthropicApiKey: "", openaiApiKey: "" },
+    now: Date.now,
+    // The sign-in ran with the CLI sessions use; probe with the same one (resolved in the service PATH).
+    resolveBinary: (name) => resolveInPath(name, serviceEnv) ?? resolveBinary(name),
+    runProbe: runBoundedProbe,
+    locateClaude: locateClaudeOAuth,
+    locateCodex: locateCodexAuth,
+    readClaudeSecret: (e) => readClaudeOAuthSecret(e),
+    requestClaudeUsage: (token) => requestClaudeUsage(token),
+    statMeta,
+    onEvent: logProbeEvent,
+  };
+  return provider === "claude" ? probeClaudeAuth(deps) : probeCodexAuth(deps);
 }
