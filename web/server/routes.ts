@@ -76,6 +76,9 @@ import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
 import { makeLegacyProbeRunner } from "./auth-status/probe-runner.js";
 import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMethod } from "./host-auth-status.js";
+import { getServiceAuthStatusCore } from "./auth-status/service-status.js";
+import { getServiceDoctorRunner } from "./auth-status/doctor-service.js";
+import { projectBackendAuthState, registerAuthStatusRoutes } from "./routes/auth-status-routes.js";
 import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
@@ -2434,8 +2437,10 @@ export function createRoutes(
     // show "authorized ✓ / token expired / not signed in" before a session is
     // spawned. Only computed for a present binary — auth is moot when the CLI
     // isn't installed, and it saves the credential-file read.
-    const claudeAuth = claudeAvailable ? getClaudeAuthStatus() : undefined;
-    const codexAuth = codexAvailable ? getCodexAuthStatus() : undefined;
+    // Strangler fig (plan task 8): where the cached provider status knows better, it wins.
+    const verified = getServiceAuthStatusCore().peek()?.providers;
+    const claudeAuth = claudeAvailable ? projectBackendAuthState(verified?.claude, getClaudeAuthStatus()) : undefined;
+    const codexAuth = codexAvailable ? projectBackendAuthState(verified?.codex, getCodexAuthStatus()) : undefined;
 
     backends.push({
       id: "claude",
@@ -2551,6 +2556,7 @@ export function createRoutes(
 
   registerPortableHistoryRoutes(api, { sessionStore: portableSessionStore, launcher, bridge: wsBridge, orchestrator });
   registerFsRoutes(api);
+  registerAuthStatusRoutes(api, { statusCore: getServiceAuthStatusCore, doctor: getServiceDoctorRunner });
   registerEnvRoutes(api, { webDir: WEB_DIR });
   registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);
