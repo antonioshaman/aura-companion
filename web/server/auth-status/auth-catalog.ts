@@ -184,7 +184,7 @@ export function describeDoctorUnchecked(check: DoctorCheck, reason: DoctorUnchec
       return {
         title,
         detail: "Permission denied for this location, so it was not checked. This is not the same as \"nothing found\".",
-        action: { kind: "run_as_service_user" },
+        action: { kind: "run_as_root", command: "sudo aura-companion doctor --offline" },
       };
     case "version_unknown":
       return {
@@ -267,6 +267,7 @@ export function formatAction(action: AuthAction): string {
     case "restart_session": return "Restart the session";
     case "update_cli": return `Update the CLI: \`${action.command}\``;
     case "run_as_service_user": return "Run as the service user";
+    case "run_as_root": return `Re-run as root to include it: \`${action.command}\``;
     case "open_status": return "Open provider status";
     case "none": return "";
     default: return assertNever(action);

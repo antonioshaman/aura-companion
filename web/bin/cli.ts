@@ -27,6 +27,8 @@ Server commands:
   uninstall   Remove the background service
   status      Show service status (or use 'companion status' when server is running)
   logs        Tail service log files
+  auth status Claude / Codex sign-in status (server result, or computed locally)
+  doctor      Diagnose CLI binaries and credential files (exit 1 = problems, 2 = not fully checked)
   help        Show this help message
 
 Management commands (requires running server):
@@ -39,6 +41,8 @@ Management commands (requires running server):
 
 Options:
   --port <n>  Override the default port (default: 3456)
+  --offline   (auth status, doctor) Do not ask the server; compute locally
+  --json      (auth status, doctor) Machine-readable output
 `);
 }
 
@@ -146,6 +150,19 @@ switch (command) {
     const tail = spawn("tail", ["-f", logFile, errFile], { stdio: "inherit" });
     tail.on("exit", () => process.exit(0));
     break;
+  }
+
+  case "auth":
+  case "doctor": {
+    const args = process.argv.slice(3);
+    if (command === "auth" && args[0] !== "status") {
+      console.error("Usage: companion auth status [--offline] [--json] [--port <n>]");
+      process.exit(1);
+    }
+    const { cliPort, defaultCliAuthDeps, runAuthStatusCommand, runDoctorCommand } = await import("./cli-auth.js");
+    const deps = defaultCliAuthDeps(cliPort(args));
+    const code = command === "auth" ? await runAuthStatusCommand(args.slice(1), deps) : await runDoctorCommand(args, deps);
+    process.exit(code);
   }
 
   case undefined: {

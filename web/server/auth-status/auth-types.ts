@@ -232,6 +232,8 @@ export type AuthAction =
   | { kind: "restart_session" }
   | { kind: "update_cli"; command: string }
   | { kind: "run_as_service_user" }
+  /** Doctor only: a location this user may not list; root can (metadata only). */
+  | { kind: "run_as_root"; command: string }
   | { kind: "open_status" }
   | { kind: "none" };
 
