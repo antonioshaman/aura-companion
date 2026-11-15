@@ -242,37 +242,43 @@ export class CredentialRenewal {
   async beforePromote(provider: ProviderId): Promise<void> {
     this.busyAtPromotion.delete(provider);
     if (provider === "codex") return;
-    const targets = this.deps.listSessions().filter((s) => s.provider === provider && s.alive && !s.archived && !s.containerized && !this.tracked.has(s.sessionId));
-    if (targets.length === 0) return;
-    const busy: string[] = [];
-    for (const s of targets) {
-      this.tracked.set(s.sessionId, { provider, phase: "stopping", ownsStopMark: false, promotedAt: null });
-      if (this.deps.isBusy(s.sessionId)) busy.push(s.sessionId);
-    }
-    for (const s of targets) {
-      if (!busy.includes(s.sessionId)) await this.stopForBarrier(s.sessionId);
-    }
-    if (busy.length > 0) {
+    const deadline = this.now() + (this.deps.barrierWaitMs ?? BARRIER_WAIT_MS);
+    const leftBusy: string[] = [];
+    // Passes until one finds no untracked live Claude process: a session
+    // launched while the barrier waits is stopped too (observer STOP,
+    // checkpoint 205). The last pass ends synchronously and the promotion
+    // renames right after the await — no launch can slip in between.
+    for (;;) {
+      const targets = this.deps.listSessions().filter((s) => s.provider === provider && s.alive && !s.archived && !s.containerized && !this.tracked.has(s.sessionId));
+      if (targets.length === 0) break;
+      const busy: string[] = [];
+      for (const s of targets) {
+        this.tracked.set(s.sessionId, { provider, phase: "stopping", ownsStopMark: false, promotedAt: null });
+        if (this.deps.isBusy(s.sessionId)) busy.push(s.sessionId);
+      }
+      for (const s of targets) {
+        if (!busy.includes(s.sessionId)) await this.stopForBarrier(s.sessionId);
+      }
+      if (busy.length === 0) continue;
       log.info("credential-renewal", "waiting for busy sessions before the promotion", {
         event: "credential_renewal.barrier_waiting", provider, sessions: busy.length,
       });
-      const deadline = this.now() + (this.deps.barrierWaitMs ?? BARRIER_WAIT_MS);
-      const leftBusy: string[] = [];
       await Promise.all(busy.map(async (id) => {
         const idle = await this.waitIdle(id, Math.max(0, deadline - this.now()));
-        if (idle) await this.stopForBarrier(id);
-        else leftBusy.push(id);
-      }));
-      for (const id of leftBusy) {
+        if (idle) {
+          await this.stopForBarrier(id);
+          return;
+        }
+        leftBusy.push(id);
         const t = this.tracked.get(id);
         if (t) t.phase = "after_turn";
-      }
-      if (leftBusy.length > 0) {
-        this.busyAtPromotion.set(provider, leftBusy.length);
-        log.warn("credential-renewal", "busy sessions still running at promotion", {
-          event: "credential_renewal.barrier_timeout", provider, sessions: leftBusy.length,
-        });
-      }
+      }));
+    }
+    if (leftBusy.length > 0) {
+      this.busyAtPromotion.set(provider, leftBusy.length);
+      log.warn("credential-renewal", "busy sessions still running at promotion", {
+        event: "credential_renewal.barrier_timeout", provider, sessions: leftBusy.length,
+      });
     }
   }
 

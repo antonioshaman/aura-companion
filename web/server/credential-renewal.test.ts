@@ -303,6 +303,20 @@ describe("CredentialRenewal — Claude barrier before the rename", () => {
     expect(h.relaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("a Claude session launched WHILE the barrier waits is stopped too before the promotion (observer STOP, checkpoint 205)", async () => {
+    // A one-time snapshot would let a session started during the 10-minute
+    // wait run on the old sign-in through the rename and write over it.
+    const h = harness([session("k1", "claude", { busy: true })]);
+    const barrier = h.renewal.beforePromote("claude");
+    await settle();
+    h.byId.set("k-late", session("k-late", "claude"));
+    h.byId.get("k1")!.busy = false;
+    h.renewal.notePhase("k1", "ready");
+    await barrier;
+    expect(h.events).toEqual(["stop:k1:marked=true", "stop:k-late:marked=true"]);
+    expect(h.renewal.isHolding("k-late")).toBe(true);
+  });
+
   it("is a no-op for Codex: sessions write their own copy, never the primary file being replaced", async () => {
     const h = harness([session("c1", "codex"), session("k1", "claude")]);
     await h.renewal.beforePromote("codex");
