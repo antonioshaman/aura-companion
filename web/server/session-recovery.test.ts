@@ -405,6 +405,28 @@ describe("SessionRecovery.relaunchOnce — single-flight (P4/FIX-AUTOHEAL-1)", (
     expect(launcher.relaunch).toHaveBeenCalledTimes(4);
   });
 
+  it("credentials_renewed (LLM auth task 13) never joins or skips: the running process may hold the old sign-in", async () => {
+    // A relaunch that started before the promotion read the old credentials;
+    // joining it would leave the session on the old sign-in while the held
+    // input is released to it. Like `manual`, the renewal waits and spawns fresh.
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const first = recovery.relaunchOnce("s1", "autoheal", {});
+    const renewal = recovery.relaunchOnce("s1", "credentials_renewed");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    d.pending[0]({ ok: true });
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    // Inside the settle window (state "starting"), still a second, fresh spawn.
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+    d.pending[1]({ ok: true });
+    await expect(renewal).resolves.toEqual({ ok: true });
+    expect(d.maxConcurrent()).toBe(1);
+  });
+
   it("a manual relaunch with a different model waits for the running one instead of overlapping it", async () => {
     const sessions = new Map([["s1", info("s1")]]);
     const { recovery, launcher } = makeRecovery(sessions);

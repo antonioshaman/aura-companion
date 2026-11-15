@@ -33,6 +33,7 @@ import { TurnFailureCard } from "./chat/TurnFailureCard.js";
 import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
 import { LlmAuthView } from "./diagnostics/LlmAuthCard.js";
 import { SignInChip, SignInPanel } from "./llm-login/SignInPanel.js";
+import { CredentialRenewalBanner } from "./llm-login/CredentialRenewalNotice.js";
 import { LOGIN_NOW, loginAttempt, loginView } from "./llm-login/login-fixtures.js";
 import { providerStatus } from "./diagnostics/llm-auth-fixtures.js";
 import { doctorReport, LLM_AUTH_NOW, statusSnapshot } from "./diagnostics/llm-auth-fixtures.js";
@@ -5344,6 +5345,28 @@ function SignInPlaygroundSection() {
             onClose={noop}
           />
         </Card>
+        <Card label="SignInPanel — Claude verifying, waiting for running turns (phase 2d barrier)">
+          <SignInPanel
+            provider="claude"
+            view={loginView(loginAttempt("claude", "verifying", { renewal: { waitingForTurn: 2, reconnecting: 0, busyAtPromotion: 0, awaitingRetry: 0, credentialsReplaced: false } }))}
+            now={LOGIN_NOW}
+            onClose={noop}
+          />
+        </Card>
+        <Card label="SignInPanel — succeeded: sessions moving to the new sign-in, Retry, warnings (phase 2d)">
+          <SignInPanel
+            provider="claude"
+            view={loginView(loginAttempt("claude", "succeeded", { renewal: { waitingForTurn: 0, reconnecting: 3, busyAtPromotion: 1, awaitingRetry: 1, credentialsReplaced: true } }))}
+            now={LOGIN_NOW}
+            onClose={noop}
+          />
+        </Card>
+        {PROVIDER_IDS.map((provider) => (
+          <Card key={`renewal-${provider}`} label={`CredentialRenewalBanner — ${provider}: reconnecting / failed (phase 2d)`}>
+            <CredentialRenewalBanner record={{ provider, promotedAt: LOGIN_NOW, state: "reconnecting" }} />
+            <CredentialRenewalBanner record={{ provider, promotedAt: LOGIN_NOW, state: "failed" }} />
+          </Card>
+        ))}
         <Card label="SignInPanel — already in progress elsewhere (second tab / CLI)">
           <SignInPanel provider="codex" view={loginView(loginAttempt("codex", "awaiting_user"), { existing: true })} now={LOGIN_NOW} onCancel={noop} onClose={noop} />
         </Card>

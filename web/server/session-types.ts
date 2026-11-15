@@ -887,6 +887,14 @@ export interface BufferedBrowserEvent {
 
 export type BackendType = "claude" | "codex";
 
+/** See `SessionState.credential_renewal`. */
+export interface CredentialRenewalRecord {
+  provider: "claude" | "codex";
+  /** Server time of the promotion the session is moving to. */
+  promotedAt: number;
+  state: "reconnecting" | "renewed" | "failed";
+}
+
 export interface SessionState {
   session_id: string;
   backend_type?: BackendType;
@@ -989,6 +997,13 @@ export interface SessionState {
    * toast. Absent = the session runs on the model the user picked.
    */
   model_fallback?: ModelFallbackRecord | null;
+  /**
+   * LLM auth task 14: the session is being (or was) moved to a new sign-in of
+   * its provider. Persisted and replayed in `session_init`, so a reloaded tab
+   * still shows "Reconnecting with the new sign-in…" and the failure cards
+   * learn the promotion time. No secrets: provider, time, state.
+   */
+  credential_renewal?: CredentialRenewalRecord | null;
   /**
    * The highest context-size advisory that offered "Continue in a new
    * session" (>= 5 MB transcript). Persisted with the session state and

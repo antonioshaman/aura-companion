@@ -38,6 +38,7 @@ import { CodexAdapter, StdioTransport } from "./codex-adapter.js";
 import type { BrowserIncomingMessage } from "./session-types.js";
 import type { TurnFailure } from "./auth-status/auth-types.js";
 import { log } from "./logger.js";
+import { CredentialRenewal } from "./credential-renewal.js";
 
 function fixture(dir: string, name: string): string {
   return readFileSync(join(__dirname, "fixtures", dir, name), "utf-8");
@@ -216,5 +217,72 @@ describe("Codex replay → turnFailure", () => {
     streams.pushRaw(JSON.stringify({ method: "item/completed", params: { threadId: "t", turnId: "u", item: { type: "agentMessage", id: "msg-1", text: "The API answered 401 unauthorized; please sign in again." } } }));
     await flush();
     expect(failures(messages)).toEqual([]);
+  });
+});
+
+/**
+ * LLM auth phase 2d, task 14 (S3-AC3): a turn that was running while the
+ * sign-in changed fails on the OLD credentials. The frames are the same
+ * provider frames as above; what changes is the session's epoch: it was
+ * launched before the promotion, so the bridge's renewal gate re-tags the
+ * failure `stale_session_credentials` ("this turn needs to be repeated" +
+ * Retry), for Claude (which never compares generations itself) and Codex
+ * alike — never a silent drop, never "sign in again" for a fresh sign-in.
+ */
+describe("mid-relogin failure → 'turn needs to be repeated' (phase 2d)", () => {
+  function renewalWithEpochs(sessionEpoch: number, providerEpoch: number) {
+    const session = (sessionId: string, provider: "claude" | "codex") => ({ sessionId, provider, alive: true, archived: false, containerized: false, credentialEpochAtLaunch: sessionEpoch });
+    return new CredentialRenewal({
+      listSessions: () => [],
+      getSession: (id) => session(id, id.includes("codex") ? "codex" : "claude"),
+      currentEpoch: () => providerEpoch,
+      isBusy: () => true,
+      stop: async () => {},
+      relaunch: async () => ({ ok: true }),
+      markIntentional: () => true,
+      releaseIntentional: () => {},
+      groupPeers: () => [],
+      publish: () => {},
+      releaseHeld: () => {},
+      failHeld: () => {},
+      hasPendingSignInRetry: () => false,
+    });
+  }
+
+  beforeEach(() => {
+    vi.spyOn(log, "info").mockImplementation(() => {});
+    vi.spyOn(log, "error").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("Claude 401 on a session launched before the promotion → stale_session_credentials; after its relaunch → auth_rejected again", () => {
+    const adapter = new ClaudeAdapter("sess-claude-relogin");
+    adapter.attachWebSocket(mockSocket("sess-claude-relogin"));
+    const out: BrowserIncomingMessage[] = [];
+    adapter.onBrowserMessage((m) => out.push(m));
+    adapter.handleRawMessage([
+      JSON.stringify({ type: "assistant", message: { id: "m1", type: "message", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "Invalid API key · Please run /login" }], stop_reason: "stop_sequence", usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, error: "authentication_failed", uuid: "u1", session_id: "c1" }),
+      JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error_status: 401, terminal_reason: "api_error", result: "Invalid API key · Please run /login", duration_ms: 10, uuid: "u2", session_id: "c1" }),
+    ].join("\n"));
+    const [failure] = failures(out);
+    expect(failure.kind).toBe("auth_rejected");
+    expect(renewalWithEpochs(1, 2).adjustTurnFailure("sess-claude-relogin", failure).kind).toBe("stale_session_credentials");
+    // A failure on the CURRENT sign-in stays what it is: sign in again.
+    expect(renewalWithEpochs(2, 2).adjustTurnFailure("sess-claude-relogin", failure).kind).toBe("auth_rejected");
+  });
+
+  it("Codex unauthorized on a copy symlinked to the primary (generation 'same') but launched before the promotion → stale_session_credentials", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({ start(c) { controller = c; } });
+    const transport = new StdioTransport(new WritableStream<Uint8Array>({ write() {} }), stdout, "sess-codex-relogin");
+    const adapter = new CodexAdapter(transport, "sess-codex-relogin", { model: "gpt-6.1-sol", cwd: "/tmp", credentialGeneration: () => "same" });
+    const out: BrowserIncomingMessage[] = [];
+    adapter.onBrowserMessage((m) => out.push(m));
+    controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ method: "error", params: { error: { message: "refresh token was already used", codexErrorInfo: "unauthorized" }, willRetry: false, threadId: "t", turnId: "u" } })}\n`));
+    await new Promise((r) => setTimeout(r, 30));
+    const [failure] = failures(out);
+    expect(failure.kind).toBe("auth_rejected");
+    expect(renewalWithEpochs(0, 1).adjustTurnFailure("sess-codex-relogin", failure)).toEqual({ kind: "stale_session_credentials", provider: "codex", providerMessage: failure.providerMessage });
   });
 });

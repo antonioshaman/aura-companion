@@ -474,6 +474,27 @@ describe("handleMessage: session_update", () => {
   });
 });
 
+describe("handleMessage: credential renewal signal (LLM auth task 14)", () => {
+  // The server publishes `credential_renewal {provider, promotedAt, state}` on
+  // the session (session_update live, session_init after a reload). The
+  // browser feeds the promotion time into the store field the failure cards
+  // read — so a card that failed before it turns "sign-in restored" with no
+  // status read, live and after a reload. No secrets travel in the frame.
+  it("a live session_update sets the provider's promotion time and the notice state", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "session_update", session: { credential_renewal: { provider: "codex", promotedAt: 4242, state: "reconnecting" } } });
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ codex: 4242 });
+    expect(useStore.getState().sessions.get("s1")!.credential_renewal?.state).toBe("reconnecting");
+  });
+
+  it("a reloaded tab learns it from session_init", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: { ...makeSession("s1"), credential_renewal: { provider: "claude", promotedAt: 77, state: "renewed" } } });
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 77 });
+  });
+});
+
 describe("handleMessage: event_replay", () => {
   it("replays sequenced stream events and stores latest seq", () => {
     wsModule.connectSession("s1");

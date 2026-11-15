@@ -1,7 +1,7 @@
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { PROVIDER_IDS, isTerminalLoginState, type ProviderId } from "../auth-status/auth-types.js";
-import { signInSteps } from "../auth-status/auth-catalog.js";
+import { signInSteps, type SessionRenewalCounts } from "../auth-status/auth-catalog.js";
 import { verifyToken } from "../auth-manager.js";
 import { log } from "../logger.js";
 import { isOriginAllowed } from "../middleware/origin-allowlist.js";
@@ -48,6 +48,8 @@ export interface LoginRoutesDeps {
   /** Override for tests; production reads `COMPANION_ALLOWED_ORIGIN`. */
   allowedOrigins?: ReadonlySet<string>;
   now?: () => number;
+  /** Live sessions vs this sign-in (phase 2d): barrier waits, relaunches, Retry. Null = no renewal wired. */
+  renewalSummary?: (provider: ProviderId) => SessionRenewalCounts | null;
 }
 
 /** REST shape of an attempt. Built in ONE place: secrets only while `awaiting_user`. */
@@ -66,6 +68,8 @@ export interface RestLoginAttempt {
   /** Link (and Codex device code) — present only while `awaiting_user`. */
   prompt?: { url: string; userCode?: string; expiresInMinutes?: number };
   result: LoginAttempt["result"];
+  /** While verifying / after success: what the live sessions do (counts only). */
+  renewal?: SessionRenewalCounts;
 }
 
 export function toRestLoginAttempt(a: LoginAttempt, maxSubmissions: number): RestLoginAttempt {
@@ -168,7 +172,14 @@ async function readJson(c: Context): Promise<Record<string, unknown> | null> {
 
 export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmissions: number): void {
   const now = deps.now ?? Date.now;
-  const view = (a: LoginAttempt) => toRestLoginAttempt(a, maxSubmissions);
+  const view = (a: LoginAttempt): RestLoginAttempt => {
+    const v = toRestLoginAttempt(a, maxSubmissions);
+    if (a.state === "verifying" || a.state === "succeeded") {
+      const renewal = deps.renewalSummary?.(a.provider) ?? null;
+      if (renewal) v.renewal = renewal;
+    }
+    return v;
+  };
 
   /** The attempt GET shows: the running one, or a finished one for LOGIN_RESULT_VISIBLE_MS. */
   const visible = (provider: ProviderId): LoginAttempt | null => {

@@ -23,6 +23,33 @@ export function isSignInRestored(failure: TurnFailure, firedAt: number, promoted
   return SIGN_IN_FAILURES.has(failure.kind) && at !== undefined && firedAt < at;
 }
 
+/**
+ * Which variant the failure card shows (phase 2d, task 14; S3-AC1/AC3):
+ * - `restored`: a sign-in failure that happened BEFORE the last promotion —
+ *   the new sign-in fixes it, Retry resends once;
+ * - `retry_needed`: a stale-credentials failure AT or AFTER the promotion — the
+ *   turn ran on the old sign-in while it changed (the server tags a failure
+ *   of a session still on the old epoch `stale_session_credentials`); the
+ *   session moves to the new sign-in and the turn has to be repeated;
+ * - `none`: everything else, exactly as classified.
+ */
+export function turnFailureRecovery(
+  failure: TurnFailure,
+  firedAt: number,
+  promotedAt: Partial<Record<ProviderId, number>>,
+): "none" | "restored" | "retry_needed" {
+  if (isSignInRestored(failure, firedAt, promotedAt)) return "restored";
+  const at = promotedAt[failure.provider];
+  if (failure.kind === "stale_session_credentials" && at !== undefined && firedAt >= at) return "retry_needed";
+  return "none";
+}
+
+/** The session's renewal record carries the promotion time: feed the same store field (task 14). */
+export function notePromotedFromRenewal(record: { provider: ProviderId; promotedAt: number } | null | undefined): void {
+  if (!record) return;
+  useStore.getState().noteLlmAuthPromotedAt(record.provider, record.promotedAt);
+}
+
 /** Copies each provider's `lastPromotedAt` from a status read into the store. */
 export function notePromotedFromStatus(snapshot: StatusSnapshot | null | undefined): void {
   if (!snapshot) return;

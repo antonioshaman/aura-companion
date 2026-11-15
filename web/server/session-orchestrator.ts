@@ -94,6 +94,14 @@ import {
   type ContinueBudgetResult,
 } from "./council-budget.js";
 import type { BrowserCouncilBudget } from "./session-types.js";
+import {
+  CredentialRenewal,
+  currentCredentialEpoch,
+  isBusyPhase,
+  setCredentialRenewal,
+  type RenewalSession,
+} from "./credential-renewal.js";
+import { liveCredentialPaths, sha256File } from "./llm-login/credential-promotion.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 /** AP-WIRE: resolve `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING` at
@@ -305,6 +313,8 @@ export class SessionOrchestrator {
    * silent-stdio drift detector and the boot reconnection watchdog.
    */
   private recovery: SessionRecovery;
+  /** LLM auth task 13: live sessions move to a new sign-in (epoch + idle relaunch). */
+  private credentialRenewal!: CredentialRenewal;
   /** Test seam: the relaunch-exhaustion set lives on the recovery controller. */
   /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
   get relaunchExhaustedNotified(): Set<string> {
@@ -551,6 +561,7 @@ export class SessionOrchestrator {
       noteApiLimitReached: (sessionId) => this.autoProceed.noteApiLimitReached(sessionId),
       onDriftEvent: deps.onDriftEvent,
     });
+    this.credentialRenewal = this.createCredentialRenewal();
     this.councilLifecycle = new CouncilLifecycle({
       launcher: this.launcher,
       getWsBridge: () => this.wsBridge,
@@ -618,6 +629,22 @@ export class SessionOrchestrator {
   initialize(): void {
     if (this._initialized) return;
     this._initialized = true;
+
+    // LLM auth task 13: the bridge asks the renewal at its delivery points;
+    // the sign-in wiring reaches it for the barrier and the settle hook.
+    this.wsBridge.setCredentialGate?.(this.credentialRenewal);
+    setCredentialRenewal(this.credentialRenewal);
+    companionBus.on("session:phase-changed", ({ sessionId, to }) => {
+      try {
+        this.credentialRenewal.notePhase(sessionId, to);
+      } catch (err) {
+        log.warn("session-orchestrator", "credential renewal phase hook failed", {
+          event: "credential_renewal.phase_hook_failed",
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
 
     // When the CLI reports its internal session_id, store it for --resume
     companionBus.on("session:cli-id-received", ({ sessionId, cliSessionId }) => {
@@ -2078,6 +2105,60 @@ export class SessionOrchestrator {
     }
   }
 
+  // ── Credential renewal (LLM auth task 13) ─────────────────────────────────
+
+  private createCredentialRenewal(): CredentialRenewal {
+    const view = (info: SdkSessionInfo): RenewalSession => ({
+      sessionId: info.sessionId,
+      provider: info.backendType === "codex" ? "codex" : "claude",
+      alive: info.state !== "exited",
+      archived: info.archived === true,
+      containerized: Boolean(info.containerId),
+      credentialEpochAtLaunch: info.credentialEpochAtLaunch,
+    });
+    return new CredentialRenewal({
+      listSessions: () => this.launcher.listSessions().map(view),
+      getSession: (id) => {
+        const info = this.launcher.getSession(id);
+        return info ? view(info) : null;
+      },
+      currentEpoch: (provider) => currentCredentialEpoch(provider),
+      isBusy: (id) => isBusyPhase(this.wsBridge.getSessionPhase(id)),
+      stop: async (id) => {
+        await this.launcher.kill(id);
+      },
+      relaunch: (id) => {
+        this.wsBridge.getSession(id)?.stateMachine?.transition("starting", "relaunch_initiated");
+        return this.recovery.relaunchOnce(id, "credentials_renewed");
+      },
+      markIntentional: (id) => this.intentionalKills.addTransient(id),
+      releaseIntentional: (id) => this.intentionalKills.releaseTransient(id),
+      groupPeers: (id) => {
+        const group = this.coordinator?.findBySessionId(id);
+        if (!group || group.status === "archived") return [];
+        return [group.primary.sessionId, group.observer.sessionId].filter((sid) => sid !== id);
+      },
+      publish: (id, record) => this.wsBridge.publishCredentialRenewal(id, record),
+      releaseHeld: (id) => this.wsBridge.releaseHeldMessages(id),
+      failHeld: (id, failure) => this.wsBridge.failHeldMessages(id, failure),
+      // A council wake held during the relaunch is caught up from disk once
+      // the new observer process is ready (EC-54 de-duplicates the in-flight one).
+      onRelaunched: (id) => {
+        const group = this.coordinator?.findBySessionId(id);
+        if (group && group.status !== "archived" && group.observer.sessionId === id) {
+          this.scanForMissedObserverWakes("watcher-rearm");
+        }
+      },
+      hasPendingSignInRetry: (id) => this.wsBridge.hasPendingSignInRetry(id),
+      liveFingerprint: (provider) => sha256File(liveCredentialPaths(provider, process.env).credentials),
+    });
+  }
+
+  /** The renewal summary for the sign-in window ("N sessions move to the new sign-in; M wait for Retry"). */
+  getCredentialRenewal(): CredentialRenewal {
+    return this.credentialRenewal;
+  }
+
   // ── Relaunch ───────────────────────────────────────────────────────────────
 
   async relaunchSession(
@@ -2458,6 +2539,7 @@ export class SessionOrchestrator {
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   shutdown(): void {
+    this.credentialRenewal.dispose();
     // Most timers are owned by the process lifecycle; the EC-13 failsafe
     // interval is explicitly cleared so shutdown is deterministic (and tests
     // don't leak a live interval across cases).
