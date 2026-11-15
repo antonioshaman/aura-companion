@@ -15,9 +15,17 @@
  * any console/log line, the persisted status file, the doctor's file reads,
  * the browser `error` frames, and the recorder's JSONL.
  *
+ * Phase 2b extends it to the sign-in flow: the FAKE official CLI puts the
+ * marker into the staged credentials and echoes a refused reply code (which
+ * itself carries the marker) on stderr; the link, the Claude `state` and the
+ * Codex device code are random per attempt and are tracked as markers too.
+ * They may appear only in the live attempt's REST answers and in the CLI's
+ * link/code lines — never in `log.*`, status/doctor REST, `last-check.json`,
+ * the epoch/journal files, CLI stdout after the outcome, or GET after the end.
+ *
  * No real credential is read or copied; the network is mocked.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +88,11 @@ import { SessionRecorder } from "../recorder.js";
 import { log } from "../logger.js";
 import type { BrowserIncomingMessage } from "../session-types.js";
 import { LAST_CHECK_FILE, type StatusCore } from "./status-core.js";
+import { knownField, type ProviderAuthStatus, type ProviderId } from "./auth-types.js";
+import { LoginAttempts, MAX_CODE_SUBMISSIONS } from "../llm-login/login-attempt.js";
+import { promoteCredentials } from "../llm-login/credential-promotion.js";
+import { registerLoginRoutes } from "../routes/login-routes.js";
+import { runAuthLoginCommand, type CliLoginDeps } from "../../bin/cli-auth-login.js";
 
 const SVC_HOME = join(ROOT, "home", "svc");
 const COMPANION = join(SVC_HOME, ".companion");
@@ -316,5 +329,180 @@ describe("leak canary: turn failures whose provider text echoes a token", () => 
 
   it("no console / log line printed while classifying carries it", () => {
     expectNoMarker("console/log output (turn failures)", printed.join("\n"));
+  });
+});
+
+// ─── Sign-in flow (phase 2b, task 10) ─────────────────────────────────────────
+
+describe.skipIf(process.platform !== "linux")("leak canary: the sign-in flow keeps links, codes and new credentials inside the attempt window", () => {
+  const SIGNIN = join(ROOT, "signin");
+  const SIGNIN_HOME = join(SIGNIN, "home");
+  const STATE_DIR = join(SIGNIN, "llm-auth");
+  const ATTEMPTS = join(STATE_DIR, "attempts");
+  const LOGIN_BIN = join(SIGNIN, "bin");
+  const FAKE_LOGIN = join(import.meta.dirname, "..", "llm-login", "fixtures", "fake-login-cli.mjs");
+  const TOKEN = "leak-canary-aura-token-0123456789abcdef";
+  /** Per-attempt secrets seen while the attempt waited (link, state, device code). */
+  const windowSecrets: string[] = [];
+  /** Everything outside the attempt window that must be clean. */
+  const surfaces: Array<{ where: string; text: string }> = [];
+  let login: LoginAttempts;
+  let loginApp: Hono;
+  let scenarios: Partial<Record<ProviderId, string>> = {};
+
+  function loginCli(provider: ProviderId): string {
+    const path = join(LOGIN_BIN, `${provider}-login.sh`);
+    writeFileSync(path, `#!/bin/sh\nexec "${process.execPath}" "${FAKE_LOGIN}" ${scenarios[provider]} --marker=${MARK} --echo-code "$@"\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  const stagedStatus = (provider: ProviderId): ProviderAuthStatus => ({
+    provider, state: "working", reason: null, account: knownField("synthetic-owner@example.test"), plan: knownField("max"),
+    method: knownField("subscription"), tokenExpiresAt: { known: false }, lastSuccessAt: null, checkedAt: Date.now(),
+    verifiedBy: "provider", cli: { path: { known: false }, version: { known: false } },
+  });
+
+  const req = (path: string, method: "GET" | "POST" = "GET", body?: unknown) =>
+    loginApp.request(`http://localhost:3456${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${TOKEN}`, ...(method === "POST" ? { "Content-Type": "application/json" } : {}) },
+      body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+    });
+
+  async function pollState(provider: ProviderId, until: (state: string | undefined) => boolean) {
+    const deadline = Date.now() + 8_000;
+    for (;;) {
+      const body = await (await req(`/api/llm-auth/login/${provider}`)).json();
+      if (until(body.attempt?.state)) return body.attempt;
+      if (Date.now() > deadline) throw new Error(`timeout waiting for ${provider}`);
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+
+  beforeAll(() => {
+    mkdirSync(LOGIN_BIN, { recursive: true });
+    mkdirSync(SIGNIN_HOME, { recursive: true });
+    login = new LoginAttempts({
+      attemptsRoot: ATTEMPTS,
+      resolveCli: (provider) => loginCli(provider),
+      platform: "linux",
+      callerUser: "svc",
+      callerUid: process.getuid?.() ?? 1000,
+      serviceUser: "svc",
+      serviceEnv: { PATH: process.env.PATH },
+      // The REAL promotion into a temp service HOME; only the staged-status probe is stubbed.
+      promote: (ctx) => promoteCredentials(ctx, {
+        serviceEnv: { HOME: SIGNIN_HOME },
+        stateDir: STATE_DIR,
+        uid: process.getuid?.() ?? -1,
+        probeStaged: async (provider) => stagedStatus(provider),
+        codexTokenFingerprint: () => "fp-synthetic",
+        noteCredentialsPromoted: () => {},
+      }),
+      cooldownMs: 0,
+      killGraceMs: 300,
+      timeoutBinary: null,
+    });
+    const api = new Hono();
+    registerLoginRoutes(api, { attempts: () => login, hasAuraToken: (c) => c.req.header("Authorization") === `Bearer ${TOKEN}` }, MAX_CODE_SUBMISSIONS);
+    loginApp = new Hono();
+    loginApp.route("/api", api);
+  });
+
+  afterAll(async () => {
+    await login?.shutdown();
+  });
+
+  it("Claude: a refused code that the CLI echoes on stderr stays out of every answer and log", async () => {
+    scenarios = { claude: "--scenario=reject" };
+    await req("/api/llm-auth/login/claude", "POST");
+    const awaiting = await pollState("claude", (s) => s === "awaiting_user");
+    const state = new URL(awaiting.prompt.url).searchParams.get("state")!;
+    windowSecrets.push(awaiting.prompt.url, state);
+    const res = await req(`/api/llm-auth/login/claude/${awaiting.id}/code`, "POST", { code: `${MARK}refused#${state}` });
+    expectNoMarker("code submit answer", await res.text());
+    const failed = await pollState("claude", (s) => s === "failed");
+    expect(failed.failure).toBe("code_rejected");
+    surfaces.push({ where: "GET after the refused code", text: JSON.stringify(failed) });
+  });
+
+  it("Claude: success — new credentials carry the marker, only the live files hold it", async () => {
+    scenarios = { claude: "--scenario=success" };
+    await req("/api/llm-auth/login/claude", "POST");
+    const awaiting = await pollState("claude", (s) => s === "awaiting_user");
+    const state = new URL(awaiting.prompt.url).searchParams.get("state")!;
+    windowSecrets.push(awaiting.prompt.url, state);
+    await req(`/api/llm-auth/login/claude/${awaiting.id}/code`, "POST", { code: `${MARK}reply#${state}` });
+    const done = await pollState("claude", (s) => s === "succeeded");
+    surfaces.push({ where: "GET after Claude success", text: JSON.stringify(done) });
+    // The canary is real: the promoted live file does carry the marker.
+    expect(readFileSync(join(SIGNIN_HOME, ".claude", ".credentials.json"), "utf-8")).toContain(MARK);
+  });
+
+  it("Codex: success — the device code is gone after the outcome", async () => {
+    scenarios = { codex: "--scenario=success --success-after-ms=300" };
+    await req("/api/llm-auth/login/codex", "POST");
+    const awaiting = await pollState("codex", (s) => s === "awaiting_user");
+    windowSecrets.push(awaiting.prompt.userCode);
+    const done = await pollState("codex", (s) => s === "succeeded");
+    surfaces.push({ where: "GET after Codex success", text: JSON.stringify(done) });
+    expect(readFileSync(join(SIGNIN_HOME, ".codex", "auth.json"), "utf-8")).toContain(MARK);
+  });
+
+  it("`aura-companion auth login`: link/code only on their own lines, nothing after the outcome", async () => {
+    scenarios = { claude: "--scenario=success" };
+    const out: string[] = [];
+    const deps: CliLoginDeps = {
+      request: async (path, init) => {
+        const r = await loginApp.request(`http://localhost:3456${path}`, {
+          method: init.method ?? "GET",
+          headers: { Authorization: `Bearer ${init.token}`, ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}) },
+          body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+        });
+        return { status: r.status, body: await r.json().catch(() => null) };
+      },
+      readToken: () => TOKEN,
+      readLine: async () => {
+        const link = out.find((l) => l.startsWith("  Link: "))!.slice(8);
+        windowSecrets.push(link, new URL(link).searchParams.get("state")!);
+        return `${MARK}cli#${new URL(link).searchParams.get("state")}`;
+      },
+      onInterrupt: () => () => {},
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 40))),
+      out: (l) => out.push(l),
+      pollMs: 40,
+    };
+    expect(await runAuthLoginCommand(["claude"], deps)).toBe(0);
+    const linkLines = out.filter((l) => l.startsWith("  Link: "));
+    expect(linkLines).toHaveLength(1);
+    const rest = out.filter((l) => !l.startsWith("  Link: ")).join("\n");
+    expectNoMarker("CLI stdout", out.join("\n"));
+    surfaces.push({ where: "CLI stdout outside the link line", text: rest });
+  });
+
+  it("no secret of any attempt reaches log.*, status/doctor REST, state files, or GET after the end", async () => {
+    expect(windowSecrets.length).toBeGreaterThanOrEqual(6);
+    // Status/doctor REST (the phase-1 surfaces) after the sign-ins.
+    for (const path of ["/llm-auth/status", "/llm-auth/status/claude", "/llm-auth/status/codex", "/llm-auth/doctor"]) {
+      surfaces.push({ where: `REST ${path}`, text: await (await app.request(path)).text() });
+    }
+    for (const provider of ["claude", "codex"] as const) {
+      surfaces.push({ where: `GET login ${provider} after the end`, text: await (await req(`/api/llm-auth/login/${provider}`)).text() });
+    }
+    const lastCheck = join(COMPANION, LAST_CHECK_FILE);
+    if (existsSync(lastCheck)) surfaces.push({ where: "last-check.json", text: readFileSync(lastCheck, "utf-8") });
+    for (const name of readdirSync(STATE_DIR).filter((n) => n.endsWith(".json"))) {
+      surfaces.push({ where: `state file ${name}`, text: readFileSync(join(STATE_DIR, name), "utf-8") });
+    }
+    expect(readdirSync(STATE_DIR).some((n) => n.startsWith("epoch-"))).toBe(true);
+    surfaces.push({ where: "console/log output (sign-in)", text: printed.join("\n") });
+
+    for (const { where, text } of surfaces) {
+      expectNoMarker(where, text);
+      for (const secret of windowSecrets) expect(text.includes(secret), `sign-in secret leaked into ${where}`).toBe(false);
+    }
+    // No attempt dir (staged credentials) survives a finished attempt.
+    expect(existsSync(ATTEMPTS) ? readdirSync(ATTEMPTS) : []).toEqual([]);
   });
 });

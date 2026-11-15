@@ -74,3 +74,54 @@ describe("credential write sites", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+/**
+ * Phase 2b (task 10; spec 🚫 "no independent copies of rotating credentials",
+ * Boundary "links/codes never reach recordings or browser frames"):
+ * - no sign-in module copies or links a file — credentials move by rename(2)
+ *   only (credential-promotion.ts), so no second copy can exist;
+ * - the sign-in REST and the CLI client write no files at all;
+ * - no sign-in surface imports the recorder or the WS bridge: attempt state
+ *   travels over REST polling only (D4), never as a recorded/fanned-out frame.
+ * EC-42: every predicate is checked against a mutated source.
+ */
+const COPY_PRIMITIVES = /\b(copyFileSync|copyFile|cpSync|cp|linkSync|link|symlinkSync|symlink)\s*\(|\.pipe\s*\(/;
+const FS_WRITE_IMPORT = /import\s+\{[^}]*\b(writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|copyFile|copyFileSync|cpSync|rmSync|unlinkSync|symlinkSync|linkSync)\b[^}]*\}\s+from\s+["'](node:)?fs(\/promises)?["']/;
+const FRAME_SINKS = /from\s+["'][^"']*\/(recorder|ws-bridge|ws-bridge-[a-z-]+)(\.js)?["']|import\(\s*["'][^"']*\/(recorder|ws-bridge)(\.js)?["']\s*\)/;
+
+describe("sign-in flow: no copies, no file writes in REST/CLI, no frame sinks", () => {
+  const all = [...sources(join(WEB, "server")), ...sources(join(WEB, "bin"))].map((p) => ({ rel: relative(WEB, p), src: code(p) }));
+  const signIn = all.filter((f) => f.rel.startsWith("server/llm-login/"));
+  const clients = all.filter((f) => f.rel === "server/routes/login-routes.ts" || f.rel === "bin/cli-auth-login.ts");
+
+  it("covers the sign-in modules and both clients (sanity)", () => {
+    expect(signIn.map((f) => f.rel)).toEqual(expect.arrayContaining([PROMOTION_MODULE, "server/llm-login/login-attempt.ts", "server/llm-login/login-wiring.ts"]));
+    expect(clients).toHaveLength(2);
+  });
+
+  it("no sign-in module copies or links a file", () => {
+    expect(signIn.filter((f) => COPY_PRIMITIVES.test(f.src)).map((f) => f.rel)).toEqual([]);
+  });
+
+  it("the sign-in REST and the CLI client import no fs write function", () => {
+    expect(clients.filter((f) => FS_WRITE_IMPORT.test(f.src)).map((f) => f.rel)).toEqual([]);
+  });
+
+  it("no sign-in surface imports the recorder or the WS bridge", () => {
+    expect([...signIn, ...clients].filter((f) => FRAME_SINKS.test(f.src)).map((f) => f.rel)).toEqual([]);
+  });
+
+  it("EC-42: each predicate flags a mutated source", () => {
+    expect(COPY_PRIMITIVES.test(`copyFileSync(live.credentials, join(dir, "backup"));`)).toBe(true);
+    expect(COPY_PRIMITIVES.test(`await cp(src, dst);`)).toBe(true);
+    expect(COPY_PRIMITIVES.test(`renameSync(staged.credentials, live.credentials);`)).toBe(false);
+    expect(FS_WRITE_IMPORT.test(`import { readFileSync, writeFileSync } from "node:fs";`)).toBe(true);
+    expect(FS_WRITE_IMPORT.test(`import { existsSync, readFileSync } from "node:fs";`)).toBe(false);
+    expect(FRAME_SINKS.test(`import { SessionRecorder } from "../recorder.js";`)).toBe(true);
+    expect(FRAME_SINKS.test(`import type { WsBridge } from "../ws-bridge.js";`)).toBe(true);
+    expect(FRAME_SINKS.test(`import { log } from "../logger.js";`)).toBe(false);
+    // The write-site rule itself: a credential name next to a write primitive is a writer.
+    const mutated = `const p = join(home, ".claude", ".credentials.json"); writeFileSync(p, "{}");`;
+    expect(CREDENTIAL_NAMES.test(mutated) && WRITE_PRIMITIVES.test(mutated)).toBe(true);
+  });
+});

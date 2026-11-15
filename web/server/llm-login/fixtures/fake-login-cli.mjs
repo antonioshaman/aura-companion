@@ -7,7 +7,8 @@
 // auth.json before anything else) — so tests prove the live paths are out of
 // its reach. Every credential it writes is synthetic and carries SYNTH-CANARY.
 //
-// Argv: [--scenario=<name>] [--grandchild] [--grandchild-inherit] then the real CLI argv:
+// Argv: [--scenario=<name>] [--grandchild] [--grandchild-inherit] [--success-after-ms=N]
+//       [--marker=<M>] [--echo-code] then the real CLI argv:
 //   claude: `auth login`          codex: `login --device-auth`
 // Scenarios — claude: success | reject | garbage | ignore_term | env | silent
 //             codex:  success | no_network | wait | garbage | ignore_term | env | silent
@@ -22,7 +23,11 @@ import { createInterface } from "node:readline";
 const args = process.argv.slice(2);
 const flag = (name) => args.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
 const scenario = flag("scenario") ?? "success";
-const rest = args.filter((a) => !a.startsWith("--scenario=") && !a.startsWith("--success-after-ms=") && a !== "--grandchild" && a !== "--grandchild-inherit");
+// Fixture flags (never passed to a real CLI): --marker=<M> puts M into every synthetic
+// credential value (leak canary); --echo-code makes a refused Claude code reappear on stderr.
+const FIXTURE_FLAGS = ["--scenario=", "--success-after-ms=", "--marker="];
+const rest = args.filter((a) => !FIXTURE_FLAGS.some((f) => a.startsWith(f)) && !["--grandchild", "--grandchild-inherit", "--echo-code"].includes(a));
+const marker = flag("marker") ?? "";
 const provider = rest[0] === "auth" && rest[1] === "login" ? "claude"
   : rest[0] === "login" && rest[1] === "--device-auth" ? "codex"
   : null;
@@ -54,7 +59,7 @@ if (scenario === "silent") {
 function run() {
 
 const home = process.env.HOME ?? "";
-const synth = (label) => `SYNTH-CANARY-${label}-${randomBytes(6).toString("hex")}`;
+const synth = (label) => `SYNTH-CANARY-${marker}${label}-${randomBytes(6).toString("hex")}`;
 const b64url = (n) => randomBytes(n).toString("base64url");
 
 function writeJsonReplacing(path, value) {
@@ -102,7 +107,8 @@ if (provider === "claude") {
       return;
     }
     if (scenario !== "success" || code.split("#")[1] !== state) {
-      process.stderr.write("Login failed: Request failed with status code 400\n");
+      // --echo-code: the provider error quotes the code back (adversarial noise for the canary).
+      process.stderr.write(`Login failed: Request failed with status code 400${args.includes("--echo-code") ? ` (code ${code})` : ""}\n`);
       process.exit(1);
     }
     mkdirSync(dir, { recursive: true });
@@ -161,7 +167,7 @@ if (provider === "claude") {
           id_token: jwt({ email: "synthetic-owner@example.test", "https://api.openai.com/auth": { chatgpt_plan_type: "pro" } }),
           access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600, marker: synth("codex-access") }),
           refresh_token: synth("codex-refresh"),
-          account_id: "synthetic-account",
+          account_id: `synthetic-account${marker}`,
         },
         last_refresh: new Date().toISOString(),
       });
