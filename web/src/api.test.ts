@@ -2256,3 +2256,55 @@ describe("portable history API", () => {
     localStorage.removeItem("companion_auth_token");
   });
 });
+
+// ===========================================================================
+// Sign-in REST client (LLM auth phase 2c)
+// ===========================================================================
+describe("llmLogin* (sign-in REST)", () => {
+  // The sign-in routes require the Aura token even from localhost (D9), where
+  // a tab may have no token yet. A 401 must try the loopback hand-out once and
+  // retry — and must NOT log the browser out (handle401 would).
+  beforeEach(() => localStorage.clear());
+
+  it("start POSTs JSON to the provider route and returns status + body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ attempt: { id: "a" }, existing: false }, 201));
+    const r = await api.llmLoginStart("codex");
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/llm-auth/login/codex");
+    expect(init.method).toBe("POST");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(r).toEqual({ status: 201, body: { attempt: { id: "a" }, existing: false } });
+  });
+
+  it("code sends {code} to the attempt's code route", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ attempt: null }));
+    await api.llmLoginCode("claude", "abc123", "x#y");
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/llm-auth/login/claude/abc123/code");
+    expect(JSON.parse(init.body)).toEqual({ code: "x#y" });
+  });
+
+  it("on 401 fetches the local token once, stores it and retries with it", async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse({ error: "unauthorized" }, 401))
+      .mockResolvedValueOnce(mockResponse({ ok: true, token: "tok-local" }))
+      .mockResolvedValueOnce(mockResponse({ attempt: null }));
+    const r = await api.llmLoginGet("claude");
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/auth/auto");
+    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer tok-local");
+    expect(localStorage.getItem("companion_auth_token")).toBe("tok-local");
+    expect(r.status).toBe(200);
+  });
+
+  it("a 401 with no local token stays a 401 result and keeps the stored token untouched", async () => {
+    localStorage.setItem("companion_auth_token", "stale");
+    mockFetch
+      .mockResolvedValueOnce(mockResponse({ error: "unauthorized" }, 401))
+      .mockResolvedValueOnce(mockResponse({ ok: false }));
+    const r = await api.llmLoginGet("codex");
+    expect(r.status).toBe(401);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Not logged out: the general UI keeps working with its own auth state.
+    expect(localStorage.getItem("companion_auth_token")).toBe("stale");
+  });
+});

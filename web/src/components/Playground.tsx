@@ -32,12 +32,18 @@ import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { TurnFailureCard } from "./chat/TurnFailureCard.js";
 import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
 import { LlmAuthView } from "./diagnostics/LlmAuthCard.js";
+import { SignInChip, SignInPanel } from "./llm-login/SignInPanel.js";
+import { LOGIN_NOW, loginAttempt, loginView } from "./llm-login/login-fixtures.js";
+import { providerStatus } from "./diagnostics/llm-auth-fixtures.js";
 import { doctorReport, LLM_AUTH_NOW, statusSnapshot } from "./diagnostics/llm-auth-fixtures.js";
 import { describeLimitsPending, describeUsageLimitsReason } from "../../server/auth-status/auth-catalog.js";
 import {
   PROVIDER_AUTH_STATES,
   PROVIDER_IDS,
   TURN_FAILURE_KINDS,
+  LOGIN_ATTEMPT_STATES,
+  LOGIN_FAILURE_REASONS,
+  PLAN_CHECKS,
   USAGE_LIMITS_REASONS,
   type TurnFailure,
   type TurnFailureKind,
@@ -1248,6 +1254,7 @@ export function Playground() {
 
         {/* ─── LLM sign-in: turn failures, limits reasons, status (LLM auth task 14) ─── */}
         <LlmAuthPlaygroundSection />
+        <SignInPlaygroundSection />
 
         {/* ─── Messages ──────────────────────────────── */}
         <Section
@@ -5287,6 +5294,117 @@ function LlmAuthPlaygroundSection() {
             onCheck={() => {}}
             onDoctor={() => {}}
           />
+        </Card>
+      </div>
+    </Section>
+  );
+}
+
+/** Sign-in window (LLM auth phase 2c, task 11): every state × provider, every failure, plan checks. */
+function SignInPlaygroundSection() {
+  const noop = () => {};
+  return (
+    <Section
+      title="LLM sign-in window"
+      description="SignInPanel in every attempt state for Claude and Codex, every failure reason, plan / method checks, transport notices and the closed-window chip (synthetic links and codes)"
+    >
+      <div className="grid gap-4 md:grid-cols-2 max-w-4xl">
+        {PROVIDER_IDS.flatMap((provider) =>
+          LOGIN_ATTEMPT_STATES.map((state) => (
+            <Card key={`${provider}-${state}`} label={`SignInPanel — ${provider} / ${state}`}>
+              <SignInPanel
+                provider={provider}
+                view={loginView(loginAttempt(provider, state))}
+                now={LOGIN_NOW}
+                status={state === "succeeded" ? providerStatus({ provider, verifiedBy: "login", planCheck: "unset", expectedPlan: null }) : null}
+                onSubmitCode={noop}
+                onCancel={noop}
+                onClose={noop}
+                onStartAgain={noop}
+              />
+            </Card>
+          )),
+        )}
+        <Card label="SignInPanel — loading (before the first answer)">
+          <SignInPanel provider="claude" view={{ ...loginView(null), loaded: false }} now={LOGIN_NOW} onClose={noop} />
+        </Card>
+        <Card label="SignInPanel — nothing running (resume after it ended)">
+          <SignInPanel provider="codex" view={loginView(null)} now={LOGIN_NOW} onClose={noop} onStartAgain={noop} />
+        </Card>
+        <Card label="SignInPanel — Codex starting > 10 s">
+          <SignInPanel provider="codex" view={loginView(loginAttempt("codex", "starting", { startedAt: LOGIN_NOW - 15_000 }))} now={LOGIN_NOW} onCancel={noop} onClose={noop} />
+        </Card>
+        <Card label="SignInPanel — Claude code refused (code_format)">
+          <SignInPanel
+            provider="claude"
+            view={loginView(loginAttempt("claude", "awaiting_user", { codeError: "code_format", submissionsLeft: 4 }))}
+            now={LOGIN_NOW}
+            onSubmitCode={noop}
+            onCancel={noop}
+            onClose={noop}
+          />
+        </Card>
+        <Card label="SignInPanel — already in progress elsewhere (second tab / CLI)">
+          <SignInPanel provider="codex" view={loginView(loginAttempt("codex", "awaiting_user"), { existing: true })} now={LOGIN_NOW} onCancel={noop} onClose={noop} />
+        </Card>
+        {PROVIDER_IDS.flatMap((provider) =>
+          LOGIN_FAILURE_REASONS.map((reason) => (
+            <Card key={`${provider}-fail-${reason}`} label={`SignInPanel — ${provider} failed / ${reason}`}>
+              <SignInPanel provider={provider} view={loginView(loginAttempt(provider, "failed", { failure: reason }))} now={LOGIN_NOW} onClose={noop} onStartAgain={noop} />
+            </Card>
+          )),
+        )}
+        {PLAN_CHECKS.map((check) => (
+          <Card key={`plan-${check}`} label={`SignInPanel — Claude succeeded, plan ${check}`}>
+            <SignInPanel
+              provider="claude"
+              view={loginView(loginAttempt("claude", "succeeded"))}
+              now={LOGIN_NOW}
+              status={providerStatus({
+                provider: "claude",
+                verifiedBy: "login",
+                plan: check === "unknown" ? { known: false } : { known: true, value: check === "mismatch" ? "pro" : "max" },
+                planCheck: check,
+                expectedPlan: check === "unset" ? null : "max",
+              })}
+              onClose={noop}
+              onStartAgain={noop}
+            />
+          </Card>
+        ))}
+        <Card label="SignInPanel — Claude succeeded, ANTHROPIC_API_KEY overrides the sign-in">
+          <SignInPanel
+            provider="claude"
+            view={loginView(loginAttempt("claude", "succeeded"))}
+            now={LOGIN_NOW}
+            status={providerStatus({ provider: "claude", planCheck: "unset", effectiveMethod: { method: "env_token", source: "environment", variable: "ANTHROPIC_API_KEY" } })}
+            onClose={noop}
+          />
+        </Card>
+        <Card label="SignInPanel — Codex succeeded, OPENAI_API_KEY also set (neutral)">
+          <SignInPanel
+            provider="codex"
+            view={loginView(loginAttempt("codex", "succeeded"))}
+            now={LOGIN_NOW}
+            status={providerStatus({
+              provider: "codex",
+              planCheck: "unset",
+              effectiveMethod: { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } },
+            })}
+            onClose={noop}
+          />
+        </Card>
+        <Card label="SignInPanel — no Aura token">
+          <SignInPanel provider="claude" view={loginView(null, { notice: { kind: "unauthorized" } })} now={LOGIN_NOW} onClose={noop} />
+        </Card>
+        <Card label="SignInPanel — cooldown after a sign-in">
+          <SignInPanel provider="codex" view={loginView(null, { notice: { kind: "cooldown", retryAfterMs: 20_000 } })} now={LOGIN_NOW} onClose={noop} onStartAgain={noop} />
+        </Card>
+        <Card label="SignInChip — running (window closed)">
+          <SignInChip provider="codex" attempt={loginAttempt("codex", "awaiting_user")} onOpen={noop} onCancel={noop} />
+        </Card>
+        <Card label="SignInChip — finished">
+          <SignInChip provider="claude" attempt={loginAttempt("claude", "succeeded")} onOpen={noop} onDismiss={noop} />
         </Card>
       </div>
     </Section>
