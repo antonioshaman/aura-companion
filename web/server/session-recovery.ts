@@ -81,7 +81,29 @@ export const RELAUNCH_COOLDOWN_MS = 5_000;
  */
 export const RELAUNCH_SETTLE_MS = 60_000;
 
-export type RelaunchSource = "manual" | "autoheal" | "auto_relaunch" | "boot_watchdog" | "drift_recovery";
+export type RelaunchSource = "manual" | "autoheal" | "auto_relaunch" | "boot_watchdog" | "drift_recovery" | "credentials_renewed";
+
+/**
+ * Sources that must start a FRESH process: they never join an in-flight
+ * relaunch nor skip a settling one — that process may have read the old
+ * model, env or credentials. `credentials_renewed` (LLM auth task 13): a
+ * process launched before the promotion still holds the old sign-in.
+ */
+function requiresFreshProcess(source: RelaunchSource): boolean {
+  switch (source) {
+    case "manual":
+    case "credentials_renewed":
+      return true;
+    case "autoheal":
+    case "auto_relaunch":
+    case "boot_watchdog":
+    case "drift_recovery":
+      return false;
+  }
+  const _exhaustive: never = source;
+  void _exhaustive;
+  return false;
+}
 
 export interface RelaunchOutcome {
   ok: boolean;
@@ -560,7 +582,7 @@ export class SessionRecovery {
     for (;;) {
       const running = this.relaunchInFlight.get(sessionId);
       if (!running) break;
-      if (source !== "manual") {
+      if (!requiresFreshProcess(source)) {
         log.info("orchestrator", "relaunch joined an in-flight relaunch", {
           event: "session.relaunch.joined",
           sessionId,
@@ -570,7 +592,7 @@ export class SessionRecovery {
       }
       await running.catch(() => undefined);
     }
-    if (source !== "manual" && this.isRelaunchSettling(sessionId)) {
+    if (!requiresFreshProcess(source) && this.isRelaunchSettling(sessionId)) {
       log.info("orchestrator", "relaunch skipped: previous relaunch still settling", {
         event: "session.relaunch.skipped_settling",
         sessionId,

@@ -59,6 +59,7 @@ import {
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
 import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+import { currentCredentialEpoch } from "./credential-renewal.js";
 import { browserLifecycleEnv } from "./browser-lifecycle-env.js";
 import {
   buildLayerSpawnConfig,
@@ -309,6 +310,14 @@ export interface SdkSessionInfo {
   /** Opt-in KB auto-prime directive (default off). Persisted so a relaunch
    *  re-applies it. */
   kbAutoPrime?: boolean;
+  /**
+   * LLM auth task 13: the provider's sign-in epoch this process was launched
+   * on (`~/.companion/llm-auth/epoch-<provider>.json`). Lower than the current
+   * epoch → the session runs on the old sign-in and is relaunched at its first
+   * idle moment (`credential-renewal.ts`). Absent (older sessions, containers)
+   * = treated as current.
+   */
+  credentialEpochAtLaunch?: number;
   /** UI/UX toolkit exposure (PLAN Task 7), decided at the first spawn and
    *  reused on relaunch/resume. See `skill-exposure.ts`. */
   skillExposure?: SkillExposure;
@@ -477,8 +486,34 @@ export class CliLauncher {
   private stdioCliOpener:
     | ((sessionId: string, transport: CliTransport, opts?: { resume?: boolean; spawnModel?: string }) => ClaudeAdapter)
     | null = null;
+  /** LLM auth task 13: reads the provider's current sign-in epoch (test seam). */
+  private credentialEpochOf: (provider: BackendType) => number = (provider) => currentCredentialEpoch(provider);
+  /** Epoch of the PREVIOUS process of a session, kept from the spawn stamp until `prepareCodexHome`. */
+  private readonly credentialEpochBeforeSpawn = new Map<string, number | undefined>();
   constructor(port: number) {
     this.port = port;
+  }
+
+  setCredentialEpochReader(reader: (provider: BackendType) => number): void {
+    this.credentialEpochOf = reader;
+  }
+
+  /**
+   * Stamp the epoch the new process launches on, remembering the previous
+   * process's for `prepareCodexHome`. Containers carry their own credentials:
+   * no stamp (never renewed by a host sign-in).
+   */
+  private stampCredentialEpoch(info: SdkSessionInfo, options: LaunchOptions): void {
+    this.credentialEpochBeforeSpawn.set(info.sessionId, info.credentialEpochAtLaunch);
+    if (options.containerId) {
+      delete info.credentialEpochAtLaunch;
+      return;
+    }
+    try {
+      info.credentialEpochAtLaunch = this.credentialEpochOf(info.backendType === "codex" ? "codex" : "claude");
+    } catch {
+      delete info.credentialEpochAtLaunch;
+    }
   }
 
   /** Attach a persistent store for surviving server restarts. */
@@ -1242,6 +1277,7 @@ export class CliLauncher {
       this.recorder?.disableForSession(sessionId);
     }
 
+    this.stampCredentialEpoch(info, effectiveOptions);
     if (backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveOptions);
     } else {
@@ -1720,6 +1756,7 @@ export class CliLauncher {
       }
     }
     this.binaryNotFound.delete(sessionId);
+    this.stampCredentialEpoch(info, effectiveRelaunchOptions);
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);
     } else {
@@ -2479,8 +2516,21 @@ export class CliLauncher {
     };
   }
 
-  private prepareCodexHome(codexHome: string): void {
+  private prepareCodexHome(codexHome: string, sessionId?: string): void {
     mkdirSync(codexHome, { recursive: true });
+    // LLM auth task 13 (B-P1-3): the previous process of this session ran on
+    // an older sign-in epoch → its own auth.json copy predates the promotion,
+    // whatever its mtime says (it may have refreshed during the sign-in).
+    const epochBefore = sessionId !== undefined ? this.credentialEpochBeforeSpawn.get(sessionId) : undefined;
+    if (sessionId !== undefined) this.credentialEpochBeforeSpawn.delete(sessionId);
+    let copyPredatesSignIn = false;
+    if (epochBefore !== undefined) {
+      try {
+        copyPredatesSignIn = epochBefore < this.credentialEpochOf("codex");
+      } catch {
+        copyPredatesSignIn = false;
+      }
+    }
 
     const legacyHome = getLegacyCodexHome();
     if (resolve(legacyHome) === resolve(codexHome) || !existsSync(legacyHome)) {
@@ -2522,7 +2572,13 @@ export class CliLauncher {
           } else if (!destInfo.isSymbolicLink()) {
             // A regular file: either a pre-symlink copy, or a symlink that a
             // prior in-session refresh replaced via atomic rename.
-            if (statSync(src).mtimeMs >= statSync(dest).mtimeMs) {
+            if (copyPredatesSignIn) {
+              unlinkSync(dest);
+              symlinkSync(resolve(src), dest);
+              log.info("cli-launcher", "session auth.json copy reset to the new sign-in", {
+                event: "codex_home.auth_reset_by_epoch",
+              });
+            } else if (statSync(src).mtimeMs >= statSync(dest).mtimeMs) {
               // Legacy is same-or-newer, so this copy is stale (e.g. a re-login
               // rewrote legacy). Drop the stale copy and re-share the legacy
               // file so this home benefits from live legacy reads again. Safe:
@@ -2677,7 +2733,7 @@ export class CliLauncher {
       options.codexHome,
     );
     if (!isContainerized) {
-      this.prepareCodexHome(codexHome);
+      this.prepareCodexHome(codexHome, sessionId);
     }
     const credentialHooks = this.codexCredentialHooks(codexHome, isContainerized);
     options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);
@@ -2961,7 +3017,7 @@ export class CliLauncher {
       options.codexHome,
     );
     if (!isContainerized) {
-      this.prepareCodexHome(codexHome);
+      this.prepareCodexHome(codexHome, sessionId);
     }
     const credentialHooks = this.codexCredentialHooks(codexHome, isContainerized);
     options = this.applyCodexSkillExposure(sessionId, info, options, codexHome, isContainerized);

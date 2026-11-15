@@ -81,6 +81,21 @@ import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { autoResumeStaleAction } from "./auto-resume-visibility.js";
+import type { TurnFailure } from "./auth-status/auth-types.js";
+import type { CredentialRenewalRecord } from "./session-types.js";
+
+/**
+ * LLM auth task 13: the bridge's view of `CredentialRenewal`. The logic lives
+ * there; the bridge only asks at its delivery points.
+ */
+export interface CredentialDeliveryGate {
+  /** The one call at the `user_message` point: true → keep it queued. */
+  holdUserMessage(sessionId: string): boolean;
+  /** Input of the session is held (no queue flush, no council wake). */
+  isHolding(sessionId: string): boolean;
+  /** Sign-in failure of a session still on the old epoch → `stale_session_credentials`. */
+  adjustTurnFailure(sessionId: string, failure: TurnFailure): TurnFailure;
+}
 import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
 import {
   contextTokensFromUsage,
@@ -230,6 +245,9 @@ export class WsBridge {
    */
   private userFrameObservers: Array<(sessionId: string) => void> = [];
 
+  /** LLM auth task 13 — set by the orchestrator; null = nothing held. */
+  private credentialGate: CredentialDeliveryGate | null = null;
+
   /**
    * Narrow read-only view of {@link IdleTimerManager} used by the
    * idle-kill clock split (Task 11.7). The bridge only needs to know
@@ -323,6 +341,74 @@ export class WsBridge {
    * the orchestrator never calls it (DI lifetime = process lifetime), but
    * tests use it to keep their mock observers isolated.
    */
+  setCredentialGate(gate: CredentialDeliveryGate | null): void {
+    this.credentialGate = gate;
+  }
+
+  private holdingInput(sessionId: string): boolean {
+    return this.credentialGate?.isHolding(sessionId) ?? false;
+  }
+
+  /**
+   * LLM auth task 14: the session's renewal state for every tab (persisted,
+   * replayed in `session_init`). No secrets — provider, time, state.
+   */
+  publishCredentialRenewal(sessionId: string, record: CredentialRenewalRecord | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.state.credential_renewal = record;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { credential_renewal: record } });
+  }
+
+  /** Renewal done: deliver the held input to the (new) process — once. */
+  releaseHeldMessages(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    const adapter = session?.backendAdapter;
+    if (!session || !adapter?.isConnected() || session.pendingMessages.length === 0) return;
+    this.flushQueuedBrowserMessages(session, adapter, "credential_renewal_released");
+    this.persistSession(session);
+  }
+
+  /**
+   * Renewal relaunch failed: the held user messages are dropped from the
+   * queue (they stay in the chat history) and a "turn needs to be repeated"
+   * card with Retry takes their place. Nothing is sent by itself.
+   */
+  failHeldMessages(sessionId: string, failure: TurnFailure): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.pendingMessages = session.pendingMessages.filter((raw) => {
+      try {
+        return (JSON.parse(raw) as { type?: string }).type !== "user_message";
+      } catch {
+        return true;
+      }
+    });
+    const frame: BrowserIncomingMessage = { type: "error", message: failure.providerMessage, turnFailure: failure, timestamp: Date.now() };
+    this.appendHistory(session, frame);
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, frame);
+  }
+
+  /** The session's last turn failed on sign-in and the user has not sent anything since. */
+  hasPendingSignInRetry(sessionId: string): boolean {
+    const history = this.sessions.get(sessionId)?.messageHistory ?? [];
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i];
+      if (m.type === "user_message") return false;
+      if (m.type === "error" && m.turnFailure) {
+        return m.turnFailure.kind === "auth_rejected" || m.turnFailure.kind === "stale_session_credentials";
+      }
+    }
+    return false;
+  }
+
+  /** Bridge phase of a session (mid-turn check for the renewal). */
+  getSessionPhase(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.stateMachine.phase;
+  }
+
   onUserFrameObserved(callback: (sessionId: string) => void): () => void {
     this.userFrameObservers.push(callback);
     return () => {
@@ -479,6 +565,9 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return { kind: "session_unknown" };
     if (!session.backendAdapter) return { kind: "adapter_missing" };
+    // LLM auth task 13: moving to a new sign-in — the wake waits (newest-wins
+    // queue) and is caught up after the relaunch, never sent to the old process.
+    if (this.holdingInput(sessionId)) return { kind: "busy" };
     if (typeof session.backendAdapter.sendUserFrameFromServer !== "function") {
       return { kind: "unsupported_backend" };
     }
@@ -497,6 +586,7 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return { kind: "session_unknown" };
     if (!session.backendAdapter) return { kind: "adapter_missing" };
+    if (this.holdingInput(sessionId)) return { kind: "busy" };
     if (typeof session.backendAdapter.sendOrchestratorSyntheticFrame !== "function") {
       return { kind: "unsupported_backend" };
     }
@@ -1371,6 +1461,7 @@ export class WsBridge {
       // error stays live-only, as before.
       if (msg.type === "error" && msg.turnFailure) {
         if (msg.timestamp === undefined) msg.timestamp = Date.now();
+        if (this.credentialGate) msg.turnFailure = this.credentialGate.adjustTurnFailure(sessionId, msg.turnFailure);
         this.appendHistory(session, msg);
         this.persistSession(session);
       }
@@ -1703,7 +1794,7 @@ export class WsBridge {
     // so we must send it as soon as the WebSocket is open — NOT wait for
     // system.init (which would create a deadlock for slow-starting sessions
     // like Docker containers where the user message arrives before CLI connects).
-    if (session.pendingMessages.length > 0) {
+    if (session.pendingMessages.length > 0 && !this.holdingInput(sessionId)) {
       console.log(`[ws-bridge] Flushing ${session.pendingMessages.length} queued message(s) on CLI connect for session ${sessionId}`);
       const queued = session.pendingMessages.splice(0);
       for (const raw of queued) {
@@ -2748,6 +2839,18 @@ export class WsBridge {
       if (session.state.sessionGroupRole === "observer" && isObserverProbeText(msg.content)) {
         companionBus.emit("observer:probe-injected", { sessionId: session.id });
       }
+      // LLM auth task 13 — the one gate for every sender (browser, Retry,
+      // injectUserMessage: cron, auto-resume, REST, council peer): a session
+      // moving to a new sign-in keeps the message queued (visible in the
+      // chat at once) and gets it once, from the new process. Asked BEFORE
+      // the phase moves to streaming: the renewal reads the phase to tell an
+      // idle session from a busy one.
+      if (this.credentialGate?.holdUserMessage(session.id)) {
+        this.broadcastToBrowsers(session, userMessage);
+        this.enqueuePendingMessage(session, JSON.stringify(msg));
+        this.persistSession(session);
+        return;
+      }
       const transitioned = session.stateMachine.transition("streaming", "user_message");
       if (!transitioned) {
         // Session not ready yet (e.g. still initializing). Log a warning so
@@ -2785,7 +2888,9 @@ export class WsBridge {
     // For Claude: adapter may exist but WS is disconnected (CLI cycling). Queue at
     // bridge level so handleCLIOpen flushes via adapter.send() after reconnect.
     if (session.backendAdapter?.isConnected()) {
-      if (session.pendingMessages.length > 0) {
+      // Held input stays queued; a control frame (interrupt, permission) still
+      // reaches the running process directly.
+      if (session.pendingMessages.length > 0 && !this.holdingInput(session.id)) {
         this.flushQueuedBrowserMessages(session, session.backendAdapter, "backend_connected_send");
         // Preserve FIFO ordering: if flush was interrupted and left pending
         // messages, queue this incoming message behind them instead of sending
@@ -2863,6 +2968,8 @@ export class WsBridge {
 
   private flushQueuedBrowserMessages(session: Session, adapter: IBackendAdapter, reason: string): void {
     if (session.pendingMessages.length === 0) return;
+    // LLM auth task 13: held input goes to the new process only.
+    if (this.holdingInput(session.id)) return;
 
     log.info("ws-bridge", "Flushing queued messages", {
       sessionId: session.id,
@@ -2887,6 +2994,11 @@ export class WsBridge {
       }
 
       const sent = adapter.send(queuedMsg);
+      // A queued user message that reaches an idle CLI starts its turn (a
+      // message held by the credential renewal never moved the phase).
+      if (sent && queuedMsg.type === "user_message" && session.stateMachine.phase === "ready") {
+        session.stateMachine.transition("streaming", "user_message");
+      }
       if (!sent && RETRYABLE_BACKEND_MESSAGE_TYPES.has(queuedMsg.type)) {
         const remaining = queued.slice(i);
         session.pendingMessages = remaining.concat(session.pendingMessages);

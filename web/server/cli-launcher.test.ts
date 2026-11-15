@@ -1709,6 +1709,28 @@ describe("relaunch", () => {
     expect(session?.state).toBe("starting");
   });
 
+  it("stamps the sign-in epoch the process launches on, and the new one on relaunch (LLM auth task 13)", async () => {
+    // The renewal compares this stamp with the provider's current epoch; the
+    // relaunch must move it forward, or the session would be relaunched again
+    // on every message.
+    let epoch = 3;
+    launcher.setCredentialEpochReader(() => epoch);
+    let resolveFirst: (code: number) => void;
+    mockSpawn.mockReturnValueOnce({
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    });
+    launcher.launch({ cwd: "/tmp/project" });
+    expect(launcher.getSession("test-session-id")?.credentialEpochAtLaunch).toBe(3);
+    epoch = 4;
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    expect(launcher.getSession("test-session-id")?.credentialEpochAtLaunch).toBe(4);
+  });
+
   // A relaunch whose CLI binary has vanished from PATH must report failure.
   // It used to return { ok: true } after marking the session exited (127),
   // so recovery counted it as a success, reset the crash budget and retried
@@ -3984,6 +4006,51 @@ describe("prepareCodexHome auth.json seeding", () => {
     expect(readFileSync(dest, "utf-8")).toBe('{"token":"session-refreshed"}');
     // legacy must remain untouched (no server-side write of the shared credential)
     expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"older-legacy"}');
+  });
+
+  it("resets a session copy made before a sign-in promotion even when the copy's mtime is newer (epoch, not mtime)", () => {
+    // LLM auth task 13 (B-P1-3): the session refreshed its own copy DURING the
+    // 15-minute sign-in, so its mtime is newer than the promoted primary. The
+    // mtime rule above would keep the old account. The previous process ran on
+    // epoch 1, the provider is now on epoch 2 → the copy predates the
+    // sign-in and is replaced by the symlink to the new primary.
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"old-account-refreshed"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"new-sign-in"}');
+    const now = Date.now() / 1000;
+    utimesSync(join(codexHome, "auth.json"), now, now);
+    utimesSync(join(legacyDir, "auth.json"), now - 600, now - 600);
+    const internal = launcher as unknown as {
+      credentialEpochBeforeSpawn: Map<string, number | undefined>;
+      prepareCodexHome(home: string, sessionId?: string): void;
+    };
+    launcher.setCredentialEpochReader(() => 2);
+    internal.credentialEpochBeforeSpawn.set("s-epoch", 1);
+    internal.prepareCodexHome(codexHome, "s-epoch");
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"new-sign-in"}');
+    // The primary is never written from here.
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"new-sign-in"}');
+  });
+
+  it("keeps a newer session copy when the previous process already ran on the current epoch", () => {
+    // Same files, but no sign-in happened since the previous launch: the
+    // copy is the session's own legitimate refresh and must survive.
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"session-refreshed"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"primary"}');
+    const now = Date.now() / 1000;
+    utimesSync(join(codexHome, "auth.json"), now, now);
+    utimesSync(join(legacyDir, "auth.json"), now - 600, now - 600);
+    const internal = launcher as unknown as {
+      credentialEpochBeforeSpawn: Map<string, number | undefined>;
+      prepareCodexHome(home: string, sessionId?: string): void;
+    };
+    launcher.setCredentialEpochReader(() => 2);
+    internal.credentialEpochBeforeSpawn.set("s-epoch", 2);
+    internal.prepareCodexHome(codexHome, "s-epoch");
+    expect(lstatSync(join(codexHome, "auth.json")).isSymbolicLink()).toBe(false);
   });
 
   it("does NOT re-seed non-auth files even when the legacy copy is newer", () => {

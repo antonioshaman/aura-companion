@@ -1,14 +1,15 @@
 import { userInfo } from "node:os";
-import { join } from "node:path";
 import { recordCodexLoginEvidence } from "../auth-status/codex-provider-evidence.js";
 import { codexTokenFingerprintAt } from "../auth-status/credential-locator.js";
 import { getServiceAuthStatusCore, probeStagedCredentials, readUnitTexts } from "../auth-status/service-status.js";
 import { parseSystemdUnit } from "../auth-status/status-core.js";
 import { log } from "../logger.js";
-import { COMPANION_HOME } from "../paths.js";
 import { resolveBinary } from "../path-resolver.js";
-import { promoteCredentials, recoverPromotions, type PromotedCredentials, type PromotionDeps } from "./credential-promotion.js";
+import { getCredentialRenewal } from "../credential-renewal.js";
+import { promoteCredentials, readEpoch, recoverPromotions, type PromotedCredentials, type PromotionDeps } from "./credential-promotion.js";
+import type { PromotionContext, PromotionOutcome } from "./login-attempt.js";
 import { LoginAttempts, sweepOrphanAttempts, type LoginAttemptsDeps } from "./login-attempt.js";
+import { LLM_AUTH_ATTEMPTS_DIR, LLM_AUTH_STATE_DIR } from "./state-dir.js";
 
 /**
  * Production wiring of the sign-in core for the server: the one registry
@@ -18,8 +19,7 @@ import { LoginAttempts, sweepOrphanAttempts, type LoginAttemptsDeps } from "./lo
  * `~/.companion/llm-auth/`.
  */
 
-export const LLM_AUTH_STATE_DIR = join(COMPANION_HOME, "llm-auth");
-export const LLM_AUTH_ATTEMPTS_DIR = join(LLM_AUTH_STATE_DIR, "attempts");
+export { LLM_AUTH_ATTEMPTS_DIR, LLM_AUTH_STATE_DIR };
 
 /**
  * After a promotion: Codex gets its D8 sign-in evidence bound to the new
@@ -49,10 +49,35 @@ export function servicePromotionDeps(over: Partial<PromotionDeps> = {}): Promoti
     uid: process.getuid?.() ?? -1,
     probeStaged: (provider, stagingHome) => probeStagedCredentials(provider, stagingHome, serviceEnv),
     codexTokenFingerprint: codexTokenFingerprintAt,
-    beforePromote: async () => {},
+    // D1 barrier: live Claude writers are stopped before the rename (Codex: no-op).
+    beforePromote: async (provider) => {
+      await getCredentialRenewal()?.beforePromote(provider);
+    },
     noteCredentialsPromoted,
     ...over,
   };
+}
+
+/**
+ * LLM auth task 13: a promotion, then the live sessions. Success → every live
+ * session of the provider on an older epoch moves to the new sign-in at its
+ * first idle moment. Failure → the epoch did not move; only the sessions the
+ * barrier stopped come back (S3-AC4: nobody else is touched).
+ */
+export async function promoteAndRenew(
+  ctx: PromotionContext,
+  deps: PromotionDeps,
+  renewal = getCredentialRenewal(),
+): Promise<PromotionOutcome> {
+  let outcome: PromotionOutcome;
+  try {
+    outcome = await promoteCredentials(ctx, deps);
+  } catch (err) {
+    renewal?.promotionSettled(ctx.provider, false, null);
+    throw err;
+  }
+  renewal?.promotionSettled(ctx.provider, outcome.ok, outcome.ok ? readEpoch(deps.stateDir, ctx.provider)?.promotedAt ?? null : null);
+  return outcome;
 }
 
 // ─── The one registry per server (phase 2b, task 8) ───────────────────────────
@@ -75,7 +100,7 @@ export function serviceLoginAttemptsDeps(over: Partial<LoginAttemptsDeps> = {}):
     callerUid: process.getuid?.() ?? me.uid,
     serviceUser: parseSystemdUnit(readUnitTexts()).user,
     serviceEnv: process.env,
-    promote: (ctx) => promoteCredentials(ctx, servicePromotionDeps()),
+    promote: (ctx) => promoteAndRenew(ctx, servicePromotionDeps()),
     ...over,
   };
 }
