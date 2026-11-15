@@ -151,6 +151,7 @@ vi.mock("./settings-manager.js", () => ({
     councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
     diagnosticsMemoryReport: false,
+    expectedPlans: {},
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -181,6 +182,7 @@ vi.mock("./settings-manager.js", () => ({
     councilSecondReviewer: patch.councilSecondReviewer ?? { reviewer: "off" as const, scope: "review-implement" as const },
     kbAnalysis: patch.kbAnalysis ?? { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
     diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? false,
+    expectedPlans: patch.expectedPlans ?? {},
     updatedAt: Date.now(),
   })),
 }));
@@ -1028,6 +1030,38 @@ describe("council second-opinion reviewer routes", () => {
     expect(json.kbAnalysis).toEqual({ newEntriesThreshold: 5, sessionsThreshold: 40, maxAgeDays: 7 });
     expect(json.diagnosticsMemoryReport).toBe(true);
   });
+
+  // LLM auth phase 2 task 7 (D7): the expected plan is a closed list per
+  // provider. An off-list plan or an unknown provider is a 400; null removes an
+  // expectation; the stored value is the canonical lower-case plan.
+  it("PUT /api/settings validates expectedPlans against the closed list and round-trips it", async () => {
+    for (const body of [
+      { expectedPlans: { claude: "plus" } },
+      { expectedPlans: { gemini: "pro" } },
+      { expectedPlans: "max" },
+    ]) {
+      const bad = await app.request("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(bad.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(settingsManager.updateSettings).not.toHaveBeenCalled();
+
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    }) as never);
+    const ok = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedPlans: { claude: "MAX", codex: null } }),
+    });
+    expect(ok.status).toBe(200);
+    expect(vi.mocked(settingsManager.updateSettings).mock.calls[0][0].expectedPlans).toEqual({ claude: "max" });
+    expect((await ok.json()).expectedPlans).toEqual({ claude: "max" });
+  });
 });
 
 // FIX-AP-1: "Dismiss for now" releases a STOP's hold on auto-proceed. The
@@ -1857,6 +1891,7 @@ describe("GET /api/sessions/:id/archive-info", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -2235,6 +2270,7 @@ describe("GET /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 123,
     });
 
@@ -2271,6 +2307,7 @@ describe("GET /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
     });
   });
 
@@ -2307,6 +2344,7 @@ describe("GET /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 123,
     });
 
@@ -2343,6 +2381,7 @@ describe("GET /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
     });
   });
 
@@ -2380,6 +2419,7 @@ describe("GET /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 100,
     });
 
@@ -2425,6 +2465,7 @@ describe("PUT /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 456,
     });
 
@@ -2483,6 +2524,7 @@ describe("PUT /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
     });
   });
 
@@ -2519,6 +2561,7 @@ describe("PUT /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 789,
     });
 
@@ -2632,6 +2675,7 @@ describe("PUT /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 999,
     });
 
@@ -2736,6 +2780,7 @@ describe("PUT /api/settings", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 500,
     });
 
@@ -2970,6 +3015,7 @@ describe("GET /api/linear/issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3013,6 +3059,7 @@ describe("GET /api/linear/issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3109,6 +3156,7 @@ describe("GET /api/linear/issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3212,6 +3260,7 @@ describe("GET /api/linear/issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3280,6 +3329,7 @@ describe("GET /api/linear/connection", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3323,6 +3373,7 @@ describe("GET /api/linear/connection", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3388,6 +3439,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3435,6 +3487,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3481,6 +3534,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3529,6 +3583,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3611,6 +3666,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3672,6 +3728,7 @@ describe("GET /api/linear/projects", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3715,6 +3772,7 @@ describe("GET /api/linear/projects", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3788,6 +3846,7 @@ describe("GET /api/linear/project-issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3831,6 +3890,7 @@ describe("GET /api/linear/project-issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 
@@ -3919,6 +3979,7 @@ describe("GET /api/linear/project-issues", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 

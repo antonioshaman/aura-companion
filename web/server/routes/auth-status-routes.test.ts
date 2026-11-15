@@ -226,3 +226,46 @@ describe("helpers", () => {
     expect(projectBackendAuthState(status("claude", { state: "working", verifiedBy: "local" }), { authState: "expired" })).toEqual({ authState: "expired" });
   });
 });
+
+/**
+ * Phase 2 task 7 (spec S2-AC1…AC4): each provider status carries the owner's
+ * expected plan, the plan check and the method sessions really use. Computed
+ * at READ time from the current settings, so the warning clears by itself
+ * once the plan matches or the expectation is removed — nothing is cached.
+ */
+describe("status carries expectedPlan, planCheck and the effective sign-in method", () => {
+  it("mismatch: both values are in the status (S2-AC1) and it clears when the expectation is removed", async () => {
+    let expected: string | null = "max";
+    const { root, core } = app({
+      signInFacts: () => ({ expectedPlan: expected, effectiveMethod: { method: "subscription", source: "sign_in" } }),
+    });
+    core.peek.mockReturnValue(snapshot({ plan: { known: true, value: "pro" } }));
+    const body = await (await root.request("/api/llm-auth/status/claude")).json();
+    expect(body.status).toMatchObject({ plan: { known: true, value: "pro" }, expectedPlan: "max", planCheck: "mismatch" });
+
+    expected = null;
+    const after = await (await root.request("/api/llm-auth/status")).json();
+    expect(after.status.providers.claude).toMatchObject({ expectedPlan: null, planCheck: "unset" });
+  });
+
+  it("an unknown plan is \"unknown\", never \"match\" (S2-AC3) — for Codex too", async () => {
+    const { root, core } = app({
+      signInFacts: () => ({ expectedPlan: "pro", effectiveMethod: { method: "subscription", source: "sign_in" } }),
+    });
+    core.peek.mockReturnValue({ ...snapshot(), providers: { claude: status("claude", { plan: { known: false } }), codex: status("codex", { plan: { known: false } }) } });
+    const body = await (await root.request("/api/llm-auth/status")).json();
+    expect(body.status.providers.claude.planCheck).toBe("unknown");
+    expect(body.status.providers.codex.planCheck).toBe("unknown");
+  });
+
+  it("carries the overriding method by name, per provider (S2-AC4)", async () => {
+    const { root } = app({
+      signInFacts: (provider) => provider === "claude"
+        ? { expectedPlan: null, effectiveMethod: { method: "env_token", source: "environment", variable: "CLAUDE_CODE_OAUTH_TOKEN" } }
+        : { expectedPlan: null, effectiveMethod: { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } } },
+    });
+    const body = await (await root.request("/api/llm-auth/status")).json();
+    expect(body.status.providers.claude.effectiveMethod).toEqual({ method: "env_token", source: "environment", variable: "CLAUDE_CODE_OAUTH_TOKEN" });
+    expect(body.status.providers.codex.effectiveMethod.alsoSet).toEqual({ source: "settings", variable: "OPENAI_API_KEY" });
+  });
+});

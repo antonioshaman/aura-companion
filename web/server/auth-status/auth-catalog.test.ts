@@ -279,6 +279,18 @@ describe("sign-in catalog", () => {
     expect(signIn.action.kind).toBe("none");
   });
 
+  it("D5: Codex with a ChatGPT sign-in AND a key set → a neutral note that the sign-in is used, not an override", () => {
+    const note = describeEffectiveMethod(
+      { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } },
+      "codex",
+    );
+    expect(note.title).toMatch(/use the stored sign-in/i);
+    expect(note.title).not.toMatch(/instead of/i);
+    expect(note.detail).toContain("OPENAI_API_KEY");
+    expect(note.detail).toMatch(/settings/i);
+    expect(note.detail).toMatch(/sign-in is used/i);
+  });
+
   it("verifiedBy labels cover provider, local and login", () => {
     expect(verifiedByLabel("provider")).toBe("with the provider");
     expect(verifiedByLabel("local")).toBe("local only");

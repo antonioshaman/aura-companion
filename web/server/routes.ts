@@ -78,7 +78,7 @@ import { makeLegacyProbeRunner } from "./auth-status/probe-runner.js";
 import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMethod } from "./host-auth-status.js";
 import { getServiceAuthStatusCore } from "./auth-status/service-status.js";
 import { getServiceDoctorRunner } from "./auth-status/doctor-service.js";
-import { projectBackendAuthState, registerAuthStatusRoutes } from "./routes/auth-status-routes.js";
+import { projectBackendAuthState, registerAuthStatusRoutes, serviceSignInFacts } from "./routes/auth-status-routes.js";
 import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
@@ -2556,7 +2556,7 @@ export function createRoutes(
 
   registerPortableHistoryRoutes(api, { sessionStore: portableSessionStore, launcher, bridge: wsBridge, orchestrator });
   registerFsRoutes(api);
-  registerAuthStatusRoutes(api, { statusCore: getServiceAuthStatusCore, doctor: getServiceDoctorRunner });
+  registerAuthStatusRoutes(api, { statusCore: getServiceAuthStatusCore, doctor: getServiceDoctorRunner, signInFacts: serviceSignInFacts });
   registerEnvRoutes(api, { webDir: WEB_DIR });
   registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);

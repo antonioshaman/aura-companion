@@ -461,8 +461,17 @@ export function describeEffectiveMethod(effective: EffectiveAuthMethod, provider
   const name = providerLabel(provider);
   const variable = effective.variable ?? "a credential";
   switch (effective.source) {
-    case "sign_in":
-      return { title: `${name} sessions use the stored sign-in`, detail: "Sessions use the service user's sign-in.", action: { kind: "none" } };
+    case "sign_in": {
+      const also = effective.alsoSet;
+      const place = also?.source === "environment" ? "the service environment" : "the settings";
+      return {
+        title: `${name} sessions use the stored sign-in`,
+        detail: also
+          ? `${also.variable} is also set in ${place}, but this ${name} CLI prefers the sign-in, so the sign-in is used.`
+          : "Sessions use the service user's sign-in.",
+        action: { kind: "none" },
+      };
+    }
     case "environment":
       return {
         title: `${name} sessions use ${variable} instead of the sign-in`,

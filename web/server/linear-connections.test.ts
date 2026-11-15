@@ -73,6 +73,7 @@ beforeEach(() => {
     councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
     diagnosticsMemoryReport: false,
+    expectedPlans: {},
     updatedAt: 0,
   });
 });
@@ -229,6 +230,7 @@ describe("linear-connections", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     // Need to reset so migration runs with updated mock
@@ -278,6 +280,7 @@ describe("linear-connections", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
     _resetForTest(join(tempDir, "linear-connections-migrate.json"));
@@ -346,6 +349,7 @@ describe("linear-connections", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
 

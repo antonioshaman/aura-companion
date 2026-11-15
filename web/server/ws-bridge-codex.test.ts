@@ -143,6 +143,7 @@ describe("attachCodexAdapterHandlers", () => {
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
       diagnosticsMemoryReport: false,
+      expectedPlans: {},
       updatedAt: 0,
     });
   });
@@ -1162,6 +1163,7 @@ describe("attachCodexAdapterHandlers", () => {
         councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
         kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
         diagnosticsMemoryReport: false,
+        expectedPlans: {},
         updatedAt: 0,
       });
     }
@@ -1346,6 +1348,7 @@ describe("attachCodexAdapterHandlers", () => {
         councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
         kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
         diagnosticsMemoryReport: false,
+        expectedPlans: {},
         updatedAt: 0,
       });
 
@@ -1400,6 +1403,7 @@ describe("attachCodexAdapterHandlers", () => {
         councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
         kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
         diagnosticsMemoryReport: false,
+        expectedPlans: {},
         updatedAt: 0,
       });
 
@@ -1519,6 +1523,7 @@ describe("attachCodexAdapterHandlers", () => {
         councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
         kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
         diagnosticsMemoryReport: false,
+        expectedPlans: {},
         updatedAt: 0,
       });
 
@@ -1657,6 +1662,7 @@ describe("attachCodexAdapterHandlers", () => {
         councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
         kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
         diagnosticsMemoryReport: false,
+        expectedPlans: {},
         updatedAt: 0,
       });
 

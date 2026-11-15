@@ -1,6 +1,6 @@
 import { getSettings, type CompanionSettings } from "./settings-manager.js";
 import { locateClaudeOAuth, locateCodexAuth } from "./auth-status/credential-locator.js";
-import { CLAUDE_AUTH_ENV_VARS, hasAnyClaudeAuthEnv, hasNonEmptyEnvVar } from "./provider-auth-env.js";
+import { CLAUDE_AUTH_ENV_VARS, effectiveSessionAuthMethod } from "./provider-auth-env.js";
 
 /**
  * Best-effort "is the coding CLI signed in on THIS host" detection, for the
@@ -35,9 +35,12 @@ export function getClaudeAuthStatus(
   settings: Pick<CompanionSettings, "claudeCodeOAuthToken" | "anthropicApiKey"> = getSettings(),
   now: number = Date.now(),
 ): BackendAuthStatus {
-  if (hasAnyClaudeAuthEnv(env)) return { authState: "authorized", authMethod: "env" };
-  if (settings.claudeCodeOAuthToken.trim()) return { authState: "authorized", authMethod: "settings_token" };
-  if (settings.anthropicApiKey.trim()) return { authState: "authorized", authMethod: "api_key" };
+  // One precedence for the badge and the provider status (AP-19, phase 2 task 7).
+  const effective = effectiveSessionAuthMethod("claude", { ...settings, openaiApiKey: "" }, env, null);
+  if (effective.source === "environment") return { authState: "authorized", authMethod: "env" };
+  if (effective.source === "settings") {
+    return { authState: "authorized", authMethod: effective.method === "api_key" ? "api_key" : "settings_token" };
+  }
 
   // macOS Keychain is not probed (see credential-locator.ts): the server
   // target is Linux and env/settings credentials are detected first anyway.
@@ -64,11 +67,12 @@ export function getCodexAuthStatus(
   settings: Pick<CompanionSettings, "openaiApiKey"> = getSettings(),
 ): BackendAuthStatus {
   const file = locateCodexAuth(env);
+  const effective = effectiveSessionAuthMethod(
+    "codex", { claudeCodeOAuthToken: "", anthropicApiKey: "", openaiApiKey: settings.openaiApiKey }, env, file?.authMode ?? null,
+  );
   if (file?.authMode === "chatgpt") return { authState: "authorized", authMethod: "oauth" };
-  if (hasNonEmptyEnvVar(env, "OPENAI_API_KEY") || hasNonEmptyEnvVar(env, "CODEX_API_KEY")) {
-    return { authState: "authorized", authMethod: "env" };
-  }
-  if (settings.openaiApiKey.trim()) return { authState: "authorized", authMethod: "api_key" };
+  if (effective.source === "environment") return { authState: "authorized", authMethod: "env" };
+  if (effective.source === "settings") return { authState: "authorized", authMethod: "api_key" };
   if (file) {
     return { authState: "authorized", authMethod: file.authMode === "api_key" ? "api_key" : "oauth" };
   }
