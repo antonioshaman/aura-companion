@@ -163,6 +163,14 @@ export function locateClaudeOAuth(env: NodeJS.ProcessEnv = process.env): ClaudeO
   return null;
 }
 
+/** `credentialFingerprint` of the access token in a Codex auth.json at `path`; null when absent / unparsable. */
+export function codexTokenFingerprintAt(path: string): string | null {
+  const tokens = readJson(path)?.tokens;
+  if (!tokens || typeof tokens !== "object") return null;
+  const access = (tokens as Record<string, unknown>).access_token;
+  return typeof access === "string" && access ? credentialFingerprint(access) : null;
+}
+
 /** Path of `~/.codex/auth.json` for the environment (whether or not it exists). */
 export function codexAuthPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(resolveAuthHome(env), ".codex", CODEX_CREDENTIAL_FILE_NAME);

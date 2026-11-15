@@ -42,6 +42,27 @@ export type BoundedProbeResult =
   | { kind: "timeout"; killedWith: "SIGTERM" | "SIGKILL" }
   | { kind: "spawn_error"; code: string };
 
+export interface KillEscalation {
+  /** Stop the pending SIGKILL (call once the child is reaped). */
+  cancel(): void;
+}
+
+/**
+ * TERM now, KILL after `graceMs` unless cancelled — shared by the bounded
+ * probe and the long-lived sign-in runner (plan 2a task 4). `send` targets
+ * whatever the caller owns (one child, or its process group) and must not
+ * throw for an already-gone target; errors are swallowed here (EC-53: this
+ * runs from a timer).
+ */
+export function escalateKill(send: (signal: "SIGTERM" | "SIGKILL") => void, graceMs: number): KillEscalation {
+  const trySend = (signal: "SIGTERM" | "SIGKILL") => {
+    try { send(signal); } catch { /* already gone */ }
+  };
+  trySend("SIGTERM");
+  const timer = setTimeout(() => trySend("SIGKILL"), graceMs);
+  return { cancel: () => clearTimeout(timer) };
+}
+
 class CappedBuffer {
   private chunks: Buffer[] = [];
   private size = 0;
@@ -98,14 +119,12 @@ export function runBoundedProbe(
 
     let timedOut: "SIGTERM" | "SIGKILL" | null = null;
     let spawnError: string | null = null;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let escalation: KillEscalation | null = null;
 
     const timer = setTimeout(() => {
-      timedOut = "SIGTERM";
-      try { child.kill("SIGTERM"); } catch { /* already gone */ }
-      killTimer = setTimeout(() => {
-        timedOut = "SIGKILL";
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      escalation = escalateKill((signal) => {
+        timedOut = signal;
+        child.kill(signal);
       }, killGraceMs);
     }, timeoutMs);
 
@@ -114,7 +133,7 @@ export function runBoundedProbe(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
+      escalation?.cancel();
       resolve(r);
     };
 

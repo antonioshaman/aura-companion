@@ -10,7 +10,8 @@ import { axe } from "vitest-axe";
  * - both providers render their catalog state title, account / plan /
  *   sign-in / token expiry / last success, and "unknown" (never blank) for
  *   fields the provider does not report (Codex plan) — S1-AC1, Boundaries;
- * - invalid → relogin instruction; no_network → keeps last success (S1-AC2/AC3);
+ * - invalid → sign-in instruction; verifiedBy "login" reads "by sign-in" (phase 2 D8);
+ * - (phase 1) no_network → keeps last success (S1-AC2/AC3);
  * - every ProviderAuthState renders for both providers (Codex parity);
  * - the doctor report: findings, a not-checked location (never "nothing
  *   found"), the all-clear line;
@@ -68,6 +69,18 @@ describe("LlmAuthView", () => {
     // Its retry action is the Check button, not a stray "Retry" line.
     expect(within(codex).queryByText("Retry")).toBeNull();
     expect(within(codex).getByText(/1m ago/)).toBeInTheDocument();
+  });
+
+  it("phase 2 D8: a status confirmed by a just-completed sign-in says so, not 'local only'", () => {
+    render(
+      <LlmAuthView
+        status={{ tag: "ready", data: statusSnapshot({}, { verifiedBy: "login" }) }}
+        doctor={{ tag: "ready", data: null }}
+        now={LLM_AUTH_NOW}
+      />,
+    );
+    expect(within(screen.getByTestId("llm-auth-status-codex")).getByText(/\(by sign-in\)/)).toBeInTheDocument();
+    expect(within(screen.getByTestId("llm-auth-status-claude")).getByText(/\(with the provider\)/)).toBeInTheDocument();
   });
 
   it("renders every state for both providers (Codex parity)", () => {

@@ -69,7 +69,7 @@ function ActionRow({
           {formatAction(action)}
         </a>
       );
-    case "relogin":
+    case "sign_in":
     case "update_cli":
     case "run_as_root":
     case "run_as_service_user":

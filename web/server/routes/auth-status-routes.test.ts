@@ -220,5 +220,9 @@ describe("helpers", () => {
     expect(projectBackendAuthState(status("claude", { state: "no_network" }), legacy)).toEqual(legacy);
     expect(projectBackendAuthState(status("claude", { state: "not_verified", reason: "cli_version_unproven", verifiedBy: "local" }), { authState: "expired" })).toEqual({ authState: "expired" });
     expect(projectBackendAuthState(status("codex", { state: "working", verifiedBy: "provider" }), { authState: "expired" }).authState).toBe("authorized");
+    // Phase 2 D8: a just-completed official sign-in is provider evidence too; a
+    // local-only "working" still keeps the legacy value.
+    expect(projectBackendAuthState(status("codex", { state: "working", verifiedBy: "login" }), { authState: "expired" }).authState).toBe("authorized");
+    expect(projectBackendAuthState(status("claude", { state: "working", verifiedBy: "local" }), { authState: "expired" })).toEqual({ authState: "expired" });
   });
 });

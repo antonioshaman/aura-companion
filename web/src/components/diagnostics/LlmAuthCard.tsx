@@ -17,6 +17,7 @@ import {
   describeDoctorUnchecked,
   doctorPlaceLabel,
   formatAction,
+  verifiedByLabel,
   formatKnown,
   providerLabel,
 } from "../../../server/auth-status/auth-catalog.js";
@@ -94,7 +95,7 @@ function ProviderStatus({ s, now }: { s: ProviderAuthStatus; now: number }) {
         <dd className="text-cc-fg tabular-nums">{s.lastSuccessAt === null ? "never" : `${dateTime(s.lastSuccessAt)} (${ago(now, s.lastSuccessAt)})`}</dd>
         <dt className="text-cc-muted">Checked</dt>
         <dd className="text-cc-fg tabular-nums">
-          {dateTime(s.checkedAt)} ({s.verifiedBy === "provider" ? "with the provider" : "local only"})
+          {dateTime(s.checkedAt)} ({verifiedByLabel(s.verifiedBy)})
         </dd>
         <dt className="text-cc-muted">CLI</dt>
         <dd className="text-cc-fg font-mono-code break-all">

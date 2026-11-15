@@ -9,8 +9,16 @@ import {
   describeTurnFailure,
   describeUsageLimitsReason,
   describeLimitsPending,
+  describeEffectiveMethod,
+  describeLoginAttempt,
+  describeLoginFailure,
+  describeManualSignIn,
+  describePlanCheck,
   formatAction,
   formatKnown,
+  providerLabel,
+  signInSteps,
+  verifiedByLabel,
   turnFailureFacts,
   usageWindowLabel,
 } from "./auth-catalog.js";
@@ -18,6 +26,10 @@ import {
   DOCTOR_FINDING_KINDS,
   DOCTOR_PLACE_CLASSES,
   DOCTOR_UNCHECKED_REASONS,
+  EFFECTIVE_AUTH_SOURCES,
+  LOGIN_ATTEMPT_STATES,
+  LOGIN_FAILURE_REASONS,
+  PLAN_CHECKS,
   NOT_VERIFIED_REASONS,
   PROVIDER_AUTH_STATES,
   PROVIDER_IDS,
@@ -56,11 +68,11 @@ describe("auth catalog", () => {
     }
   });
 
-  it("S1-AC2: invalid credentials carry a relogin action with the manual instruction", () => {
+  it("S1-AC2: invalid credentials carry a sign-in action for the same provider", () => {
     const claude = describeAuthState("invalid", "claude");
-    expect(claude.action).toMatchObject({ kind: "relogin", command: "claude auth login" });
+    expect(claude.action).toEqual({ kind: "sign_in", provider: "claude" });
     expect(formatAction(claude.action)).toContain("docs/deploy/vps-systemd.mdx");
-    expect(describeAuthState("invalid", "codex").action).toMatchObject({ kind: "relogin" });
+    expect(describeAuthState("invalid", "codex").action).toEqual({ kind: "sign_in", provider: "codex" });
   });
 
   it("S1-AC3: no_network is a retry, never a relogin (not 'expired')", () => {
@@ -151,8 +163,13 @@ describe("formatAction", () => {
   // this one function (S1-AC5 "same texts"), so each branch is pinned here. "none"
   // renders empty so callers can omit the action row instead of printing a blank hint.
   it("renders each action kind", () => {
-    expect(formatAction({ kind: "relogin", command: "claude auth login", docRef: "docs/x.mdx" })).toBe(
-      "Sign in again as the service user: `claude auth login` (see docs/x.mdx)",
+    // Until the in-UI sign-in panel ships (phase 2c), a sign_in action renders the
+    // manual instruction — the same text the CLI fallback and macOS (D6) print.
+    expect(formatAction({ kind: "sign_in", provider: "claude" })).toBe(
+      "Sign in again as the service user: `claude auth login` (see docs/deploy/vps-systemd.mdx#prerequisites)",
+    );
+    expect(formatAction({ kind: "sign_in", provider: "codex" })).toBe(
+      "Sign in again as the service user: `codex login --device-auth` (see docs/deploy/vps-systemd.mdx#prerequisites)",
     );
     expect(formatAction({ kind: "retry" })).toBe("Retry");
     expect(formatAction({ kind: "restart_session" })).toBe("Restart the session");
@@ -178,5 +195,93 @@ describe("formatAction", () => {
         expect(entry.action.kind === "none" ? line === "" : line.length > 0).toBe(true);
       }
     }
+  });
+});
+
+// ─── Phase 2: sign-in vocabulary (plan task 2) ───────────────────────────────
+// Every attempt state, failure reason, plan-check verdict and effective-method
+// source yields non-empty text for BOTH providers (Codex parity). The reply-code
+// step exists only for Claude; Codex shows a device code instead — the catalog
+// is the one place that says so, and the UI/CLI read it from here.
+describe("sign-in catalog", () => {
+  it("has non-empty text for every attempt state × failure reason × provider", () => {
+    for (const provider of PROVIDER_IDS) {
+      for (const state of LOGIN_ATTEMPT_STATES) {
+        const entry = describeLoginAttempt(state, provider);
+        expect(entry.title.length, `${provider}/${state}`).toBeGreaterThan(0);
+        expect(entry.detail.length, `${provider}/${state}`).toBeGreaterThan(0);
+        expect(entry.title).toContain(providerLabel(provider));
+      }
+      for (const reason of LOGIN_FAILURE_REASONS) {
+        const entry = describeLoginFailure(reason, provider);
+        expect(entry.title.length, `${provider}/${reason}`).toBeGreaterThan(0);
+        expect(entry.detail.length, `${provider}/${reason}`).toBeGreaterThan(0);
+        expect(formatAction(entry.action).length >= 0).toBe(true);
+      }
+      for (const check of PLAN_CHECKS) {
+        expect(describePlanCheck(check, provider, "Max", knownField("pro")).title.length).toBeGreaterThan(0);
+      }
+      for (const source of EFFECTIVE_AUTH_SOURCES) {
+        const entry = describeEffectiveMethod({ method: "subscription", source, variable: "SOME_VAR" }, provider);
+        expect(entry.title.length, `${provider}/${source}`).toBeGreaterThan(0);
+      }
+      expect(describeManualSignIn(provider).detail).toContain(provider === "claude" ? "claude auth login" : "codex login --device-auth");
+    }
+  });
+
+  it("S1-AC1: only Claude asks for a reply code; only Codex shows a device code", () => {
+    expect(signInSteps("claude")).toEqual({ replyCode: true, deviceCode: false });
+    expect(signInSteps("codex")).toEqual({ replyCode: false, deviceCode: true });
+    // The awaiting-user text follows the same split.
+    expect(describeLoginAttempt("awaiting_user", "claude").detail).toMatch(/paste the code/i);
+    expect(describeLoginAttempt("awaiting_user", "codex").detail).toMatch(/enter the code/i);
+    expect(describeLoginAttempt("awaiting_user", "codex").detail).not.toMatch(/paste/i);
+  });
+
+  it("S1-AC3: rejected, malformed, foreign and expired codes all say 'invalid or expired' and offer to start again", () => {
+    for (const provider of PROVIDER_IDS) {
+      for (const reason of ["code_rejected", "code_format", "attempt_mismatch", "expired"] as const) {
+        const entry = describeLoginFailure(reason, provider);
+        expect(entry.title, reason).toMatch(/invalid or expired/i);
+        expect(entry.action).toEqual({ kind: "sign_in", provider });
+      }
+    }
+  });
+
+  it("failures that a new attempt cannot fix carry their own action, never a sign-in loop", () => {
+    expect(describeLoginFailure("cli_missing", "codex").action.kind).toBe("update_cli");
+    expect(describeLoginFailure("wrong_service_user", "claude").action.kind).toBe("run_as_service_user");
+    // macOS (D6): the UI cannot sign Claude in — the manual Terminal command is the way out.
+    const mac = describeLoginFailure("unsupported_platform", "claude");
+    expect(mac.action.kind).toBe("none");
+    expect(mac.detail).toContain("claude auth login");
+  });
+
+  it("S2-AC1/AC3: mismatch shows both values; unknown never reads as a match", () => {
+    const mismatch = describePlanCheck("mismatch", "claude", "Max", knownField("pro"));
+    expect(mismatch.detail).toContain("Max");
+    expect(mismatch.detail).toContain("pro");
+    expect(mismatch.action).toEqual({ kind: "sign_in", provider: "claude" });
+    const unknown = describePlanCheck("unknown", "codex", "Plus", unknownField);
+    expect(unknown.title).toMatch(/not determined/i);
+    expect(unknown.title).not.toMatch(/match/i);
+    // S2-AC2: no expectation set → no warning, no action.
+    const unset = describePlanCheck("unset", "claude", null, knownField("max"));
+    expect(unset.action.kind).toBe("none");
+    expect(unset.title).not.toMatch(/mismatch|warning/i);
+  });
+
+  it("S2-AC4: an overriding env/settings source names the variable and where it is set, never a value", () => {
+    const env = describeEffectiveMethod({ method: "env_token", source: "environment", variable: "CLAUDE_CODE_OAUTH_TOKEN" }, "claude");
+    expect(env.detail).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(env.detail).toMatch(/environment/i);
+    const signIn = describeEffectiveMethod({ method: "subscription", source: "sign_in" }, "codex");
+    expect(signIn.action.kind).toBe("none");
+  });
+
+  it("verifiedBy labels cover provider, local and login", () => {
+    expect(verifiedByLabel("provider")).toBe("with the provider");
+    expect(verifiedByLabel("local")).toBe("local only");
+    expect(verifiedByLabel("login")).toBe("by sign-in");
   });
 });

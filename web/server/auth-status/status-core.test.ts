@@ -89,11 +89,11 @@ describe("StatusCore — acceptance", () => {
     expect(snap.providers.codex.state).toBe("not_verified");
   });
 
-  it("S1-AC2: rejected credentials → invalid with a relogin action", async () => {
+  it("S1-AC2: rejected credentials → invalid with a sign-in action", async () => {
     const { core } = makeCore({}, { claude: "invalid" });
     const s = (await core.get()).providers.claude;
     expect(s.state).toBe("invalid");
-    expect(describeAuthState(s.state, s.provider, s.reason).action.kind).toBe("relogin");
+    expect(describeAuthState(s.state, s.provider, s.reason).action.kind).toBe("sign_in");
   });
 
   it("S1-AC3: no_network keeps lastSuccessAt, in memory and across a restart", async () => {

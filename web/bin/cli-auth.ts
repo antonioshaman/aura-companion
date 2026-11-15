@@ -7,6 +7,7 @@ import {
   describeDoctorUnchecked,
   doctorPlaceLabel,
   formatAction,
+  verifiedByLabel,
   formatKnown,
   providerLabel,
 } from "../server/auth-status/auth-catalog.js";
@@ -99,7 +100,7 @@ export function renderStatus(snapshot: StatusSnapshot, source: Source): string[]
     lines.push(
       `  Account: ${formatKnown(s.account)} · Plan: ${formatKnown(s.plan)} · Sign-in: ${formatKnown(s.method)}`,
       `  Token expires: ${formatKnown(s.tokenExpiresAt, iso)} · Last successful check: ${s.lastSuccessAt === null ? "never" : iso(s.lastSuccessAt)}`,
-      `  Checked: ${iso(s.checkedAt)} (${s.verifiedBy === "provider" ? "with the provider" : "local only"}) · CLI: ${formatKnown(s.cli.path)} ${formatKnown(s.cli.version)}`,
+      `  Checked: ${iso(s.checkedAt)} (${verifiedByLabel(s.verifiedBy)}) · CLI: ${formatKnown(s.cli.path)} ${formatKnown(s.cli.version)}`,
     );
     if (s.serviceUser) lines.push(`  Service user: ${s.serviceUser}`);
     lines.push(...entryLines(entry, "  "));

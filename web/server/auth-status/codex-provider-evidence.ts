@@ -18,6 +18,24 @@ export function latestCodexProviderEvidence(): CodexProviderEvidence | null {
   return latest;
 }
 
+/**
+ * Phase 2 D8: an official `codex login --device-auth` that just succeeded is
+ * provider evidence for the credentials it wrote — bound to that file's
+ * access-token fingerprint (Codex has no free provider probe). Recorded by the
+ * credential promotion; the probe accepts it only while the primary auth.json
+ * still carries the same fingerprint. In-memory, newest wins.
+ */
+let latestLogin: CodexProviderEvidence | null = null;
+
+export function recordCodexLoginEvidence(evidence: CodexProviderEvidence): void {
+  if (!latestLogin || evidence.checkedAt >= latestLogin.checkedAt) latestLogin = evidence;
+}
+
+export function latestCodexLoginEvidence(): CodexProviderEvidence | null {
+  return latestLogin;
+}
+
 export function _resetCodexProviderEvidenceForTests(): void {
   latest = null;
+  latestLogin = null;
 }

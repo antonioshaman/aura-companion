@@ -63,7 +63,7 @@ describe("UsageLimitsReasonNote", () => {
   // with a command-style action must show it as plain text, not vanish.
   it("renders command-style actions as plain text", () => {
     const cases = [
-      { kind: "relogin" as const, command: "claude auth login", docRef: "docs/x.mdx" },
+      { kind: "sign_in" as const, provider: "claude" as const },
       { kind: "update_cli" as const, command: "claude update" },
       { kind: "run_as_root" as const, command: "sudo aura-companion doctor --offline" },
       { kind: "run_as_service_user" as const },

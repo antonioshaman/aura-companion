@@ -70,7 +70,7 @@ export function toRestStatusSnapshot(snapshot: StatusSnapshot | null, serviceHom
 export function projectBackendAuthState(status: ProviderAuthStatus | null | undefined, legacy: BackendAuthStatus): BackendAuthStatus {
   if (!status) return legacy;
   let authState: AuthState | null = null;
-  if (status.state === "working" && status.verifiedBy === "provider") authState = "authorized";
+  if (status.state === "working" && status.verifiedBy !== "local") authState = "authorized";
   else if (status.state === "invalid") authState = "expired";
   else if (status.state === "not_signed_in") authState = "unauthorized";
   return authState ? { ...legacy, authState } : legacy;
