@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ llmAuthStatus: vi.fn() }));
 vi.mock("../../api.js", () => ({ api: mocks }));
 
-import { _resetPromotedAtLoaderForTest, ensurePromotedAtLoaded, isSignInRestored, notePromotedFromStatus } from "./sign-in-restored.js";
+import { _resetPromotedAtLoaderForTest, ensurePromotedAtLoaded, isSignInRestored, notePromotedFromRenewal, notePromotedFromStatus, turnFailureRecovery } from "./sign-in-restored.js";
 import { useStore } from "../../store.js";
 import { statusSnapshot } from "../diagnostics/llm-auth-fixtures.js";
 import { TURN_FAILURE_KINDS, type TurnFailure } from "../../../server/auth-status/auth-types.js";
@@ -36,6 +36,30 @@ describe("isSignInRestored", () => {
   it("only sign-in failures can be restored", () => {
     const restorable = TURN_FAILURE_KINDS.filter((kind) => isSignInRestored(failure({ kind }), 1, { claude: 2 }));
     expect(restorable.sort()).toEqual(["auth_rejected", "stale_session_credentials"]);
+  });
+});
+
+describe("turnFailureRecovery (phase 2d, task 14)", () => {
+  // restored: failed BEFORE the promotion; retry_needed: a stale-credentials
+  // failure at/after it (the turn ran on the old sign-in while it changed);
+  // none otherwise — including every failure when no promotion is known.
+  it("selects the card variant from the failure time vs the provider's last promotion", () => {
+    expect(turnFailureRecovery(failure(), 100, { claude: 200 })).toBe("restored");
+    expect(turnFailureRecovery(failure({ kind: "stale_session_credentials" }), 100, { claude: 200 })).toBe("restored");
+    expect(turnFailureRecovery(failure({ kind: "stale_session_credentials" }), 200, { claude: 200 })).toBe("retry_needed");
+    expect(turnFailureRecovery(failure({ kind: "stale_session_credentials", provider: "codex" }), 300, { codex: 200 })).toBe("retry_needed");
+    // auth_rejected after the sign-in failed ON the new sign-in: not a repeat-the-turn case.
+    expect(turnFailureRecovery(failure(), 300, { claude: 200 })).toBe("none");
+    expect(turnFailureRecovery(failure({ kind: "stale_session_credentials" }), 300, {})).toBe("none");
+    expect(turnFailureRecovery(failure({ kind: "network" }), 100, { claude: 200 })).toBe("none");
+  });
+});
+
+describe("promotedAt from the session renewal signal", () => {
+  it("notePromotedFromRenewal feeds the same store field; null is ignored", () => {
+    notePromotedFromRenewal({ provider: "codex", promotedAt: 700 });
+    notePromotedFromRenewal(null);
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ codex: 700 });
   });
 });
 

@@ -3,6 +3,7 @@ import { api, type RestLoginAttempt } from "../../api.js";
 import { useStore } from "../../store.js";
 import { isTerminalLoginState, type AuthAction, type ProviderAuthStatus, type ProviderId } from "../../../server/auth-status/auth-types.js";
 import {
+  describeSessionRenewal,
   describeEffectiveMethod,
   describeLoginAttempt,
   describeLoginFailure,
@@ -215,6 +216,26 @@ function AwaitingUser({
   );
 }
 
+/**
+ * What the live sessions do about this sign-in (phase 2d): during
+ * `verifying` the Claude barrier may wait for running turns; after success,
+ * how many sessions move to the new sign-in and how many wait for Retry.
+ */
+function RenewalLines({ attempt, phase }: { attempt: RestLoginAttempt; phase: "verifying" | "succeeded" }) {
+  if (!attempt.renewal) return null;
+  const lines = describeSessionRenewal(attempt.provider, attempt.renewal, phase);
+  if (lines.length === 0) return null;
+  return (
+    <ul className="space-y-0.5 text-xs" data-testid="sign-in-renewal">
+      {lines.map((l) => (
+        <li key={l.text} className={l.warning ? "text-cc-warning" : "text-cc-muted"}>
+          {l.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Succeeded({
   attempt,
   status,
@@ -262,6 +283,7 @@ function Succeeded({
           )}
         </div>
       )}
+      <RenewalLines attempt={attempt} phase="succeeded" />
       {method && methodNote && (
         <div data-testid="sign-in-effective-method" className={`text-xs ${methodWarn ? "text-cc-warning" : "text-cc-muted"}`}>
           <p className="font-medium">{method.title}</p>
@@ -303,7 +325,7 @@ function StateBody({
     case "awaiting_user":
       return <AwaitingUser attempt={a} view={view} now={now} onSubmitCode={onSubmitCode} />;
     case "verifying":
-      return null;
+      return <RenewalLines attempt={a} phase="verifying" />;
     case "succeeded":
       return <Succeeded attempt={a} status={status} onStartAgain={onStartAgain} />;
     case "failed": {

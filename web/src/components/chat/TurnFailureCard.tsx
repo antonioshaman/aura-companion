@@ -12,7 +12,7 @@ import { useStore } from "../../store.js";
 import { api } from "../../api.js";
 import { createClientMessageId, sendToSession } from "../../ws.js";
 import { SignInButton } from "../llm-login/SignInButton.js";
-import { ensurePromotedAtLoaded, isSignInRestored } from "../llm-login/sign-in-restored.js";
+import { ensurePromotedAtLoaded, turnFailureRecovery } from "../llm-login/sign-in-restored.js";
 
 /**
  * Turn-failure card (LLM auth phase 1, task 14; spec story 3). The server
@@ -244,7 +244,7 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
 
   if (!failure) return null;
   const retry: RetryState = retried ? "sent" : !lastUser || superseded || !cliConnected ? "unavailable" : "ready";
-  const recovery: FailureRecovery = isSignInRestored(failure, message.timestamp, promotedAt) ? "restored" : "none";
+  const recovery: FailureRecovery = turnFailureRecovery(failure, message.timestamp, promotedAt);
   return (
     <TurnFailureCard
       failure={failure}

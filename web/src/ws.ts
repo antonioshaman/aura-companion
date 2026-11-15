@@ -9,6 +9,7 @@ import { guardDenialChatMessage } from "./utils/guard-denial.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
+import { notePromotedFromRenewal } from "./components/llm-login/sign-in-restored.js";
 import {
   contextTokensFromUsage,
   contextUsedPercent,
@@ -855,6 +856,8 @@ function handleParsedMessage(
       const existingSession = store.sessions.get(sessionId);
       const pendingCodexSwitch = store.pendingCodexModelSwitches.get(sessionId);
       store.addSession(data.session);
+      // A reloaded tab learns the promotion time from the persisted record.
+      notePromotedFromRenewal(data.session.credential_renewal);
       // PLAN T12 (Phase G) - a new CLI subprocess is alive
       // (relaunch landed); clear any prior terminal-failure
       // banner state so the Composer re-enables atomically.
@@ -898,6 +901,8 @@ function handleParsedMessage(
 
     case "session_update": {
       store.updateSession(sessionId, data.session);
+      // LLM auth task 14: "sign-in renewed" → the failure cards' promotion time.
+      notePromotedFromRenewal(data.session.credential_renewal);
       const runtimeState = (data.session as { state?: string }).state;
       if (
         runtimeState === "connected" ||

@@ -40,7 +40,7 @@ import { acceptAttempt, LOGIN_POLL_MS } from "./useLoginAttempt.js";
 import { FAKE_CLAUDE_URL, FAKE_DEVICE_CODE, LOGIN_NOW, loginAttempt, loginView } from "./login-fixtures.js";
 import { providerStatus } from "../diagnostics/llm-auth-fixtures.js";
 import { useStore } from "../../store.js";
-import { describeLoginAttempt, describeLoginFailure, manualSignInCommand } from "../../../server/auth-status/auth-catalog.js";
+import { describeLoginAttempt, describeLoginFailure, describeSessionRenewal, manualSignInCommand } from "../../../server/auth-status/auth-catalog.js";
 import { LOGIN_ATTEMPT_STATES, LOGIN_FAILURE_REASONS, PROVIDER_IDS, knownField } from "../../../server/auth-status/auth-types.js";
 
 const ok = (body: object, status = 200) => Promise.resolve({ status, body });
@@ -195,6 +195,26 @@ describe("SignInPanel (presentational)", () => {
     expect(screen.getByText("working · checked by sign-in")).toBeInTheDocument();
     // S2-AC2: no expectation → no plan warning at all.
     expect(screen.queryByTestId("sign-in-plan-check")).toBeNull();
+  });
+
+  it("phase 2d: success says how many sessions move to the new sign-in and how many wait for Retry, plus the barrier warnings", async () => {
+    // Counts come from the server (attempt.renewal); no session is named.
+    const renewal = { waitingForTurn: 0, reconnecting: 2, busyAtPromotion: 1, awaitingRetry: 1, credentialsReplaced: true };
+    const status = providerStatus({ provider: "claude", verifiedBy: "login", planCheck: "unset", expectedPlan: null });
+    const { container } = render(<SignInPanel provider="claude" view={loginView(loginAttempt("claude", "succeeded", { renewal }))} now={LOGIN_NOW} status={status} />);
+    const lines = within(screen.getByTestId("sign-in-renewal")).getAllByRole("listitem").map((li) => li.textContent);
+    expect(lines).toEqual(describeSessionRenewal("claude", renewal, "succeeded").map((l) => l.text));
+    expect(lines[0]).toBe("2 sessions will move to the new sign-in; 1 session waits for Retry.");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("phase 2d: while verifying, the Claude barrier says it waits for running turns; nothing when there is nothing to wait for", () => {
+    const waiting = { waitingForTurn: 3, reconnecting: 0, busyAtPromotion: 0, awaitingRetry: 0, credentialsReplaced: false };
+    const { unmount } = render(<SignInPanel provider="claude" view={loginView(loginAttempt("claude", "verifying", { renewal: waiting }))} now={LOGIN_NOW} status={null} />);
+    expect(screen.getByTestId("sign-in-renewal")).toHaveTextContent("Waiting for 3 sessions to finish the current turn");
+    unmount();
+    render(<SignInPanel provider="codex" view={loginView(loginAttempt("codex", "verifying", { renewal: { ...waiting, waitingForTurn: 0 } }))} now={LOGIN_NOW} status={null} />);
+    expect(screen.queryByTestId("sign-in-renewal")).toBeNull();
   });
 
   it("S2-AC1: plan mismatch names both plans and offers another account", () => {

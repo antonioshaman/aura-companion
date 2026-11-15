@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeSessionRenewal,
+  describeSessionReconnecting,
+  describeSessionReconnectFailed,
   describeAuthState,
   describeDoctorClear,
   describeDoctorFinding,
@@ -301,5 +304,33 @@ describe("sign-in catalog", () => {
     expect(verifiedByLabel("provider")).toBe("with the provider");
     expect(verifiedByLabel("local")).toBe("local only");
     expect(verifiedByLabel("login")).toBe("by sign-in");
+  });
+});
+
+describe("session renewal texts (phase 2d)", () => {
+  // The sign-in window and the in-session notice. Counts only; singular /
+  // plural agree; nothing to say → no line (no empty list).
+  const none = { waitingForTurn: 0, reconnecting: 0, busyAtPromotion: 0, awaitingRetry: 0, credentialsReplaced: false };
+
+  it("verifying: only the barrier wait, with the 10-minute bound", () => {
+    expect(describeSessionRenewal("claude", none, "verifying")).toEqual([]);
+    expect(describeSessionRenewal("claude", { ...none, waitingForTurn: 1 }, "verifying")[0].text).toBe(
+      "Waiting for 1 session to finish the current turn before switching Claude to the new sign-in (at most 10 minutes).",
+    );
+  });
+
+  it("succeeded: moves + Retry in one line, warnings separate and flagged", () => {
+    expect(describeSessionRenewal("codex", none, "succeeded")).toEqual([]);
+    const lines = describeSessionRenewal("codex", { ...none, reconnecting: 1, awaitingRetry: 2, busyAtPromotion: 1, credentialsReplaced: true }, "succeeded");
+    expect(lines.map((l) => l.warning)).toEqual([false, true, true]);
+    expect(lines[0].text).toBe("1 session will move to the new sign-in; 2 sessions wait for Retry.");
+    expect(lines[1].text).toBe("1 session was still busy; the sign-in is switched after the turn ends.");
+  });
+
+  it("in-session notices name the provider and promise no automatic re-send", () => {
+    for (const p of ["claude", "codex"] as const) {
+      expect(describeSessionReconnecting(p).detail).toContain("Nothing is re-sent on its own");
+      expect(describeSessionReconnectFailed(p).title).toBe("Could not reconnect with the new sign-in");
+    }
   });
 });

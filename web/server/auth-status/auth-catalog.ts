@@ -510,6 +510,64 @@ export function describeTurnNeedsRetry(provider: ProviderId): CatalogEntry {
   };
 }
 
+/** What the live sessions are doing about a sign-in (phase 2d, task 13/14). */
+export interface SessionRenewalCounts {
+  waitingForTurn: number;
+  reconnecting: number;
+  busyAtPromotion: number;
+  awaitingRetry: number;
+  credentialsReplaced: boolean;
+}
+
+function sessions(n: number): string {
+  return n === 1 ? "1 session" : `${n} sessions`;
+}
+
+/**
+ * Lines of the sign-in window about live sessions. `verifying`: the Claude
+ * barrier waits for running turns. `succeeded`: how many move to the new
+ * sign-in, how many wait for Retry, and the warnings (busy at promotion,
+ * credentials replaced afterwards). Empty when there is nothing to say.
+ */
+export function describeSessionRenewal(provider: ProviderId, counts: SessionRenewalCounts, phase: "verifying" | "succeeded"): { text: string; warning: boolean }[] {
+  const label = providerLabel(provider);
+  if (phase === "verifying") {
+    return counts.waitingForTurn > 0
+      ? [{ text: `Waiting for ${sessions(counts.waitingForTurn)} to finish the current turn before switching ${label} to the new sign-in (at most 10 minutes).`, warning: false }]
+      : [];
+  }
+  const out: { text: string; warning: boolean }[] = [];
+  if (counts.reconnecting > 0 || counts.awaitingRetry > 0) {
+    const parts: string[] = [];
+    if (counts.reconnecting > 0) parts.push(`${sessions(counts.reconnecting)} will move to the new sign-in`);
+    if (counts.awaitingRetry > 0) parts.push(`${sessions(counts.awaitingRetry)} ${counts.awaitingRetry === 1 ? "waits" : "wait"} for Retry`);
+    out.push({ text: `${parts.join("; ")}.`, warning: false });
+  }
+  if (counts.busyAtPromotion > 0) {
+    out.push({ text: `${sessions(counts.busyAtPromotion)} ${counts.busyAtPromotion === 1 ? "was" : "were"} still busy; the sign-in is switched after the turn ends.`, warning: true });
+  }
+  if (counts.credentialsReplaced) {
+    out.push({ text: `The ${label} credentials changed after this sign-in (a running session may have written older ones). Check the status; sign in again if it is not working.`, warning: true });
+  }
+  return out;
+}
+
+/** In-session notice while a session moves to a new sign-in (phase 2d, task 14). */
+export function describeSessionReconnecting(provider: ProviderId): { title: string; detail: string } {
+  return {
+    title: "Reconnecting with the new sign-in…",
+    detail: `${providerLabel(provider)} restarts this session on the new sign-in at its first idle moment. You can keep typing: messages are delivered once it is back. Nothing is re-sent on its own.`,
+  };
+}
+
+/** The renewal relaunch did not come back (phase 2d). */
+export function describeSessionReconnectFailed(provider: ProviderId): { title: string; detail: string } {
+  return {
+    title: "Could not reconnect with the new sign-in",
+    detail: `${providerLabel(provider)} did not restart on the new sign-in. Restart the session; messages you sent meanwhile are kept in the chat for Retry.`,
+  };
+}
+
 /** The command that signs in through the running server (phase 2b). */
 export function cliSignInCommand(provider: ProviderId): string {
   return `aura-companion auth login ${provider}`;

@@ -12,6 +12,7 @@ import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
 import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { ModelFallbackNotice } from "./ModelFallbackNotice.js";
+import { CredentialRenewalNotice } from "./llm-login/CredentialRenewalNotice.js";
 import { ContextAdvisoryNotice } from "./ContextAdvisoryBanner.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
 import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
@@ -315,6 +316,10 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           priority-gated like the slot above: infrastructure info, never a
           blocker, so it coexists with the chat. */}
       <ModelFallbackNotice sessionId={sessionId} />
+
+      {/* LLM auth task 14: "Reconnecting with the new sign-in…" while the
+          session moves to a renewed provider sign-in (server-held input). */}
+      <CredentialRenewalNotice sessionId={sessionId} />
 
       {/* Context-overflow handoff (>= 5 MB transcript): one-click "Continue
           in a new session". Server-recorded on the session state, so it

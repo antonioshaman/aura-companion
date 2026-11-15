@@ -223,6 +223,23 @@ describe("sign-in recovery (phase 2c)", () => {
     expect(screen.getByTestId("turn-failure-card")).toHaveAttribute("data-recovery", "none");
   });
 
+  it("S3-AC3 (phase 2d): a stale-credentials failure at/after the sign-in → 'this turn needs to be repeated' + Retry, both providers", () => {
+    // The server tags a failure of a session still on the old sign-in epoch
+    // `stale_session_credentials`. When it fired after the promotion the turn
+    // ran on the old sign-in while it changed: the card asks to repeat it,
+    // and nothing is sent until the click.
+    for (const provider of ["claude", "codex"] as const) {
+      const fm = { ...failureMsg({ kind: "stale_session_credentials", provider, providerMessage: "401" }), timestamp: 3000 };
+      withUser(fm);
+      storeState.llmAuthPromotedAt = { [provider]: 2000 };
+      const { unmount } = render(<TurnFailureNotice sessionId={SID} message={fm} />);
+      expect(screen.getByTestId("turn-failure-card")).toHaveAttribute("data-recovery", "retry_needed");
+      expect(screen.getByText(describeTurnNeedsRetry(provider).title)).toBeInTheDocument();
+      expect(mockSend).not.toHaveBeenCalled();
+      unmount();
+    }
+  });
+
   it("a limit failure is never 'sign-in restored'", () => {
     const fm = { ...failureMsg({ kind: "limit_window", provider: "claude", providerMessage: "limit", window: "five_hour", resetAt: null }), timestamp: 1 };
     withUser(fm);

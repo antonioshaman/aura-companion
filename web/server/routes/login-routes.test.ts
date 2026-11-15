@@ -216,6 +216,23 @@ describe("routes", () => {
     expect(cool.headers.get("Retry-After")).toBe("5");
   });
 
+  it("phase 2d: verifying / succeeded carry the live-session counts; other states never do", async () => {
+    // The sign-in window says "waiting for N turns" during the Claude barrier
+    // and "N sessions move to the new sign-in; M wait for Retry" after it.
+    // Counts only — no session ids, nothing secret.
+    const counts = { waitingForTurn: 1, reconnecting: 2, busyAtPromotion: 0, awaitingRetry: 1, credentialsReplaced: false };
+    const renewalSummary = vi.fn(() => counts);
+    const get = async (state: LoginAttempt["state"]) => {
+      const reg = fakeRegistry({ current: vi.fn(() => attempt({ state, prompt: null })) });
+      const res = await app(reg, { renewalSummary }).request("http://localhost:3456/api/llm-auth/login/claude", { headers: json });
+      return (await res.json()).attempt;
+    };
+    expect((await get("verifying")).renewal).toEqual(counts);
+    expect((await get("succeeded")).renewal).toEqual(counts);
+    expect((await get("awaiting_user")).renewal).toBeUndefined();
+    expect((await get("failed")).renewal).toBeUndefined();
+  });
+
   it("start awaits the startup recovery before touching the registry", async () => {
     const order: string[] = [];
     let release!: () => void;
