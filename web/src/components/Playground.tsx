@@ -5308,7 +5308,7 @@ function SignInPlaygroundSection() {
       title="LLM sign-in window"
       description="SignInPanel in every attempt state for Claude and Codex, every failure reason, plan / method checks, transport notices and the closed-window chip (synthetic links and codes)"
     >
-      <div className="grid gap-4 md:grid-cols-2 max-w-4xl">
+      <div className="space-y-4 max-w-3xl">
         {PROVIDER_IDS.flatMap((provider) =>
           LOGIN_ATTEMPT_STATES.map((state) => (
             <Card key={`${provider}-${state}`} label={`SignInPanel — ${provider} / ${state}`}>
@@ -5358,7 +5358,14 @@ function SignInPlaygroundSection() {
           <Card key={`plan-${check}`} label={`SignInPanel — Claude succeeded, plan ${check}`}>
             <SignInPanel
               provider="claude"
-              view={loginView(loginAttempt("claude", "succeeded"))}
+              view={loginView(
+                loginAttempt("claude", "succeeded", {
+                  result: {
+                    account: { known: true, value: "owner@example.com" },
+                    plan: check === "unknown" ? { known: false } : { known: true, value: check === "mismatch" ? "pro" : "max" },
+                  },
+                }),
+              )}
               now={LOGIN_NOW}
               status={providerStatus({
                 provider: "claude",
