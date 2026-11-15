@@ -265,6 +265,46 @@ describe("auth login — server, token, existing attempt, json", () => {
     expect(reg.current("codex")?.id).toBe(first.attempt!.id);
   });
 
+  // Review 203 STOP 1: Ctrl-C while the CLI waits on "continue or cancel?" must
+  // cancel the attempt and exit 130, not hang on the pending stdin read.
+  it("Ctrl-C during the continue/cancel question cancels the attempt and exits 130", async () => {
+    const { app, registry: reg } = server({ codex: "wait" });
+    await reg.start("codex");
+    const h = harness(app, () => new Promise<string | null>(() => {})); // nobody answers
+    const run = runAuthLoginCommand(["codex"], h.deps);
+    const until = Date.now() + 5_000;
+    while (h.out[0] !== describeLoginInProgressElsewhere("codex").title && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 20));
+    h.interrupt();
+    expect(await run).toBe(LOGIN_EXIT.interrupted);
+    expect(reg.current("codex")?.state).toBe("cancelled");
+    expect(h.out).toContain(describeLoginAttempt("cancelled", "codex").title);
+  });
+
+  // Review 203 WARN: closing stdin is not Ctrl-C — the attempt is cancelled and the exit code is 1.
+  it("stdin closed while a Claude code is awaited → attempt cancelled, exit 1 (not 130)", async () => {
+    const { app, registry: reg } = server({ claude: "success" });
+    const h = harness(app, () => null);
+    expect(await runAuthLoginCommand(["claude"], h.deps)).toBe(LOGIN_EXIT.failed);
+    expect(reg.current("claude")?.state).toBe("cancelled");
+    expect(h.out).toContain(describeLoginAttempt("cancelled", "claude").title);
+  });
+
+  // Review 203 STOP 2: Claude in --json mode still reads a code; no text prompt may
+  // reach stdout, so every stdout line stays one JSON object.
+  it("--json for Claude: stdout is JSON only (the code prompt is not text on stdout)", async () => {
+    const { app } = server({ claude: "success" });
+    const prompts: string[] = [];
+    const h = harness(app, (out, prompt) => {
+      prompts.push(prompt);
+      const awaiting = out.map((l) => JSON.parse(l) as { prompt?: { url: string } }).find((o) => o.prompt)!;
+      return `SYNTHREPLY#${new URL(awaiting.prompt!.url).searchParams.get("state")}`;
+    });
+    expect(await runAuthLoginCommand(["claude", "--json"], h.deps)).toBe(LOGIN_EXIT.ok);
+    for (const line of h.out) expect(() => JSON.parse(line), line).not.toThrow();
+    expect(prompts).toEqual([""]);
+  });
+
   it("--json prints one JSON object per line, the prompt only in the awaiting line", async () => {
     const { app } = server({ codex: "success --success-after-ms=300" });
     const h = harness(app);

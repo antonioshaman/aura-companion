@@ -37,14 +37,15 @@ import type { RestLoginAttempt } from "../server/routes/login-routes.js";
  *    "run as the service user", exit 1 (the routes require it even on localhost).
  *  - An attempt started elsewhere → "continue / cancel".
  *  - Ctrl-C → cancel the attempt, exit 130. Success → 0; failure/cancel/expiry → 1.
- *  - `--json` → one JSON line per state change.
+ *  - `--json` → one JSON line per state change; prompts go to stderr, never stdout.
+ *  - stdin closed while a code is awaited → the attempt is cancelled, exit 1.
  */
 
 export interface CliLoginDeps {
   /** Localhost API call with the Aura token; throws when the server is unreachable. */
   request: (path: string, init: { method?: "GET" | "POST"; body?: unknown; token: string }) => Promise<{ status: number; body: unknown }>;
   readToken: () => string | null;
-  /** One line from stdin; null on EOF. */
+  /** One line from stdin; null on EOF. `prompt` goes to stderr ("" = none). */
   readLine: (prompt: string) => Promise<string | null>;
   /** Registers the Ctrl-C handler; returns the unregister function. */
   onInterrupt: (handler: () => void) => () => void;
@@ -127,7 +128,13 @@ export async function runAuthLoginCommand(argv: readonly string[], deps: CliLogi
   try {
     if (attempt && !isTerminalLoginState(attempt.state)) {
       print(describeLoginInProgressElsewhere(provider));
-      const answer = json ? "" : await deps.readLine("Continue it here [c] or cancel it [x]? ");
+      // The question races Ctrl-C: a pending stdin read must not swallow the interrupt.
+      const answer = json ? "" : await Promise.race([deps.readLine("Continue it here [c] or cancel it [x]? "), watch.state.wake.then(() => null)]);
+      if (watch.state.fired) {
+        await call(`${base}/${attempt.id}/cancel`, "POST").catch(() => null);
+        print(describeLoginAttempt("cancelled", provider));
+        return LOGIN_EXIT.interrupted;
+      }
       if (answer !== null && /^\s*(x|cancel)\s*$/i.test(answer)) {
         await call(`${base}/${attempt.id}/cancel`, "POST").catch(() => null);
         print(describeLoginAttempt("cancelled", provider));
@@ -174,12 +181,14 @@ async function follow(provider: ProviderId, first: RestLoginAttempt, ctx: Follow
   let shownCodeError: string | null = null;
   let pendingLine: ReturnType<typeof track<string | null>> | null = null;
 
+  /** Ctrl-C → 130; stdin closed while a code is awaited → 1. Both cancel the attempt on the server. */
+  let inputClosed = false;
   for (;;) {
-    if (interrupt.fired) {
+    if (interrupt.fired || inputClosed) {
       const res = await call(`${base}/${attempt.id}/cancel`, "POST").catch(() => null);
       const ended = (res?.body as { attempt?: RestLoginAttempt | null } | null)?.attempt;
       renderState(ended && isTerminalLoginState(ended.state) ? ended : { ...attempt, state: "cancelled" }, ctx, false);
-      return LOGIN_EXIT.interrupted;
+      return interrupt.fired ? LOGIN_EXIT.interrupted : LOGIN_EXIT.failed;
     }
 
     if (attempt.version !== shownVersion) {
@@ -203,14 +212,15 @@ async function follow(provider: ProviderId, first: RestLoginAttempt, ctx: Follow
 
     // Claude: ask for the reply code while the attempt waits for it.
     if (attempt.state === "awaiting_user" && attempt.steps.replyCode && !attempt.submitting && !pendingLine) {
-      pendingLine = track(deps.readLine("Paste the code from the page: "));
+      // --json: stdout carries JSON lines only — the awaiting_user line is the prompt.
+      pendingLine = track(deps.readLine(json ? "" : "Paste the code from the page: "));
     }
     if (pendingLine?.done) {
       const line = pendingLine.value;
       pendingLine = null;
       if (line === null || line === undefined) {
         // stdin closed: nothing more can be typed — end the attempt instead of leaving it waiting.
-        interrupt.fired = true;
+        inputClosed = true;
         continue;
       }
       if (line.trim()) {
@@ -342,7 +352,8 @@ export async function defaultCliLoginDeps(port: number): Promise<CliLoginDeps> {
     },
     readToken: () => readServiceAuraToken({ env: process.env, homes }),
     readLine: (prompt) => {
-      process.stdout.write(prompt);
+      // Prompts are not output: stderr keeps stdout clean for --json and pipes.
+      if (prompt) process.stderr.write(prompt);
       input();
       if (lines.length) return Promise.resolve(lines.shift()!);
       if (closed) return Promise.resolve(null);
