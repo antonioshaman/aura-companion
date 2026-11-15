@@ -171,6 +171,10 @@ describe("formatAction", () => {
     expect(formatAction({ kind: "sign_in", provider: "codex" })).toBe(
       "Sign in again as the service user: `codex login --device-auth` (see docs/deploy/vps-systemd.mdx#prerequisites)",
     );
+    // Phase 2b: the CLI surface points at the server sign-in command instead.
+    expect(formatAction({ kind: "sign_in", provider: "claude" }, "cli")).toBe("Sign in again: `aura-companion auth login claude`");
+    expect(formatAction({ kind: "sign_in", provider: "codex" }, "cli")).toBe("Sign in again: `aura-companion auth login codex`");
+    expect(formatAction({ kind: "retry" }, "cli")).toBe("Retry");
     expect(formatAction({ kind: "retry" })).toBe("Retry");
     expect(formatAction({ kind: "restart_session" })).toBe("Restart the session");
     expect(formatAction({ kind: "update_cli", command: "claude update" })).toBe("Update the CLI: `claude update`");
@@ -277,6 +281,18 @@ describe("sign-in catalog", () => {
     expect(env.detail).toMatch(/environment/i);
     const signIn = describeEffectiveMethod({ method: "subscription", source: "sign_in" }, "codex");
     expect(signIn.action.kind).toBe("none");
+  });
+
+  it("D5: Codex with a ChatGPT sign-in AND a key set → a neutral note that the sign-in is used, not an override", () => {
+    const note = describeEffectiveMethod(
+      { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } },
+      "codex",
+    );
+    expect(note.title).toMatch(/use the stored sign-in/i);
+    expect(note.title).not.toMatch(/instead of/i);
+    expect(note.detail).toContain("OPENAI_API_KEY");
+    expect(note.detail).toMatch(/settings/i);
+    expect(note.detail).toMatch(/sign-in is used/i);
   });
 
   it("verifiedBy labels cover provider, local and login", () => {

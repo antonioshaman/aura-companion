@@ -67,6 +67,13 @@ function closure(): string[] {
   return [...seen];
 }
 
+/** Specifier pointing into `server/llm-login/` from `server/auth-status/`. */
+function reachesLlmLogin(from: string): boolean {
+  return /(^|\/)llm-login\//.test(from);
+}
+/** Pure llm-login modules (no fs, no credential paths) the status closure may reach via settings. */
+const PURE_LLM_LOGIN = new Set(["llm-login/plan-check.ts"]);
+
 const REFRESH = /\bgetValidAccessToken\b|\brefreshAccessToken\b|\bgrant_type\b|\/oauth\/token\b/;
 const FS_WRITES = /\b(writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|copyFile|copyFileSync|unlink|unlinkSync|rm|rmSync|chmod|chmodSync|chown|chownSync|truncate|truncateSync|createWriteStream|symlink|symlinkSync|link|linkSync)\b/;
 
@@ -117,6 +124,29 @@ describe("auth-status never reaches a credential refresh or write", () => {
     // One call total in the module, and it is the one inside that body.
     expect(src.match(/\bwriteAtomicJson\s*\(/g)).toHaveLength(1);
     expect(src).not.toMatch(/\.credentials\.json|auth\.json/);
+  });
+
+  /**
+   * Phase 2b (task 10): the sign-in modules write live credentials; the
+   * status/doctor side must never reach them. No auth-status module imports
+   * `llm-login/*`, and the transitive closure reaches only the pure plan
+   * vocabulary (via settings-manager), which imports no fs at all.
+   */
+  it("auth-status never imports the sign-in modules (llm-login/*)", () => {
+    const direct = moduleFiles
+      .filter((f) => importSpecifiers(code(f)).some(({ from }) => reachesLlmLogin(from)))
+      .map((f) => relative(SERVER, f));
+    expect(direct).toEqual([]);
+    const transitive = closure().map((f) => relative(SERVER, f)).filter((f) => f.startsWith("llm-login/"));
+    expect(transitive.filter((f) => !PURE_LLM_LOGIN.has(f))).toEqual([]);
+    for (const f of transitive) expect(code(join(SERVER, f))).not.toMatch(/from\s+["'](node:)?fs/);
+  });
+
+  it("EC-42: the llm-login import predicate flags a mutated import (not vacuous)", () => {
+    const mutated = `import { promoteCredentials } from "../llm-login/credential-promotion.js";`;
+    expect(importSpecifiers(mutated).some(({ from }) => reachesLlmLogin(from))).toBe(true);
+    expect(importSpecifiers(`const m = await import("../llm-login/login-wiring.js");`).some(({ from }) => reachesLlmLogin(from))).toBe(true);
+    expect(importSpecifiers(`import { x } from "./status-core.js";`).some(({ from }) => reachesLlmLogin(from))).toBe(false);
   });
 
   it("no auth-status module imports usage-limits.ts", () => {

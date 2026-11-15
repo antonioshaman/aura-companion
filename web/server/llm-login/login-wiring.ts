@@ -1,14 +1,18 @@
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { recordCodexLoginEvidence } from "../auth-status/codex-provider-evidence.js";
 import { codexTokenFingerprintAt } from "../auth-status/credential-locator.js";
-import { getServiceAuthStatusCore, probeStagedCredentials } from "../auth-status/service-status.js";
+import { getServiceAuthStatusCore, probeStagedCredentials, readUnitTexts } from "../auth-status/service-status.js";
+import { parseSystemdUnit } from "../auth-status/status-core.js";
 import { log } from "../logger.js";
 import { COMPANION_HOME } from "../paths.js";
-import type { PromotedCredentials, PromotionDeps } from "./credential-promotion.js";
+import { resolveBinary } from "../path-resolver.js";
+import { promoteCredentials, recoverPromotions, type PromotedCredentials, type PromotionDeps } from "./credential-promotion.js";
+import { LoginAttempts, sweepOrphanAttempts, type LoginAttemptsDeps } from "./login-attempt.js";
 
 /**
- * Production wiring of the sign-in core for the server (the REST routes and
- * the registry instance arrive in phase 2b). Paths: attempts under
+ * Production wiring of the sign-in core for the server: the one registry
+ * instance the REST routes use (phase 2b), its startup recovery and shutdown. Paths: attempts under
  * `~/.companion/llm-auth/attempts/` (same filesystem as the service HOME on a
  * standard install; the promotion refuses EXDEV), journal + epochs in
  * `~/.companion/llm-auth/`.
@@ -49,4 +53,69 @@ export function servicePromotionDeps(over: Partial<PromotionDeps> = {}): Promoti
     noteCredentialsPromoted,
     ...over,
   };
+}
+
+// ─── The one registry per server (phase 2b, task 8) ───────────────────────────
+
+let attempts: LoginAttempts | null = null;
+let startup: Promise<void> | null = null;
+
+/**
+ * Registry deps for the server process. The CLI is resolved the way sessions
+ * resolve it (`resolveBinary`); the service user comes from the installed unit
+ * (null in dev), so a server started by another user refuses to sign in.
+ */
+export function serviceLoginAttemptsDeps(over: Partial<LoginAttemptsDeps> = {}): LoginAttemptsDeps {
+  const me = userInfo();
+  return {
+    attemptsRoot: LLM_AUTH_ATTEMPTS_DIR,
+    resolveCli: (provider) => resolveBinary(provider),
+    platform: process.platform,
+    callerUser: me.username,
+    callerUid: process.getuid?.() ?? me.uid,
+    serviceUser: parseSystemdUnit(readUnitTexts()).user,
+    serviceEnv: process.env,
+    promote: (ctx) => promoteCredentials(ctx, servicePromotionDeps()),
+    ...over,
+  };
+}
+
+export function getServiceLoginAttempts(): LoginAttempts {
+  attempts ??= new LoginAttempts(serviceLoginAttemptsDeps());
+  return attempts;
+}
+
+/**
+ * Server start, strictly in this order: finish (or discard) an interrupted
+ * promotion — it may still need its attempt dir — THEN remove orphaned attempt
+ * dirs. Each step is caught (EC-53): a failure is logged and the server starts;
+ * the REST start route awaits this before the first sign-in.
+ */
+export function startServiceLoginRecovery(deps: {
+  recover?: () => Promise<unknown>;
+  sweep?: () => Promise<unknown>;
+} = {}): Promise<void> {
+  startup ??= (async () => {
+    try {
+      await (deps.recover ?? (() => recoverPromotions({ ...servicePromotionDeps(), attemptsRoot: LLM_AUTH_ATTEMPTS_DIR })))();
+    } catch (err) {
+      log.warn("llm-login", "llm_auth.login.recovery_failed", { event: "llm_auth.login.recovery_failed", error: err instanceof Error ? err.name : "unknown" });
+    }
+    try {
+      await (deps.sweep ?? (() => sweepOrphanAttempts(LLM_AUTH_ATTEMPTS_DIR)))();
+    } catch (err) {
+      log.warn("llm-login", "llm_auth.login.sweep_failed", { event: "llm_auth.login.sweep_failed", error: err instanceof Error ? err.name : "unknown" });
+    }
+  })();
+  return startup;
+}
+
+/** Server shutdown: end running attempts (process reaped, staging dir removed). */
+export async function shutdownServiceLoginAttempts(): Promise<void> {
+  await attempts?.shutdown();
+}
+
+export function _resetLoginWiringForTest(): void {
+  attempts = null;
+  startup = null;
 }

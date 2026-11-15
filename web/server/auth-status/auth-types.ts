@@ -88,6 +88,15 @@ export interface ProviderAuthStatus {
   cli: { path: Known<string>; version: Known<string> };
   /** For `wrong_user`: the service user the status must be computed as. */
   serviceUser?: string;
+  /**
+   * Phase 2 (task 7), added by the status REST at read time from the current
+   * settings — never persisted, so a warning clears by itself:
+   * the owner's expected plan (null = none), the plan check, and the method
+   * new sessions really use (names only, never values).
+   */
+  expectedPlan?: string | null;
+  planCheck?: PlanCheck;
+  effectiveMethod?: EffectiveAuthMethod;
 }
 
 // ─── Doctor findings (rendered in 1b; vocabulary fixed here) ──────────────────
@@ -344,6 +353,12 @@ export interface EffectiveAuthMethod {
   source: EffectiveAuthSource;
   /** Name (never the value) of the variable/setting, for `environment` / `settings`. */
   variable?: string;
+  /**
+   * A credential that is configured but NOT used because the sign-in wins
+   * (Codex: a stored ChatGPT sign-in beats `OPENAI_API_KEY`, D5) — a neutral
+   * note, not an override warning. Name only, never the value.
+   */
+  alsoSet?: { source: Exclude<EffectiveAuthSource, "sign_in">; variable: string };
 }
 
 // ─── Catalog shape ────────────────────────────────────────────────────────────

@@ -1,11 +1,15 @@
 import type { Hono } from "hono";
 import { homedir } from "node:os";
 import { basename, relative, sep } from "node:path";
-import { PROVIDER_IDS, type ProviderAuthStatus, type ProviderId } from "../auth-status/auth-types.js";
+import { PROVIDER_IDS, type EffectiveAuthMethod, type ProviderAuthStatus, type ProviderId } from "../auth-status/auth-types.js";
+import { locateCodexAuth } from "../auth-status/credential-locator.js";
 import { toRestDoctorReport } from "../auth-status/doctor-checks.js";
 import type { DoctorRunner } from "../auth-status/doctor-service.js";
 import type { StatusCore, StatusSnapshot } from "../auth-status/status-core.js";
 import type { AuthState, BackendAuthStatus } from "../host-auth-status.js";
+import { planCheck } from "../llm-login/plan-check.js";
+import { effectiveSessionAuthMethod } from "../provider-auth-env.js";
+import { getSettings } from "../settings-manager.js";
 
 /**
  * LLM-auth status + doctor REST (plan task 8). Registered AFTER the shared
@@ -27,6 +31,33 @@ export interface AuthStatusRoutesDeps {
   doctor: () => Pick<DoctorRunner, "peek" | "recheck">;
   /** Service HOME for `~/` rendering of CLI paths. */
   serviceHome?: string;
+  /** Read-time sign-in facts (phase 2 task 7); absent = statuses go out without them. */
+  signInFacts?: (provider: ProviderId) => SignInFacts;
+}
+
+export interface SignInFacts {
+  expectedPlan: string | null;
+  effectiveMethod: EffectiveAuthMethod;
+}
+
+/** The service's facts: expectation from settings, method from the service env + settings + stored Codex sign-in. */
+export function serviceSignInFacts(provider: ProviderId): SignInFacts {
+  const settings = getSettings();
+  const codexMode = provider === "codex" ? locateCodexAuth(process.env)?.authMode ?? null : null;
+  return {
+    expectedPlan: settings.expectedPlans[provider] ?? null,
+    effectiveMethod: effectiveSessionAuthMethod(provider, settings, process.env, codexMode),
+  };
+}
+
+function withSignInFacts(status: ProviderAuthStatus, facts: SignInFacts | null): ProviderAuthStatus {
+  if (!facts) return status;
+  return {
+    ...status,
+    expectedPlan: facts.expectedPlan,
+    planCheck: planCheck(status.provider, status.plan, facts.expectedPlan),
+    effectiveMethod: facts.effectiveMethod,
+  };
 }
 
 function isProviderId(value: string): value is ProviderId {
@@ -49,15 +80,24 @@ export function homeRelativePath(path: string, serviceHome: string): string {
   return `…/${basename(path)}`;
 }
 
-export function toRestProviderStatus(status: ProviderAuthStatus, serviceHome: string): ProviderAuthStatus {
+export function toRestProviderStatus(
+  status: ProviderAuthStatus,
+  serviceHome: string,
+  facts: ((provider: ProviderId) => SignInFacts) | undefined = undefined,
+): ProviderAuthStatus {
   const path = status.cli.path;
-  return path.known ? { ...status, cli: { ...status.cli, path: { known: true, value: homeRelativePath(path.value, serviceHome) } } } : status;
+  const out = path.known ? { ...status, cli: { ...status.cli, path: { known: true as const, value: homeRelativePath(path.value, serviceHome) } } } : status;
+  return withSignInFacts(out, facts ? facts(status.provider) : null);
 }
 
-export function toRestStatusSnapshot(snapshot: StatusSnapshot | null, serviceHome: string): StatusSnapshot | null {
+export function toRestStatusSnapshot(
+  snapshot: StatusSnapshot | null,
+  serviceHome: string,
+  facts: ((provider: ProviderId) => SignInFacts) | undefined = undefined,
+): StatusSnapshot | null {
   if (!snapshot) return null;
   const providers = Object.fromEntries(
-    PROVIDER_IDS.map((id) => [id, toRestProviderStatus(snapshot.providers[id], serviceHome)]),
+    PROVIDER_IDS.map((id) => [id, toRestProviderStatus(snapshot.providers[id], serviceHome, facts)]),
   ) as StatusSnapshot["providers"];
   return { ...snapshot, providers };
 }
@@ -80,23 +120,23 @@ export function registerAuthStatusRoutes(api: Hono, deps: AuthStatusRoutesDeps):
   const home = () => deps.serviceHome ?? process.env.HOME ?? homedir();
 
   api.get("/llm-auth/status", (c) => {
-    return c.json({ status: toRestStatusSnapshot(deps.statusCore().peek(), home()) });
+    return c.json({ status: toRestStatusSnapshot(deps.statusCore().peek(), home(), deps.signInFacts) });
   });
 
   api.get("/llm-auth/status/:provider", (c) => {
     const provider = c.req.param("provider");
     if (!isProviderId(provider)) return c.json({ error: "unknown provider" }, 400);
     const snapshot = deps.statusCore().peek();
-    return c.json({ status: snapshot ? toRestProviderStatus(snapshot.providers[provider], home()) : null });
+    return c.json({ status: snapshot ? toRestProviderStatus(snapshot.providers[provider], home(), deps.signInFacts) : null });
   });
 
   api.post("/llm-auth/recheck", async (c) => {
     const outcome = await deps.statusCore().recheck();
     if (outcome.kind === "too_soon") {
       c.header("Retry-After", String(Math.ceil(outcome.retryAfterMs / 1000)));
-      return c.json({ error: "too_soon", retryAfterMs: outcome.retryAfterMs, status: toRestStatusSnapshot(outcome.snapshot, home()) }, 429);
+      return c.json({ error: "too_soon", retryAfterMs: outcome.retryAfterMs, status: toRestStatusSnapshot(outcome.snapshot, home(), deps.signInFacts) }, 429);
     }
-    return c.json({ status: toRestStatusSnapshot(outcome.snapshot, home()) });
+    return c.json({ status: toRestStatusSnapshot(outcome.snapshot, home(), deps.signInFacts) });
   });
 
   api.get("/llm-auth/doctor", (c) => {

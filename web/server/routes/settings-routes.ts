@@ -15,6 +15,7 @@ import { listExistingSkills, readCurrentPack } from "../skill-pack.js";
 import { claudeSupportsPluginDir, describeToolkit } from "../skill-exposure.js";
 import { getLegacyCodexHome } from "../codex-home.js";
 import { resolveBinary } from "../path-resolver.js";
+import { applyExpectedPlansPatch, type ExpectedPlans } from "../llm-login/plan-check.js";
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
 function codexModelsCachePath(): string {
@@ -54,6 +55,7 @@ export function registerSettingsRoutes(api: Hono): void {
       councilSecondReviewer: settings.councilSecondReviewer,
       kbAnalysis: settings.kbAnalysis,
       diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
+      expectedPlans: settings.expectedPlans,
     });
   });
 
@@ -167,6 +169,12 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.diagnosticsMemoryReport !== undefined && typeof body.diagnosticsMemoryReport !== "boolean") {
       return c.json({ error: "diagnosticsMemoryReport must be a boolean" }, 400);
     }
+    let expectedPlans: ExpectedPlans | undefined;
+    if (body.expectedPlans !== undefined) {
+      const parsed = applyExpectedPlansPatch(getSettings().expectedPlans, body.expectedPlans);
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      expectedPlans = parsed.value;
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -188,7 +196,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.autoResumeAfterLimit !== undefined
       || councilSecondReviewer !== undefined
       || kbAnalysis !== undefined
-      || body.diagnosticsMemoryReport !== undefined;
+      || body.diagnosticsMemoryReport !== undefined
+      || expectedPlans !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -305,6 +314,7 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.diagnosticsMemoryReport === "boolean"
           ? body.diagnosticsMemoryReport
           : undefined,
+      expectedPlans,
     });
     if (typeof body.autoResumeAfterLimit === "boolean") {
       // Lets the orchestrator drop pending auto-resumes the moment the user
@@ -342,6 +352,7 @@ export function registerSettingsRoutes(api: Hono): void {
       councilSecondReviewer: settings.councilSecondReviewer,
       kbAnalysis: settings.kbAnalysis,
       diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
+      expectedPlans: settings.expectedPlans,
     });
   });
 

@@ -208,6 +208,8 @@ export class LoginAttempts {
   /** Last attempt per provider (also after it ended), for polling. */
   private readonly last = new Map<ProviderId, LoginAttempt>();
   private readonly cooldownUntil = new Map<ProviderId, number>();
+  /** When the last attempt per provider ended (REST hides a finished attempt after a while). */
+  private readonly ended = new Map<ProviderId, { id: string; at: number }>();
 
   constructor(private readonly deps: LoginAttemptsDeps) {}
 
@@ -217,6 +219,12 @@ export class LoginAttempts {
 
   current(provider: ProviderId): LoginAttempt | null {
     return this.running.get(provider)?.attempt ?? this.last.get(provider) ?? null;
+  }
+
+  /** Epoch ms the attempt reached a terminal state; null while it runs or when unknown. */
+  endedAt(id: string): number | null {
+    for (const e of this.ended.values()) if (e.id === id) return e.at;
+    return null;
   }
 
   byId(id: string): LoginAttempt | null {
@@ -245,6 +253,7 @@ export class LoginAttempts {
     if (refusal) {
       const failed = reduceLoginAttempt(fresh, { type: "failed", reason: refusal });
       this.last.set(provider, failed);
+      this.ended.set(provider, { id, at: now });
       logTransition(fresh, failed);
       return { kind: "refused", attempt: failed };
     }
@@ -406,6 +415,7 @@ export class LoginAttempts {
     // An absorbed event (cancel / expiry while `verifying`) ends nothing: the
     // promotion in flight decides the outcome.
     if (!isTerminalLoginState(run.attempt.state)) return Promise.resolve();
+    this.ended.set(provider, { id, at: this.now() });
     run.finalizing = (async () => {
       for (const t of run.timers) clearTimeout(t);
       try {

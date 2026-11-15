@@ -80,7 +80,7 @@ function sourceLine(source: Source, serviceUser: string | null): string {
 
 function entryLines(entry: CatalogEntry, indent: string): string[] {
   const lines = [`${indent}${entry.detail}`];
-  const action = formatAction(entry.action);
+  const action = formatAction(entry.action, "cli");
   if (action) lines.push(`${indent}Action: ${action}`);
   return lines;
 }

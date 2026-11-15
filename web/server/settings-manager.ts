@@ -6,6 +6,7 @@ import {
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
+import { normalizeExpectedPlans, type ExpectedPlans } from "./llm-login/plan-check.js";
 import {
   type SecondReviewerConfig,
   DEFAULT_SECOND_REVIEWER_CONFIG,
@@ -90,6 +91,11 @@ export interface CompanionSettings {
   kbAnalysis: KbAnalysisSettings;
   /** Report-only memory analysis on the Diagnostics page. Default off; manual runs only. */
   diagnosticsMemoryReport: boolean;
+  /**
+   * The plan the owner expects per provider (closed list, `plan-check.ts`);
+   * a missing provider = no expectation. Default: none (phase 2 D7).
+   */
+  expectedPlans: ExpectedPlans;
   updatedAt: number;
 }
 
@@ -129,6 +135,7 @@ let settings: CompanionSettings = {
   councilSecondReviewer: { ...DEFAULT_SECOND_REVIEWER_CONFIG },
   kbAnalysis: { ...DEFAULT_KB_ANALYSIS_SETTINGS },
   diagnosticsMemoryReport: false,
+  expectedPlans: {},
   updatedAt: 0,
 };
 
@@ -168,6 +175,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     councilSecondReviewer: normalizeSecondReviewerConfig(raw?.councilSecondReviewer),
     kbAnalysis: normalizeKbAnalysisSettings(raw?.kbAnalysis),
     diagnosticsMemoryReport: raw?.diagnosticsMemoryReport === true,
+    expectedPlans: normalizeExpectedPlans(raw?.expectedPlans),
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -198,7 +206,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "uiuxToolkit" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "uiuxToolkit" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport" | "expectedPlans">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -233,6 +241,7 @@ export function updateSettings(
     councilSecondReviewer: patch.councilSecondReviewer ?? settings.councilSecondReviewer,
     kbAnalysis: patch.kbAnalysis ?? settings.kbAnalysis,
     diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? settings.diagnosticsMemoryReport,
+    expectedPlans: patch.expectedPlans ?? settings.expectedPlans,
     updatedAt: Date.now(),
   });
   persist();
