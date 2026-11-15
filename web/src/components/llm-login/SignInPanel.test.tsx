@@ -434,6 +434,78 @@ describe("SignInHost (store + REST)", () => {
   });
 });
 
+/**
+ * Observer review 204 (one round): (1) a lost answer to "Start again" must
+ * not leave the window stuck on the old finished attempt — polling resumes
+ * and finds the new one (cancellable); (2) Done / Dismiss give focus to a
+ * fallback target when the opener is gone (EC-39 on every close path).
+ */
+describe("review 204 fixes", () => {
+  it("Start again whose answer is lost: polling resumes and shows the new, cancellable attempt", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocks.llmLoginStart
+      .mockReturnValueOnce(ok({ attempt: loginAttempt("codex", "cancelled"), existing: false }))
+      .mockImplementationOnce(() => Promise.reject(new Error("connection reset")));
+    const fresh = loginAttempt("codex", "awaiting_user", { id: "e".repeat(32), version: 1 });
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: fresh }));
+    render(<SignInHost />);
+    act(() => useStore.getState().openLoginDialog("codex"));
+    fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+    // The lost answer is a notice; the window still shows the old attempt…
+    expect(await screen.findByText(/No connection to Aura/)).toBeInTheDocument();
+    // …and keeps polling, so the attempt the server did start shows up.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOGIN_POLL_MS + 10);
+    });
+    expect(mocks.llmLoginGet).toHaveBeenCalled();
+    expect(await screen.findByText(FAKE_DEVICE_CODE)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Cancel sign-in" }).length).toBeGreaterThan(0);
+  });
+
+  it("Done with the opener gone moves focus to another sign-in entry point, not <body>", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("claude", "succeeded"), existing: false }));
+    const { rerender } = render(
+      <>
+        <button key="opener" type="button">opener</button>
+        <SignInHost key="host" />
+      </>,
+    );
+    screen.getByRole("button", { name: "opener" }).focus();
+    act(() => useStore.getState().openLoginDialog("claude"));
+    await screen.findByRole("button", { name: "Done" });
+    // The page changed under the window: the opener is gone, an entry point is there.
+    rerender(
+      <>
+        <button key="entry" type="button" data-testid="sign-in-button-codex">Sign in to Codex</button>
+        <SignInHost key="host" />
+      </>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sign in to Codex" })).toHaveFocus());
+  });
+
+  it("Dismiss on the chip with the opener gone does not drop focus to <body>", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("codex", "awaiting_user"), existing: false }, 201));
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: loginAttempt("codex", "expired", { version: 9 }) }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(
+      <>
+        <textarea aria-label="Message" />
+        <SignInHost />
+      </>,
+    );
+    act(() => useStore.getState().openLoginDialog("codex"));
+    await screen.findByText(FAKE_DEVICE_CODE);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOGIN_POLL_MS + 10);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+  });
+});
+
 describe("acceptAttempt (EC-41)", () => {
   it("same attempt: never goes back in version; another attempt or null replaces", () => {
     const v3 = loginAttempt("claude", "awaiting_user", { version: 3 });

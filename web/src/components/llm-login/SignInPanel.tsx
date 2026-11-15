@@ -482,6 +482,20 @@ export function SignInChip({
   );
 }
 
+/**
+ * Where focus goes when the window disappears and its opener is gone (the
+ * page changed under it): another sign-in entry point, else the chat input,
+ * else the first focusable control — never <body> (EC-39, observer review 204).
+ */
+function fallbackFocusTarget(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  return (
+    document.querySelector<HTMLElement>('[data-testid^="sign-in-button-"]') ??
+    document.querySelector<HTMLElement>("textarea:not([disabled])") ??
+    document.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')
+  );
+}
+
 /** Wallclock for the countdown (EC-11): ticks once a second while mounted. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -545,7 +559,7 @@ function SignInSession({ provider, intent, collapsed }: { provider: ProviderId; 
       restoreFocus(() => chipRef.current);
     } else {
       store.closeLoginDialog();
-      restoreFocus(() => null);
+      restoreFocus(fallbackFocusTarget);
     }
   }, [running, restoreFocus]);
 
@@ -559,7 +573,7 @@ function SignInSession({ provider, intent, collapsed }: { provider: ProviderId; 
         onCancel={cancel}
         onDismiss={() => {
           useStore.getState().closeLoginDialog();
-          restoreFocus(() => null);
+          restoreFocus(fallbackFocusTarget);
         }}
       />
     );

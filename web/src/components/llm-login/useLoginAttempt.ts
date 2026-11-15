@@ -158,13 +158,17 @@ export function useLoginAttempt(provider: ProviderId, intent: "start" | "resume"
 
   // Poll while the attempt runs (or before the first answer); stop on a
   // finished attempt, on "nothing running" and on a refused token/origin.
+  // A lost answer (network notice) also keeps polling: a "Start again" whose
+  // response never arrived may have started an attempt on the server, and the
+  // only way to see (and cancel) it is to read it (observer review 204).
   const running = view.attempt ? !isTerminalLoginState(view.attempt.state) : !view.loaded;
+  const lostAnswer = view.notice?.kind === "network";
   const blocked = view.notice?.kind === "unauthorized" || view.notice?.kind === "forbidden";
   useEffect(() => {
-    if (!running || blocked) return;
+    if ((!running && !lostAnswer) || blocked) return;
     const t = setInterval(() => void poll(), LOGIN_POLL_MS);
     return () => clearInterval(t);
-  }, [running, blocked, poll]);
+  }, [running, lostAnswer, blocked, poll]);
 
   return { view, start, submitCode, cancel };
 }
