@@ -79,6 +79,9 @@ import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMetho
 import { getServiceAuthStatusCore } from "./auth-status/service-status.js";
 import { getServiceDoctorRunner } from "./auth-status/doctor-service.js";
 import { projectBackendAuthState, registerAuthStatusRoutes, serviceSignInFacts } from "./routes/auth-status-routes.js";
+import { registerLoginRoutes } from "./routes/login-routes.js";
+import { getServiceLoginAttempts, startServiceLoginRecovery } from "./llm-login/login-wiring.js";
+import { MAX_CODE_SUBMISSIONS } from "./llm-login/login-attempt.js";
 import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
@@ -2557,6 +2560,9 @@ export function createRoutes(
   registerPortableHistoryRoutes(api, { sessionStore: portableSessionStore, launcher, bridge: wsBridge, orchestrator });
   registerFsRoutes(api);
   registerAuthStatusRoutes(api, { statusCore: getServiceAuthStatusCore, doctor: getServiceDoctorRunner, signInFacts: serviceSignInFacts });
+  // Sign-in from the UI / `aura-companion auth login` (phase 2b): own guard —
+  // the Aura token is required even from localhost (D9), Origin + JSON-only.
+  registerLoginRoutes(api, { attempts: getServiceLoginAttempts, ready: startServiceLoginRecovery }, MAX_CODE_SUBMISSIONS);
   registerEnvRoutes(api, { webDir: WEB_DIR });
   registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);

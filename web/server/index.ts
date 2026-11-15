@@ -276,6 +276,9 @@ gateBootResumeOnCrashLoop(sessionStore.directory, () => launcher.takeBootResumeC
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+// LLM sign-in (phase 2b): finish/discard an interrupted credential promotion,
+// THEN sweep orphaned attempt dirs. Never throws; the start route awaits it.
+void startServiceLoginRecovery();
 const sessionBrowserCleanup = startSessionBrowserCleanup((id) => launcher.getSession(id));
 
 // ── Anonymous opt-in usage heartbeat (default off) ───────────────────────────
@@ -378,6 +381,7 @@ app.get("/healthz", healthHandler);
 //   - at least one Claude/Codex CLI binary resolves on PATH
 let isReady = false;
 import { resolveBinary } from "./path-resolver.js";
+import { shutdownServiceLoginAttempts, startServiceLoginRecovery } from "./llm-login/login-wiring.js";
 app.get("/ready", (c) => {
   const claudeOk = resolveBinary("claude") !== null;
   const codexOk = resolveBinary("codex") !== null;
@@ -1083,6 +1087,8 @@ async function gracefulShutdown() {
   // Abort a running KB analysis (no report, lastRun unchanged) and stop its hourly check.
   await diagnosticsService.dispose().catch(() => {});
   eventLoopLagMonitor.stop();
+  // End running sign-in attempts: CLI reaped, staging dir removed, live credentials untouched.
+  await shutdownServiceLoginAttempts().catch(() => {});
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
     if (coordinator) {
