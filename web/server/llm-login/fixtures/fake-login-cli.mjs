@@ -22,7 +22,7 @@ import { createInterface } from "node:readline";
 const args = process.argv.slice(2);
 const flag = (name) => args.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
 const scenario = flag("scenario") ?? "success";
-const rest = args.filter((a) => !a.startsWith("--scenario=") && a !== "--grandchild" && a !== "--grandchild-inherit");
+const rest = args.filter((a) => !a.startsWith("--scenario=") && !a.startsWith("--success-after-ms=") && a !== "--grandchild" && a !== "--grandchild-inherit");
 const provider = rest[0] === "auth" && rest[1] === "login" ? "claude"
   : rest[0] === "login" && rest[1] === "--device-auth" ? "codex"
   : null;

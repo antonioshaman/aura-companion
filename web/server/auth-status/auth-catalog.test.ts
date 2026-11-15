@@ -171,6 +171,10 @@ describe("formatAction", () => {
     expect(formatAction({ kind: "sign_in", provider: "codex" })).toBe(
       "Sign in again as the service user: `codex login --device-auth` (see docs/deploy/vps-systemd.mdx#prerequisites)",
     );
+    // Phase 2b: the CLI surface points at the server sign-in command instead.
+    expect(formatAction({ kind: "sign_in", provider: "claude" }, "cli")).toBe("Sign in again: `aura-companion auth login claude`");
+    expect(formatAction({ kind: "sign_in", provider: "codex" }, "cli")).toBe("Sign in again: `aura-companion auth login codex`");
+    expect(formatAction({ kind: "retry" }, "cli")).toBe("Retry");
     expect(formatAction({ kind: "retry" })).toBe("Retry");
     expect(formatAction({ kind: "restart_session" })).toBe("Restart the session");
     expect(formatAction({ kind: "update_cli", command: "claude update" })).toBe("Update the CLI: `claude update`");

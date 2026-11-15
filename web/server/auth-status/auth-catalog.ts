@@ -489,11 +489,41 @@ export function describeEffectiveMethod(effective: EffectiveAuthMethod, provider
   }
 }
 
-/** One-line plain-text rendering of an action, shared by CLI and UI tooltips. */
-export function formatAction(action: AuthAction): string {
+/** The command that signs in through the running server (phase 2b). */
+export function cliSignInCommand(provider: ProviderId): string {
+  return `aura-companion auth login ${provider}`;
+}
+
+/**
+ * The CLI cannot use the server's sign-in: no Aura token (it lives in the
+ * service user's `~/.companion/auth.json`) or the server refused it.
+ */
+export function describeCliSignInTokenMissing(provider: ProviderId): CatalogEntry {
+  return {
+    title: `${providerLabel(provider)}: cannot reach the server's sign-in`,
+    detail: "This command needs the Aura access token of the service user (~/.companion/auth.json). Run it as the service user, or set COMPANION_AUTH_TOKEN.",
+    action: { kind: "run_as_service_user" },
+  };
+}
+
+/** The sign-in started elsewhere (another tab or terminal) is still running. */
+export function describeLoginInProgressElsewhere(provider: ProviderId): CatalogEntry {
+  return {
+    title: `A ${providerLabel(provider)} sign-in is already in progress`,
+    detail: "It was started in the browser or another terminal. Continue it here, or cancel it.",
+    action: { kind: "none" },
+  };
+}
+
+/**
+ * One-line plain-text rendering of an action. `surface: "cli"` renders
+ * `sign_in` as the `aura-companion auth login` command (phase 2b); the UI keeps
+ * the manual instruction until the sign-in panel ships (phase 2c).
+ */
+export function formatAction(action: AuthAction, surface: "ui" | "cli" = "ui"): string {
   switch (action.kind) {
-    // Until the sign-in panel ships (phase 2c) the action renders as the manual instruction.
-    case "sign_in": return manualSignInLine(action.provider);
+    case "sign_in":
+      return surface === "cli" ? `Sign in again: \`${cliSignInCommand(action.provider)}\`` : manualSignInLine(action.provider);
     case "retry": return "Retry";
     case "restart_session": return "Restart the session";
     case "update_cli": return `Update the CLI: \`${action.command}\``;

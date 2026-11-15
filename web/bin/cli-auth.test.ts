@@ -71,7 +71,9 @@ describe("auth status", () => {
     expect(h.text()).toContain("Source: running server");
     expect(h.lines).toContain(invalid.title);
     expect(h.text()).toContain(invalid.detail);
-    expect(h.text()).toContain(`Action: ${formatAction(invalid.action)}`);
+    // Phase 2b: the CLI renders a sign-in action as `aura-companion auth login <provider>`.
+    expect(h.text()).toContain(`Action: ${formatAction(invalid.action, "cli")}`);
+    expect(h.text()).toContain("aura-companion auth login claude");
     expect(h.lines).toContain(describeAuthState("working", "codex").title);
     expect(h.text()).toContain("Account: owner@example.com · Plan: max · Sign-in: subscription");
     // Codex parity: a field the provider does not report reads "unknown", never blank.
@@ -145,7 +147,7 @@ describe("doctor", () => {
     expect(text).toContain("Sessions launch: /usr/bin/claude → /root/.local/share/claude/versions/2.1.120 (version 2.1.120, owner root)");
     expect(text).toContain("Service user's install: /usr/bin/claude → /home/svc/.local/share/claude/versions/2.1.283 (version 2.1.283");
     expect(text).toContain("Copy: /root/.codex/auth.json (owner root, mode 0600, root's home)");
-    expect(text).toContain(formatAction(describeDoctorFinding("binary_divergence", "claude").action));
+    expect(text).toContain(formatAction(describeDoctorFinding("binary_divergence", "claude").action, "cli"));
   });
 
   it("only unchecked items → exit 2, worded 'not checked' (never 'no problems')", async () => {

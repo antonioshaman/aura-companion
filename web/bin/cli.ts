@@ -28,6 +28,8 @@ Server commands:
   status      Show service status (or use 'companion status' when server is running)
   logs        Tail service log files
   auth status Claude / Codex sign-in status (server result, or computed locally)
+  auth login <claude|codex>
+              Sign in through the running server (as the service user; exit 0 ok, 1 failed, 130 Ctrl-C)
   doctor      Diagnose CLI binaries and credential files (exit 1 = problems, 2 = not fully checked)
   help        Show this help message
 
@@ -42,7 +44,7 @@ Management commands (requires running server):
 Options:
   --port <n>  Override the default port (default: 3456)
   --offline   (auth status, doctor) Do not ask the server; compute locally
-  --json      (auth status, doctor) Machine-readable output
+  --json      (auth status, auth login, doctor) Machine-readable output
 `);
 }
 
@@ -155,8 +157,14 @@ switch (command) {
   case "auth":
   case "doctor": {
     const args = process.argv.slice(3);
+    if (command === "auth" && args[0] === "login") {
+      const { cliPort } = await import("./cli-auth.js");
+      const { defaultCliLoginDeps, runAuthLoginCommand } = await import("./cli-auth-login.js");
+      process.exit(await runAuthLoginCommand(args.slice(1), await defaultCliLoginDeps(cliPort(args))));
+    }
     if (command === "auth" && args[0] !== "status") {
       console.error("Usage: companion auth status [--offline] [--json] [--port <n>]");
+      console.error("       companion auth login <claude|codex> [--json] [--port <n>]");
       process.exit(1);
     }
     const { cliPort, defaultCliAuthDeps, runAuthStatusCommand, runDoctorCommand } = await import("./cli-auth.js");
