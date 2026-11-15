@@ -548,6 +548,8 @@ export interface AppSettings {
   kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
   /** Diagnostics: report-only memory analysis switch (default off). */
   diagnosticsMemoryReport?: boolean;
+  /** Phase 2 (D7): the owner's expected plan per provider (absent = none). */
+  expectedPlans?: Partial<Record<ProviderId, string>>;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1404,6 +1406,8 @@ export const api = {
     councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
     kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
     diagnosticsMemoryReport?: boolean;
+    /** Phase 2 (D7): expected plan per provider; null removes it; the server validates the closed list. */
+    expectedPlans?: Partial<Record<ProviderId, string | null>>;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChatMessage } from "../../types.js";
 import type { AuthAction, TurnFailure } from "../../../server/auth-status/auth-types.js";
-import { describeTurnFailure, formatAction, turnFailureFacts } from "../../../server/auth-status/auth-catalog.js";
+import {
+  describeSignInRestored,
+  describeTurnFailure,
+  describeTurnNeedsRetry,
+  formatAction,
+  turnFailureFacts,
+} from "../../../server/auth-status/auth-catalog.js";
 import { useStore } from "../../store.js";
 import { api } from "../../api.js";
 import { createClientMessageId, sendToSession } from "../../ws.js";
+import { SignInButton } from "../llm-login/SignInButton.js";
+import { ensurePromotedAtLoaded, isSignInRestored } from "../llm-login/sign-in-restored.js";
 
 /**
  * Turn-failure card (LLM auth phase 1, task 14; spec story 3). The server
@@ -18,11 +26,20 @@ import { createClientMessageId, sendToSession } from "../../ws.js";
  * "Retry" sends the last user message once (one click, one resend, no loop);
  * "Restart the session" is only a button. Neither runs automatically.
  *
+ * Phase 2c (task 12): the `sign_in` action opens the sign-in window. After a
+ * later successful sign-in the card turns into "sign-in restored" with Retry
+ * as the main action (`recovery: "restored"`, computed by a selector — the
+ * stored failure is never rewritten, a failed or cancelled sign-in changes
+ * nothing). `retry_needed` = the turn ran while the sign-in changed (S3-AC3;
+ * the signal arrives in phase 2d). An observer of a Council pair is labelled.
+ *
  * Survives a reload: the server keeps `error` frames that carry a
  * `turnFailure` in the session history, and ws.ts rebuilds the card from it.
  */
 
 export type RetryState = "ready" | "sent" | "unavailable";
+/** none = the failure as classified; restored / retry_needed = after a sign-in (phase 2c/2d). */
+export type FailureRecovery = "none" | "restored" | "retry_needed";
 export type RestartState = { tag: "idle" } | { tag: "pending" } | { tag: "done" } | { tag: "failed"; message: string };
 
 function formatTime(ms: number): string {
@@ -70,6 +87,7 @@ function ActionRow({
         </a>
       );
     case "sign_in":
+      return <SignInButton provider={action.provider} mode="sign_in_again" className={buttonClass} />;
     case "update_cli":
     case "run_as_root":
     case "run_as_service_user":
@@ -83,34 +101,66 @@ function ActionRow({
   }
 }
 
+function recoveryEntry(recovery: FailureRecovery, failure: TurnFailure) {
+  switch (recovery) {
+    case "none":
+      return describeTurnFailure(failure.kind, failure.provider);
+    case "restored":
+      return describeSignInRestored(failure.provider);
+    case "retry_needed":
+      return describeTurnNeedsRetry(failure.provider);
+    default: {
+      const never: never = recovery;
+      throw new Error(`unhandled turn-failure recovery ${String(never)}`);
+    }
+  }
+}
+
 export function TurnFailureCard({
   failure,
   retry = "unavailable",
   onRetry,
   restart = { tag: "idle" },
   onRestart,
+  recovery = "none",
+  observer = false,
 }: {
   failure: TurnFailure;
   retry?: RetryState;
   onRetry?: () => void;
   restart?: RestartState;
   onRestart?: () => void;
+  recovery?: FailureRecovery;
+  /** The session is the observer half of a Council pair. */
+  observer?: boolean;
 }) {
   const titleId = useId();
-  const entry = describeTurnFailure(failure.kind, failure.provider);
-  const facts = turnFailureFacts(failure, formatTime);
+  const entry = recoveryEntry(recovery, failure);
+  const recovered = recovery !== "none";
+  const facts = recovered ? [] : turnFailureFacts(failure, formatTime);
   return (
     <div
       role="group"
       aria-labelledby={titleId}
       data-testid="turn-failure-card"
       data-kind={failure.kind}
-      className="my-1 rounded-lg border border-cc-error/40 bg-cc-error/5 px-3.5 py-3 space-y-1.5"
+      data-recovery={recovery}
+      className={`my-1 rounded-lg border px-3.5 py-3 space-y-1.5 ${
+        recovery === "restored" ? "border-cc-success/40 bg-cc-success/5" : "border-cc-error/40 bg-cc-error/5"
+      }`}
     >
-      <p id={titleId} className="text-[13px] font-semibold text-cc-error">
-        {entry.title}
-      </p>
+      <div className="flex items-start gap-2">
+        <p id={titleId} className={`text-[13px] font-semibold ${recovery === "restored" ? "text-cc-success" : "text-cc-error"}`}>
+          {entry.title}
+        </p>
+        {observer && (
+          <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-cc-active text-cc-muted">observer</span>
+        )}
+      </div>
       <p className="text-xs text-cc-fg">{entry.detail}</p>
+      {recovered && (
+        <p className="text-[11px] text-cc-muted">Failed earlier: {describeTurnFailure(failure.kind, failure.provider).title}</p>
+      )}
       {facts.length > 0 && (
         <ul className="text-xs text-cc-fg space-y-0.5">
           {facts.map((f) => (
@@ -137,6 +187,13 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
   const failure = message.turnFailure;
   const messages = useStore((s) => s.messages.get(sessionId));
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
+  const observer = useStore((s) => s.sessions.get(sessionId)?.sessionGroupRole) === "observer";
+  const promotedAt = useStore((s) => s.llmAuthPromotedAt);
+  const signInFailure = failure ? describeTurnFailure(failure.kind, failure.provider).action.kind === "sign_in" || failure.kind === "stale_session_credentials" : false;
+  // A sign-in failure card needs the last promotion time (one status read per page).
+  useEffect(() => {
+    if (signInFailure) void ensurePromotedAtLoaded();
+  }, [signInFailure]);
   const [retried, setRetried] = useState(false);
   const [restart, setRestart] = useState<RestartState>({ tag: "idle" });
   const mounted = useRef(true);
@@ -187,5 +244,16 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
 
   if (!failure) return null;
   const retry: RetryState = retried ? "sent" : !lastUser || superseded || !cliConnected ? "unavailable" : "ready";
-  return <TurnFailureCard failure={failure} retry={retry} onRetry={onRetry} restart={restart} onRestart={onRestart} />;
+  const recovery: FailureRecovery = isSignInRestored(failure, message.timestamp, promotedAt) ? "restored" : "none";
+  return (
+    <TurnFailureCard
+      failure={failure}
+      retry={retry}
+      onRetry={onRetry}
+      restart={restart}
+      onRestart={onRestart}
+      recovery={recovery}
+      observer={observer}
+    />
+  );
 }

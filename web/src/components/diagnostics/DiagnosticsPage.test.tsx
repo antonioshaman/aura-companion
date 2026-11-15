@@ -27,6 +27,9 @@ const mocks = vi.hoisted(() => ({
   llmAuthDoctor: vi.fn(),
   llmAuthRecheck: vi.fn(),
   llmAuthDoctorRecheck: vi.fn(),
+  // Phase 2c: the LLM sign-in card reads each provider's sign-in attempt on mount.
+  llmLoginGet: vi.fn().mockResolvedValue({ status: 200, body: { attempt: null } }),
+  updateSettings: vi.fn(),
 }));
 vi.mock("../../api.js", () => ({ api: mocks }));
 

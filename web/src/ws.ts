@@ -1421,7 +1421,9 @@ function handleParsedMessage(
           id: nextId(),
           role: "system",
           content: data.message,
-          timestamp: Date.now(),
+          // Server time (set when the frame is stored): the "sign-in restored"
+          // selector compares it with the server's promotion time (phase 2c).
+          timestamp: data.timestamp ?? Date.now(),
           systemVariant: "turn-failure",
           turnFailure: data.turnFailure,
         });

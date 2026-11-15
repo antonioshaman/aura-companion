@@ -1336,6 +1336,17 @@ describe("handleMessage: result", () => {
     expect(state.turnFailures.has("s1")).toBe(false);
   });
 
+  // Phase 2c: the live card keeps the server's timestamp (the same one the
+  // history replay uses), so "sign-in restored" compares server clock with
+  // server clock; a frame without one falls back to the browser clock.
+  it("a live turn-failure card carries the frame's server timestamp", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "error", message: "x", turnFailure: { kind: "auth_rejected", provider: "codex", providerMessage: "401" }, timestamp: 4242 });
+    const card = useStore.getState().messages.get("s1")!.find((m) => m.systemVariant === "turn-failure");
+    expect(card?.timestamp).toBe(4242);
+  });
+
   it("without a typed failure the same 403 still takes the model-fallback path", () => {
     // Guard: task 12 must not swallow genuine model refusals.
     useStore.setState({

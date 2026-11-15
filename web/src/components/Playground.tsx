@@ -5406,6 +5406,56 @@ function SignInPlaygroundSection() {
         <Card label="SignInChip — finished">
           <SignInChip provider="claude" attempt={loginAttempt("claude", "succeeded")} onOpen={noop} onDismiss={noop} />
         </Card>
+        {PROVIDER_IDS.flatMap((provider) =>
+          (["restored", "retry_needed"] as const).map((recovery) => (
+            <Card key={`${provider}-${recovery}`} label={`TurnFailureCard — ${provider} / ${recovery}${provider === "codex" ? " (observer)" : ""}`}>
+              <TurnFailureCard
+                failure={playgroundTurnFailure("auth_rejected", provider)}
+                recovery={recovery}
+                retry="ready"
+                onRetry={noop}
+                observer={provider === "codex"}
+              />
+            </Card>
+          )),
+        )}
+        <Card label="TurnFailureCard — sign-in failure, observer of a pair (not yet restored)">
+          <TurnFailureCard failure={playgroundTurnFailure("auth_rejected", "codex")} observer />
+        </Card>
+        <Card label="LlmAuthView — plan mismatch, ANTHROPIC_API_KEY overrides, Codex sign-in running">
+          <LlmAuthView
+            status={{
+              tag: "ready",
+              data: statusSnapshot(
+                {
+                  plan: { known: true, value: "pro" },
+                  planCheck: "mismatch",
+                  expectedPlan: "max",
+                  effectiveMethod: { method: "env_token", source: "environment", variable: "ANTHROPIC_API_KEY" },
+                },
+                {
+                  planCheck: "unknown",
+                  expectedPlan: "plus",
+                  effectiveMethod: { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } },
+                },
+              ),
+            }}
+            doctor={{ tag: "ready", data: null }}
+            now={LLM_AUTH_NOW}
+            attempts={{ codex: loginAttempt("codex", "awaiting_user") }}
+            onExpectedPlan={noop}
+            onCheck={noop}
+            onDoctor={noop}
+          />
+        </Card>
+        <Card label="LlmAuthView — plan as expected, signed in by sign-in">
+          <LlmAuthView
+            status={{ tag: "ready", data: statusSnapshot({ planCheck: "match", expectedPlan: "max", verifiedBy: "login" }, { state: "not_signed_in", planCheck: "unset" }) }}
+            doctor={{ tag: "ready", data: null }}
+            now={LLM_AUTH_NOW}
+            onExpectedPlan={noop}
+          />
+        </Card>
       </div>
     </Section>
   );

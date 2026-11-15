@@ -88,7 +88,9 @@ describe("auth catalog", () => {
 
   it("S4: usage reasons name auth / api-key cases distinctly", () => {
     expect(describeUsageLimitsReason("auth_invalid").title).toMatch(/sign-in is invalid/);
-    expect(describeUsageLimitsReason("auth_invalid").action.kind).toBe("open_status");
+    // Phase 2c: the limits panel offers the sign-in window directly (same action as the turn-failure card).
+    expect(describeUsageLimitsReason("auth_invalid").action).toEqual({ kind: "sign_in", provider: "claude" });
+    expect(describeUsageLimitsReason("no_credentials").action).toEqual({ kind: "sign_in", provider: "claude" });
     expect(describeUsageLimitsReason("api_key_login").detail).toMatch(/API key/);
   });
 

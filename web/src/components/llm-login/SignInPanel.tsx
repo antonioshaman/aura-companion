@@ -14,6 +14,7 @@ import {
   verifiedByLabel,
 } from "../../../server/auth-status/auth-catalog.js";
 import { useLoginAttempt, type LoginAttemptView, type LoginNotice } from "./useLoginAttempt.js";
+import { notePromotedFromStatus } from "./sign-in-restored.js";
 
 /**
  * The sign-in window (LLM auth phase 2c, task 11; spec story 1). ONE window
@@ -518,7 +519,11 @@ function SignInSession({ provider, intent, collapsed }: { provider: ProviderId; 
     if (!succeededId) return;
     let live = true;
     api.llmAuthStatus().then(
-      (r) => live && setStatus(r.status?.providers[provider] ?? null),
+      (r) => {
+        // Every open chat's sign-in failure card can now say "sign-in restored".
+        notePromotedFromStatus(r.status);
+        if (live) setStatus(r.status?.providers[provider] ?? null);
+      },
       () => {},
     );
     return () => {

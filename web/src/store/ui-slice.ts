@@ -62,6 +62,12 @@ export interface UiSlice {
   diffPanelSelectedFile: Map<string, string>;
   diffBase: DiffBase;
   loginDialog: LoginDialogState | null;
+  /**
+   * Epoch ms of each provider's last successful sign-in (server clock, from
+   * the status `lastPromotedAt`). Only grows. A sign-in failure that fired
+   * before it renders as "sign-in restored" (selector, nothing rewritten).
+   */
+  llmAuthPromotedAt: Partial<Record<ProviderId, number>>;
 
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
@@ -88,6 +94,8 @@ export interface UiSlice {
   collapseLoginDialog: () => void;
   /** Drops the window and the chip (attempt finished or dismissed). */
   closeLoginDialog: () => void;
+  /** Records a provider's last promotion; an older or missing value never lowers it. */
+  noteLlmAuthPromotedAt: (provider: ProviderId, at: number | null | undefined) => void;
 }
 
 export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => ({
@@ -105,6 +113,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
   diffPanelSelectedFile: new Map(),
   diffBase: getInitialDiffBase(),
   loginDialog: null,
+  llmAuthPromotedAt: {},
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
@@ -219,4 +228,9 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
   openLoginDialog: (provider, intent = "start") => set({ loginDialog: { provider, intent, collapsed: false } }),
   collapseLoginDialog: () => set((s) => (s.loginDialog ? { loginDialog: { ...s.loginDialog, collapsed: true } } : s)),
   closeLoginDialog: () => set({ loginDialog: null }),
+  noteLlmAuthPromotedAt: (provider, at) =>
+    set((s) => {
+      if (typeof at !== "number" || !(at > 0) || (s.llmAuthPromotedAt[provider] ?? 0) >= at) return s;
+      return { llmAuthPromotedAt: { ...s.llmAuthPromotedAt, [provider]: at } };
+    }),
 });

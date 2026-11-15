@@ -7,6 +7,8 @@ import { toRestDoctorReport } from "../auth-status/doctor-checks.js";
 import type { DoctorRunner } from "../auth-status/doctor-service.js";
 import type { StatusCore, StatusSnapshot } from "../auth-status/status-core.js";
 import type { AuthState, BackendAuthStatus } from "../host-auth-status.js";
+import { readEpoch } from "../llm-login/credential-promotion.js";
+import { LLM_AUTH_STATE_DIR } from "../llm-login/login-wiring.js";
 import { planCheck } from "../llm-login/plan-check.js";
 import { effectiveSessionAuthMethod } from "../provider-auth-env.js";
 import { getSettings } from "../settings-manager.js";
@@ -38,6 +40,14 @@ export interface AuthStatusRoutesDeps {
 export interface SignInFacts {
   expectedPlan: string | null;
   effectiveMethod: EffectiveAuthMethod;
+  /** Epoch ms of the last successful sign-in promotion (phase 2c, "sign-in restored"); null = never. */
+  lastPromotedAt?: number | null;
+}
+
+/** When the provider's credentials were last replaced by a sign-in, from its epoch file. */
+export function lastPromotedAt(stateDir: string, provider: ProviderId): number | null {
+  const at = readEpoch(stateDir, provider)?.promotedAt;
+  return at && at > 0 ? at : null;
 }
 
 /** The service's facts: expectation from settings, method from the service env + settings + stored Codex sign-in. */
@@ -47,6 +57,7 @@ export function serviceSignInFacts(provider: ProviderId): SignInFacts {
   return {
     expectedPlan: settings.expectedPlans[provider] ?? null,
     effectiveMethod: effectiveSessionAuthMethod(provider, settings, process.env, codexMode),
+    lastPromotedAt: lastPromotedAt(LLM_AUTH_STATE_DIR, provider),
   };
 }
 
@@ -57,6 +68,7 @@ function withSignInFacts(status: ProviderAuthStatus, facts: SignInFacts | null):
     expectedPlan: facts.expectedPlan,
     planCheck: planCheck(status.provider, status.plan, facts.expectedPlan),
     effectiveMethod: facts.effectiveMethod,
+    lastPromotedAt: facts.lastPromotedAt ?? null,
   };
 }
 

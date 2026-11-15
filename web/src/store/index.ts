@@ -81,6 +81,7 @@ export const useStore = create<AppState>((...args) => ({
       diffPanelSelectedFile: new Map(),
       diffBase: getInitialDiffBase(),
       loginDialog: null,
+      llmAuthPromotedAt: {},
       // Terminal
       quickTerminalOpen: false,
       quickTerminalTabs: [],

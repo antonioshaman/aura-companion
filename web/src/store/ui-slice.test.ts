@@ -332,3 +332,21 @@ describe("Sign-in window state", () => {
     expect(useStore.getState().loginDialog).toBeNull();
   });
 });
+
+describe("Last sign-in promotion per provider (phase 2c)", () => {
+  // Drives the "sign-in restored" selector: it may only move forward, so a
+  // stale status read (older promotedAt, or null) can never un-restore a card.
+  it("records per provider and only grows", () => {
+    const note = useStore.getState().noteLlmAuthPromotedAt;
+    note("claude", 2000);
+    note("claude", 1000);
+    note("claude", null);
+    note("codex", undefined);
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 2000 });
+    note("codex", 5);
+    note("claude", 3000);
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 3000, codex: 5 });
+    useStore.getState().reset();
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({});
+  });
+});

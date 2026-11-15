@@ -1,13 +1,15 @@
 import type { ReactNode } from "react";
 import type { CatalogEntry } from "../../server/auth-status/auth-types.js";
 import { formatAction } from "../../server/auth-status/auth-catalog.js";
+import { SignInButton } from "./llm-login/SignInButton.js";
 
 /**
  * What the usage-limits panel shows instead of nothing (LLM auth phase 1,
  * task 14; spec story 4). The entry comes from the catalog
  * (`describeUsageLimitsReason` for Claude, `describeLimitsPending` for a
  * Codex session with no windows yet); this component only lays it out with
- * its one action: `open_status` → the Diagnostics page, `retry` → refetch.
+ * its one action: `sign_in` → the sign-in window (phase 2c), `open_status` →
+ * the Diagnostics page, `retry` → refetch.
  */
 export function UsageLimitsReasonNote({ entry, onRetry }: { entry: CatalogEntry; onRetry?: () => void }) {
   const { action } = entry;
@@ -28,6 +30,13 @@ export function UsageLimitsReasonNote({ entry, onRetry }: { entry: CatalogEntry;
       ) : null;
       break;
     case "sign_in":
+      actionNode = (
+        <SignInButton
+          provider={action.provider}
+          className="text-[11px] font-medium text-cc-primary underline underline-offset-2 cursor-pointer"
+        />
+      );
+      break;
     case "update_cli":
     case "run_as_root":
     case "run_as_service_user":
