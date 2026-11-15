@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { api } from "../../api.js";
+import { api, type RestLoginAttempt } from "../../api.js";
+import { useStore } from "../../store.js";
 import type { StatusSnapshot } from "../../../server/auth-status/status-core.js";
 import {
   PROVIDER_IDS,
@@ -9,12 +10,17 @@ import {
   type DoctorReport,
   type ProviderAuthStatus,
   type ProviderDoctorResult,
+  type ProviderId,
+  isTerminalLoginState,
 } from "../../../server/auth-status/auth-types.js";
+import { EXPECTED_PLANS } from "../../../server/llm-login/plan-check.js";
 import {
   describeAuthState,
   describeDoctorClear,
   describeDoctorFinding,
   describeDoctorUnchecked,
+  describeEffectiveMethod,
+  describePlanCheck,
   doctorPlaceLabel,
   formatAction,
   verifiedByLabel,
@@ -22,6 +28,8 @@ import {
   providerLabel,
 } from "../../../server/auth-status/auth-catalog.js";
 import { ago, dateTime } from "./format.js";
+import { SignInButton, type SignInButtonMode } from "../llm-login/SignInButton.js";
+import { notePromotedFromStatus } from "../llm-login/sign-in-restored.js";
 
 /**
  * "LLM sign-in" card on the Diagnostics page (LLM auth phase 1, task 14;
@@ -34,6 +42,13 @@ import { ago, dateTime } from "./format.js";
  * can cost a CLI spawn and is rate-limited server-side: a 429 still carries
  * the cached result and is shown as "checked recently"). Unknown fields are
  * the word "unknown", never blank.
+ *
+ * Phase 2c (task 12): each provider has the sign-in button (Sign in / Sign in
+ * again / Continue sign-in when an attempt is running — the same window as
+ * every other entry point), the expected-plan setting (closed list, "Any"),
+ * the plan check (mismatch = both values + another account / remove the
+ * expectation; "not determined" stays neutral) and the method sessions really
+ * use — shown before any sign-in (S2-AC4).
  */
 
 export type LlmAuthLoad<T> = { tag: "loading" } | { tag: "ready"; data: T | null } | { tag: "failed"; message: string };
@@ -70,10 +85,98 @@ function findingFact(f: DoctorFinding): string {
   }
 }
 
-function ProviderStatus({ s, now }: { s: ProviderAuthStatus; now: number }) {
+function signInMode(s: ProviderAuthStatus, attempt: RestLoginAttempt | null | undefined): SignInButtonMode {
+  if (attempt && !isTerminalLoginState(attempt.state)) return "continue";
+  return s.state === "not_signed_in" ? "sign_in" : "sign_in_again";
+}
+
+function PlanControls({
+  s,
+  busy,
+  onExpectedPlan,
+}: {
+  s: ProviderAuthStatus;
+  busy: boolean;
+  onExpectedPlan?: (provider: ProviderId, plan: string | null) => void;
+}) {
+  const selectId = useId();
+  const check = s.planCheck;
+  const plan = check ? describePlanCheck(check, s.provider, s.expectedPlan ?? null, s.plan) : null;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 text-xs">
+        <label htmlFor={selectId} className="text-cc-muted">
+          Expected plan
+        </label>
+        <select
+          id={selectId}
+          value={s.expectedPlan ?? ""}
+          disabled={busy || !onExpectedPlan}
+          onChange={(e) => onExpectedPlan?.(s.provider, e.target.value === "" ? null : e.target.value)}
+          className="rounded-md border border-cc-border bg-cc-bg px-2 py-1 text-xs text-cc-fg"
+        >
+          <option value="">Any</option>
+          {EXPECTED_PLANS[s.provider].map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </div>
+      {plan && check && check !== "unset" && (
+        <div
+          data-testid={`llm-auth-plan-${s.provider}`}
+          data-check={check}
+          className={`text-xs ${check === "mismatch" ? "text-cc-warning" : "text-cc-muted"}`}
+        >
+          <p className="font-medium">{plan.title}</p>
+          <p>{plan.detail}</p>
+          {check === "mismatch" && (
+            <div className="mt-1.5 space-y-1">
+              <div className="flex flex-wrap gap-2">
+                <SignInButton provider={s.provider} mode="another_account" className={buttonClass} />
+                <button type="button" className={buttonClass} disabled={busy || !onExpectedPlan} onClick={() => onExpectedPlan?.(s.provider, null)}>
+                  Remove the expectation
+                </button>
+              </div>
+              <p className="text-[11px] text-cc-muted">Sign out at the provider first, or open the sign-in link in a private window.</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EffectiveMethodNote({ s }: { s: ProviderAuthStatus }) {
+  const m = s.effectiveMethod;
+  if (!m || (m.source === "sign_in" && !m.alsoSet)) return null;
+  const e = describeEffectiveMethod(m, s.provider);
+  const warn = m.source !== "sign_in";
+  return (
+    <div data-testid={`llm-auth-method-${s.provider}`} className={`text-xs ${warn ? "text-cc-warning" : "text-cc-muted"}`}>
+      <p className="font-medium">{e.title}</p>
+      <p>{e.detail}</p>
+    </div>
+  );
+}
+
+function ProviderStatus({
+  s,
+  now,
+  attempt,
+  planBusy = false,
+  onExpectedPlan,
+}: {
+  s: ProviderAuthStatus;
+  now: number;
+  attempt?: RestLoginAttempt | null;
+  planBusy?: boolean;
+  onExpectedPlan?: (provider: ProviderId, plan: string | null) => void;
+}) {
   const entry = describeAuthState(s.state, s.provider, s.reason);
-  // "retry" IS the card's Check button; repeating the bare word adds nothing.
-  const action = entry.action.kind === "retry" ? "" : formatAction(entry.action);
+  // "retry" IS the card's Check button; "sign_in" is the sign-in button below.
+  const action = entry.action.kind === "retry" || entry.action.kind === "sign_in" ? "" : formatAction(entry.action);
   const bad = s.state === "invalid" || s.state === "not_signed_in";
   return (
     <div className="space-y-1" data-testid={`llm-auth-status-${s.provider}`} data-state={s.state}>
@@ -102,6 +205,9 @@ function ProviderStatus({ s, now }: { s: ProviderAuthStatus; now: number }) {
           {formatKnown(s.cli.path)} {formatKnown(s.cli.version)}
         </dd>
       </dl>
+      <EffectiveMethodNote s={s} />
+      <PlanControls s={s} busy={planBusy} onExpectedPlan={onExpectedPlan} />
+      <SignInButton provider={s.provider} mode={signInMode(s, attempt)} className={buttonClass} />
     </div>
   );
 }
@@ -157,6 +263,9 @@ export function LlmAuthView({
   notice = null,
   onCheck,
   onDoctor,
+  attempts = {},
+  planBusy = false,
+  onExpectedPlan,
 }: {
   status: LlmAuthLoad<StatusSnapshot>;
   doctor: LlmAuthLoad<DoctorReport>;
@@ -165,6 +274,10 @@ export function LlmAuthView({
   notice?: string | null;
   onCheck?: () => void;
   onDoctor?: () => void;
+  /** The provider's sign-in attempt, if one is visible (running → "Continue sign-in"). */
+  attempts?: Partial<Record<ProviderId, RestLoginAttempt | null>>;
+  planBusy?: boolean;
+  onExpectedPlan?: (provider: ProviderId, plan: string | null) => void;
 }) {
   const headingId = useId();
   return (
@@ -195,12 +308,31 @@ export function LlmAuthView({
       {status.tag === "loading" && <p className="text-xs text-cc-muted">Loading…</p>}
       {status.tag === "failed" && <p className="text-xs text-cc-error">Source unavailable: the status request failed ({status.message}).</p>}
       {status.tag === "ready" && status.data === null && (
-        <p className="text-xs text-cc-muted">Not checked yet since the server started. Press “Check”.</p>
+        <>
+          <p className="text-xs text-cc-muted">Not checked yet since the server started. Press “Check”.</p>
+          <div className="flex flex-wrap gap-2">
+            {PROVIDER_IDS.map((id) => (
+              <SignInButton
+                key={id}
+                provider={id}
+                mode={attempts[id] && !isTerminalLoginState(attempts[id]!.state) ? "continue" : "sign_in"}
+                className={buttonClass}
+              />
+            ))}
+          </div>
+        </>
       )}
       {status.tag === "ready" && status.data !== null && (
         <div className="grid gap-4 sm:grid-cols-2">
           {PROVIDER_IDS.map((id) => (
-            <ProviderStatus key={id} s={status.data!.providers[id]} now={now} />
+            <ProviderStatus
+              key={id}
+              s={status.data!.providers[id]}
+              now={now}
+              attempt={attempts[id]}
+              planBusy={planBusy}
+              onExpectedPlan={onExpectedPlan}
+            />
           ))}
         </div>
       )}
@@ -249,6 +381,63 @@ export function LlmAuthCard() {
   // A slow mount-time GET (empty cache) must not overwrite a newer Check /
   // Run doctor result (observer review 200).
   const seq = useRef({ status: 0, doctor: 0 });
+  const [attempts, setAttempts] = useState<Partial<Record<ProviderId, RestLoginAttempt | null>>>({});
+  const [planBusy, setPlanBusy] = useState(false);
+  const loginDialog = useStore((s) => s.loginDialog);
+  const promotedAt = useStore((s) => s.llmAuthPromotedAt);
+
+  /** Shows a status read and records each provider's last promotion. */
+  const showStatus = useCallback((data: StatusSnapshot | null) => {
+    notePromotedFromStatus(data);
+    setStatus({ tag: "ready", data });
+  }, []);
+
+  /** GET only: a newer read always wins (status after a sign-in or a plan change). */
+  const reloadStatus = useCallback(() => {
+    const req = ++seq.current.status;
+    api.llmAuthStatus().then(
+      (r) => mounted.current && seq.current.status === req && showStatus(r.status),
+      () => {},
+    );
+  }, [showStatus]);
+
+  // Which providers have a sign-in running (another tab, the CLI): read once
+  // on mount and whenever the sign-in window opens / closes here.
+  useEffect(() => {
+    let live = true;
+    for (const id of PROVIDER_IDS) {
+      api.llmLoginGet(id).then(
+        (r) => live && r.status === 200 && setAttempts((a) => ({ ...a, [id]: r.body.attempt ?? null })),
+        () => {},
+      );
+    }
+    return () => {
+      live = false;
+    };
+  }, [loginDialog]);
+
+  // A successful sign-in (here or noticed elsewhere) → re-read the status.
+  const seenPromotion = useRef(promotedAt);
+  useEffect(() => {
+    if (seenPromotion.current === promotedAt) return;
+    seenPromotion.current = promotedAt;
+    reloadStatus();
+  }, [promotedAt, reloadStatus]);
+
+  const onExpectedPlan = useCallback(
+    (provider: ProviderId, plan: string | null) => {
+      setPlanBusy(true);
+      setNotice(null);
+      api
+        .updateSettings({ expectedPlans: { [provider]: plan } })
+        .then(
+          () => mounted.current && reloadStatus(),
+          (e) => mounted.current && setNotice(`Saving the expected plan failed: ${errText(e)}.`),
+        )
+        .finally(() => mounted.current && setPlanBusy(false));
+    },
+    [reloadStatus],
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -256,7 +445,7 @@ export function LlmAuthCard() {
     const doctorReq = ++seq.current.doctor;
     const live = (src: "status" | "doctor", req: number) => mounted.current && seq.current[src] === req;
     api.llmAuthStatus().then(
-      (r) => live("status", statusReq) && setStatus({ tag: "ready", data: r.status }),
+      (r) => live("status", statusReq) && showStatus(r.status),
       (e) => live("status", statusReq) && setStatus({ tag: "failed", message: errText(e) }),
     );
     api.llmAuthDoctor().then(
@@ -278,7 +467,7 @@ export function LlmAuthCard() {
         if (!mounted.current || seq.current.status !== req) return;
         setNow(Date.now());
         if (code === 200 || code === 429) {
-          if (body.status !== undefined) setStatus({ tag: "ready", data: body.status ?? null });
+          if (body.status !== undefined) showStatus(body.status ?? null);
           if (code === 429) setNotice(tooSoon(body.retryAfterMs));
           return;
         }
@@ -286,7 +475,7 @@ export function LlmAuthCard() {
       })
       .catch((e) => mounted.current && setNotice(`Check failed: ${errText(e)}.`))
       .finally(() => mounted.current && setBusy("none"));
-  }, []);
+  }, [showStatus]);
 
   const onDoctor = useCallback(() => {
     setBusy("doctor");
@@ -308,5 +497,18 @@ export function LlmAuthCard() {
       .finally(() => mounted.current && setBusy("none"));
   }, []);
 
-  return <LlmAuthView status={status} doctor={doctor} now={now} busy={busy} notice={notice} onCheck={onCheck} onDoctor={onDoctor} />;
+  return (
+    <LlmAuthView
+      status={status}
+      doctor={doctor}
+      now={now}
+      busy={busy}
+      notice={notice}
+      onCheck={onCheck}
+      onDoctor={onDoctor}
+      attempts={attempts}
+      planBusy={planBusy}
+      onExpectedPlan={onExpectedPlan}
+    />
+  );
 }

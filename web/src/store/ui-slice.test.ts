@@ -303,3 +303,50 @@ describe("Diff base", () => {
     expect(localStorage.getItem("cc-diff-base")).toBe("last-commit");
   });
 });
+
+// ─── Sign-in window (LLM auth phase 2c, task 11) ─────────────────────────────
+
+describe("Sign-in window state", () => {
+  // The store holds only WHICH provider's window is open and how — never the
+  // link or codes (spec: secrets only inside the attempt's own window).
+  it("openLoginDialog opens expanded with the given intent (default start)", () => {
+    useStore.getState().openLoginDialog("codex");
+    expect(useStore.getState().loginDialog).toEqual({ provider: "codex", intent: "start", collapsed: false });
+    useStore.getState().openLoginDialog("claude", "resume");
+    expect(useStore.getState().loginDialog).toEqual({ provider: "claude", intent: "resume", collapsed: false });
+  });
+
+  it("collapse keeps the provider (chip), close drops it; collapse with nothing open is a no-op", () => {
+    useStore.getState().collapseLoginDialog();
+    expect(useStore.getState().loginDialog).toBeNull();
+    useStore.getState().openLoginDialog("claude");
+    useStore.getState().collapseLoginDialog();
+    expect(useStore.getState().loginDialog).toEqual({ provider: "claude", intent: "start", collapsed: true });
+    useStore.getState().closeLoginDialog();
+    expect(useStore.getState().loginDialog).toBeNull();
+  });
+
+  it("reset clears the sign-in window", () => {
+    useStore.getState().openLoginDialog("claude");
+    useStore.getState().reset();
+    expect(useStore.getState().loginDialog).toBeNull();
+  });
+});
+
+describe("Last sign-in promotion per provider (phase 2c)", () => {
+  // Drives the "sign-in restored" selector: it may only move forward, so a
+  // stale status read (older promotedAt, or null) can never un-restore a card.
+  it("records per provider and only grows", () => {
+    const note = useStore.getState().noteLlmAuthPromotedAt;
+    note("claude", 2000);
+    note("claude", 1000);
+    note("claude", null);
+    note("codex", undefined);
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 2000 });
+    note("codex", 5);
+    note("claude", 3000);
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 3000, codex: 5 });
+    useStore.getState().reset();
+    expect(useStore.getState().llmAuthPromotedAt).toEqual({});
+  });
+});

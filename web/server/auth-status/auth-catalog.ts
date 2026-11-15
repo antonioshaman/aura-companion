@@ -322,7 +322,7 @@ export function describeLimitsPending(provider: ProviderId): CatalogEntry {
 export function describeUsageLimitsReason(reason: UsageLimitsReason): CatalogEntry {
   switch (reason) {
     case "auth_invalid":
-      return { title: "No data: Claude sign-in is invalid", detail: "The usage request was rejected or the token has expired.", action: { kind: "open_status" } };
+      return { title: "No data: Claude sign-in is invalid", detail: "The usage request was rejected or the token has expired.", action: reloginAction("claude") };
     case "api_key_login":
       return {
         title: "Subscription windows do not apply",
@@ -332,7 +332,7 @@ export function describeUsageLimitsReason(reason: UsageLimitsReason): CatalogEnt
     case "network":
       return { title: "No data: usage service unreachable", detail: "The usage request did not get an answer.", action: { kind: "retry" } };
     case "no_credentials":
-      return { title: "No data: Claude is not signed in", detail: "No Claude credentials were found for the service user.", action: { kind: "open_status" } };
+      return { title: "No data: Claude is not signed in", detail: "No Claude credentials were found for the service user.", action: reloginAction("claude") };
     case "unknown":
       return { title: "No data", detail: "Usage limits are unavailable for an unrecognised reason.", action: { kind: "retry" } };
     default:
@@ -489,6 +489,27 @@ export function describeEffectiveMethod(effective: EffectiveAuthMethod, provider
   }
 }
 
+/**
+ * A turn-failure card whose sign-in failure was fixed by a later successful
+ * sign-in (phase 2c, S3-AC1). Retry stays a click: nothing is resent by itself (S3-AC5).
+ */
+export function describeSignInRestored(provider: ProviderId): CatalogEntry {
+  return {
+    title: `${providerLabel(provider)} sign-in restored`,
+    detail: "The provider sign-in was renewed after this turn failed. Retry sends the failed message once; nothing is sent until you click.",
+    action: { kind: "retry" },
+  };
+}
+
+/** A turn that was running while the sign-in changed and did not finish (phase 2, S3-AC3). */
+export function describeTurnNeedsRetry(provider: ProviderId): CatalogEntry {
+  return {
+    title: "This turn needs to be repeated",
+    detail: `The ${providerLabel(provider)} sign-in changed while this turn was running. Retry sends the message once on the new sign-in.`,
+    action: { kind: "retry" },
+  };
+}
+
 /** The command that signs in through the running server (phase 2b). */
 export function cliSignInCommand(provider: ProviderId): string {
   return `aura-companion auth login ${provider}`;
@@ -517,8 +538,10 @@ export function describeLoginInProgressElsewhere(provider: ProviderId): CatalogE
 
 /**
  * One-line plain-text rendering of an action. `surface: "cli"` renders
- * `sign_in` as the `aura-companion auth login` command (phase 2b); the UI keeps
- * the manual instruction until the sign-in panel ships (phase 2c).
+ * `sign_in` as the `aura-companion auth login` command (phase 2b). The browser
+ * renders `sign_in` as a button that opens the sign-in window (phase 2c,
+ * `SignInButton`); the "ui" text stays the manual instruction for plain-text
+ * places.
  */
 export function formatAction(action: AuthAction, surface: "ui" | "cli" = "ui"): string {
   switch (action.kind) {

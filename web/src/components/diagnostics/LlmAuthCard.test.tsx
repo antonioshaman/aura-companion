@@ -25,19 +25,26 @@ const mocks = vi.hoisted(() => ({
   llmAuthDoctor: vi.fn(),
   llmAuthRecheck: vi.fn(),
   llmAuthDoctorRecheck: vi.fn(),
+  llmLoginGet: vi.fn(),
+  updateSettings: vi.fn(),
 }));
 vi.mock("../../api.js", () => ({ api: mocks }));
 
 import { LlmAuthCard, LlmAuthView } from "./LlmAuthCard.js";
 import { doctorReport, LLM_AUTH_NOW, statusSnapshot } from "./llm-auth-fixtures.js";
 import { describeAuthState } from "../../../server/auth-status/auth-catalog.js";
-import { PROVIDER_AUTH_STATES, PROVIDER_IDS } from "../../../server/auth-status/auth-types.js";
+import { PROVIDER_AUTH_STATES, PROVIDER_IDS, knownField } from "../../../server/auth-status/auth-types.js";
+import { useStore } from "../../store.js";
+import { loginAttempt } from "../llm-login/login-fixtures.js";
 
 beforeEach(() => {
   mocks.llmAuthStatus.mockReset().mockResolvedValue({ status: null });
   mocks.llmAuthDoctor.mockReset().mockResolvedValue({ report: null });
   mocks.llmAuthRecheck.mockReset();
   mocks.llmAuthDoctorRecheck.mockReset();
+  mocks.llmLoginGet.mockReset().mockResolvedValue({ status: 200, body: { attempt: null } });
+  mocks.updateSettings.mockReset().mockResolvedValue({});
+  useStore.getState().reset();
 });
 
 describe("LlmAuthView", () => {
@@ -46,7 +53,8 @@ describe("LlmAuthView", () => {
     const claude = screen.getByTestId("llm-auth-status-claude");
     expect(within(claude).getByText("Claude: working")).toBeInTheDocument();
     expect(within(claude).getByText("owner@example.com")).toBeInTheDocument();
-    expect(within(claude).getByText("max")).toBeInTheDocument();
+    // (selector: the expected-plan list also has a "max" option since phase 2c)
+    expect(within(claude).getByText("max", { selector: "dd" })).toBeInTheDocument();
     expect(within(claude).getByText("subscription")).toBeInTheDocument();
     expect(within(claude).getByText(/1m ago/)).toBeInTheDocument();
     const codex = screen.getByTestId("llm-auth-status-codex");
@@ -63,7 +71,8 @@ describe("LlmAuthView", () => {
         now={LLM_AUTH_NOW}
       />,
     );
-    expect(within(screen.getByTestId("llm-auth-status-claude")).getByText(/claude auth login/)).toBeInTheDocument();
+    // Phase 2c: the relogin action is the sign-in window (was the manual command).
+    expect(within(screen.getByTestId("llm-auth-status-claude")).getByRole("button", { name: "Sign in to Claude again" })).toBeInTheDocument();
     const codex = screen.getByTestId("llm-auth-status-codex");
     expect(within(codex).getByText("Codex: no connection")).toBeInTheDocument();
     // Its retry action is the Check button, not a stray "Retry" line.
@@ -182,5 +191,117 @@ describe("LlmAuthCard", () => {
     expect(screen.getByText("Claude: no problems found")).toBeInTheDocument();
     expect(screen.queryByText(/Not checked yet/)).toBeNull();
     expect(screen.queryByText(/No doctor report yet/)).toBeNull();
+  });
+});
+
+/**
+ * Phase 2c task 12 (S1 entry point, S2-AC1…AC4): the card is an entry point
+ * to the one sign-in window, holds the expected plan, and warns about the
+ * plan and the method sessions really use — before and after a sign-in.
+ */
+describe("LlmAuthView — sign-in, plan and method (phase 2c)", () => {
+  const view = (claude = {}, codex = {}, extra: Partial<Parameters<typeof LlmAuthView>[0]> = {}) =>
+    render(<LlmAuthView status={{ tag: "ready", data: statusSnapshot(claude, codex) }} doctor={{ tag: "ready", data: null }} now={LLM_AUTH_NOW} {...extra} />);
+
+  it("sign-in button per state: Sign in / Sign in again / Continue sign-in, opening the window", () => {
+    view({ state: "not_signed_in" }, {}, { attempts: { codex: loginAttempt("codex", "awaiting_user") } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude" }));
+    expect(useStore.getState().loginDialog).toEqual({ provider: "claude", intent: "start", collapsed: false });
+    fireEvent.click(screen.getByRole("button", { name: "Continue Codex sign-in" }));
+    expect(useStore.getState().loginDialog).toEqual({ provider: "codex", intent: "resume", collapsed: false });
+  });
+
+  it("a finished attempt does not turn the button into Continue", () => {
+    view({}, {}, { attempts: { claude: loginAttempt("claude", "succeeded") } });
+    expect(screen.getByRole("button", { name: "Sign in to Claude again" })).toBeInTheDocument();
+  });
+
+  it("an empty status cache still offers sign-in for both providers", () => {
+    render(<LlmAuthView status={{ tag: "ready", data: null }} doctor={{ tag: "ready", data: null }} now={LLM_AUTH_NOW} />);
+    expect(screen.getByRole("button", { name: "Sign in to Claude" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in to Codex" })).toBeInTheDocument();
+  });
+
+  it("S2-AC1: mismatch names both plans, offers another account and removing the expectation", () => {
+    const onExpectedPlan = vi.fn();
+    view({ plan: knownField("pro"), planCheck: "mismatch", expectedPlan: "max" }, {}, { onExpectedPlan });
+    const block = screen.getByTestId("llm-auth-plan-claude");
+    expect(block).toHaveTextContent("Expected max, signed in with pro");
+    expect(within(block).getByRole("button", { name: "Sign in with another account" })).toBeInTheDocument();
+    fireEvent.click(within(block).getByRole("button", { name: "Remove the expectation" }));
+    expect(onExpectedPlan).toHaveBeenCalledWith("claude", null);
+  });
+
+  it("S2-AC2/AC3: no expectation → no plan block; unknown → neutral 'not determined'", () => {
+    view({ planCheck: "unset", expectedPlan: null }, { plan: { known: false }, planCheck: "unknown", expectedPlan: "plus" });
+    expect(screen.queryByTestId("llm-auth-plan-claude")).toBeNull();
+    const codex = screen.getByTestId("llm-auth-plan-codex");
+    expect(codex).toHaveTextContent("plan not determined");
+    expect(codex.className).not.toContain("text-cc-warning");
+  });
+
+  it("the expected plan is a closed list per provider with 'Any'; choosing calls back", () => {
+    const onExpectedPlan = vi.fn();
+    view({ expectedPlan: null, planCheck: "unset" }, { expectedPlan: "plus", planCheck: "unknown" }, { onExpectedPlan });
+    const [claudeSel, codexSel] = screen.getAllByLabelText("Expected plan") as HTMLSelectElement[];
+    expect([...claudeSel.options].map((o) => o.value)).toEqual(["", "pro", "max", "team", "enterprise"]);
+    expect(codexSel.value).toBe("plus");
+    fireEvent.change(claudeSel, { target: { value: "max" } });
+    expect(onExpectedPlan).toHaveBeenCalledWith("claude", "max");
+    fireEvent.change(codexSel, { target: { value: "" } });
+    expect(onExpectedPlan).toHaveBeenCalledWith("codex", null);
+  });
+
+  it("S2-AC4: an overriding method is a warning before any sign-in; Codex alsoSet is a neutral note", () => {
+    view(
+      { effectiveMethod: { method: "env_token", source: "environment", variable: "CLAUDE_CODE_OAUTH_TOKEN" } },
+      { effectiveMethod: { method: "subscription", source: "sign_in", alsoSet: { source: "settings", variable: "OPENAI_API_KEY" } } },
+    );
+    const claude = screen.getByTestId("llm-auth-method-claude");
+    expect(claude).toHaveTextContent("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(claude.className).toContain("text-cc-warning");
+    const codex = screen.getByTestId("llm-auth-method-codex");
+    expect(codex).toHaveTextContent("OPENAI_API_KEY");
+    expect(codex.className).not.toContain("text-cc-warning");
+  });
+
+  it("no axe violations with plan mismatch, method warning and a running attempt", async () => {
+    const { container } = view(
+      { plan: knownField("pro"), planCheck: "mismatch", expectedPlan: "max", effectiveMethod: { method: "env_token", source: "environment", variable: "ANTHROPIC_API_KEY" } },
+      { planCheck: "unknown", expectedPlan: "pro" },
+      { attempts: { codex: loginAttempt("codex", "awaiting_user") }, onExpectedPlan: () => {} },
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("LlmAuthCard — phase 2c wiring", () => {
+  it("reads both sign-in attempts on mount: a running one shows Continue", async () => {
+    mocks.llmAuthStatus.mockResolvedValue({ status: statusSnapshot() });
+    mocks.llmLoginGet.mockImplementation((p: string) =>
+      Promise.resolve({ status: 200, body: { attempt: p === "codex" ? loginAttempt("codex", "awaiting_user") : null } }),
+    );
+    render(<LlmAuthCard />);
+    expect(await screen.findByRole("button", { name: "Continue Codex sign-in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in to Claude again" })).toBeInTheDocument();
+    expect(mocks.llmLoginGet).toHaveBeenCalledWith("claude");
+    expect(mocks.llmLoginGet).toHaveBeenCalledWith("codex");
+  });
+
+  it("changing the expected plan PUTs settings and re-reads the status (warning clears by itself)", async () => {
+    mocks.llmAuthStatus
+      .mockResolvedValueOnce({ status: statusSnapshot({ plan: knownField("pro"), planCheck: "mismatch", expectedPlan: "max" }) })
+      .mockResolvedValueOnce({ status: statusSnapshot({ plan: knownField("pro"), planCheck: "unset", expectedPlan: null }) });
+    render(<LlmAuthCard />);
+    const block = await screen.findByTestId("llm-auth-plan-claude");
+    fireEvent.click(within(block).getByRole("button", { name: "Remove the expectation" }));
+    expect(mocks.updateSettings).toHaveBeenCalledWith({ expectedPlans: { claude: null } });
+    await waitFor(() => expect(screen.queryByTestId("llm-auth-plan-claude")).toBeNull());
+  });
+
+  it("records lastPromotedAt from the status for the 'sign-in restored' cards", async () => {
+    mocks.llmAuthStatus.mockResolvedValue({ status: statusSnapshot({ lastPromotedAt: 777 }) });
+    render(<LlmAuthCard />);
+    await waitFor(() => expect(useStore.getState().llmAuthPromotedAt).toEqual({ claude: 777 }));
   });
 });

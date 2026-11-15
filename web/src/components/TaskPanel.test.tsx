@@ -91,6 +91,7 @@ interface MockStoreState {
   updateSession: ReturnType<typeof vi.fn>;
   newSession: ReturnType<typeof vi.fn>;
   setLinkedLinearIssue: ReturnType<typeof vi.fn>;
+  openLoginDialog: ReturnType<typeof vi.fn>;
 }
 
 let mockState: MockStoreState;
@@ -117,6 +118,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     updateSession: vi.fn(),
     newSession: vi.fn(),
     setLinkedLinearIssue: vi.fn(),
+    openLoginDialog: vi.fn(),
     ...overrides,
   };
 }
@@ -1440,12 +1442,14 @@ describe("UsageLimitsSection (Claude Code sessions)", () => {
   // LLM auth task 14 — spec story 4 (S4-AC1 / S4-AC2). The panel used to
   // render nothing without windows, which reads as "all fine". Now it shows
   // the server's typed `reason` through the catalog, with its one action.
-  it("S4-AC1: auth failure → 'No data: Claude sign-in is invalid' with a link to the status", async () => {
+  // Phase 2c task 12: the action is the sign-in window itself (was a link to the status).
+  it("S4-AC1: auth failure → 'No data: Claude sign-in is invalid' with the sign-in action", async () => {
     mockApi.getSessionUsageLimits.mockResolvedValueOnce({ five_hour: null, seven_day: null, extra_usage: null, reason: "auth_invalid" });
     resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
     const { container } = render(<TaskPanel sessionId="s1" />);
     expect(await screen.findByText("No data: Claude sign-in is invalid")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open provider status" })).toHaveAttribute("href", "#/diagnostics");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude again" }));
+    expect(mockState.openLoginDialog).toHaveBeenCalledWith("claude", "start");
     expect(await axe(container)).toHaveNoViolations();
   });
 

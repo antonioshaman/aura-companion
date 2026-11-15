@@ -23,6 +23,7 @@ import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { ObserverPanel } from "./components/council/index.js";
 import { SectionErrorBoundary } from "./components/SectionErrorBoundary.js";
+import { SignInHost } from "./components/llm-login/SignInPanel.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -496,6 +497,8 @@ export default function App() {
         </>
       )}
       <DockerUpdateDialog />
+      {/* LLM sign-in window / chip (phase 2c): one instance for every entry point. */}
+      <SignInHost />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
     </div>
   );

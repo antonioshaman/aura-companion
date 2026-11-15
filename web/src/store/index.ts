@@ -80,6 +80,8 @@ export const useStore = create<AppState>((...args) => ({
       chatTabReentryTickBySession: new Map(),
       diffPanelSelectedFile: new Map(),
       diffBase: getInitialDiffBase(),
+      loginDialog: null,
+      llmAuthPromotedAt: {},
       // Terminal
       quickTerminalOpen: false,
       quickTerminalTabs: [],

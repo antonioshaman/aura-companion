@@ -16,7 +16,10 @@ import { axe } from "vitest-axe";
  */
 
 const mockRelaunch = vi.fn<(...args: unknown[]) => Promise<unknown>>();
-vi.mock("../../api.js", () => ({ api: { relaunchSession: (...a: unknown[]) => mockRelaunch(...a) } }));
+const mockStatus = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+vi.mock("../../api.js", () => ({
+  api: { relaunchSession: (...a: unknown[]) => mockRelaunch(...a), llmAuthStatus: (...a: unknown[]) => mockStatus(...a) },
+}));
 
 const mockSend = vi.fn();
 vi.mock("../../ws.js", () => ({
@@ -25,10 +28,24 @@ vi.mock("../../ws.js", () => ({
 }));
 
 const appendMessage = vi.fn();
-const storeState: { messages: Map<string, ChatMessage[]>; cliConnected: Map<string, boolean>; appendMessage: typeof appendMessage } = {
+const openLoginDialog = vi.fn();
+const noteLlmAuthPromotedAt = vi.fn();
+const storeState: {
+  messages: Map<string, ChatMessage[]>;
+  cliConnected: Map<string, boolean>;
+  sessions: Map<string, { sessionGroupRole?: "orchestrator" | "observer" }>;
+  llmAuthPromotedAt: Partial<Record<"claude" | "codex", number>>;
+  appendMessage: typeof appendMessage;
+  openLoginDialog: typeof openLoginDialog;
+  noteLlmAuthPromotedAt: typeof noteLlmAuthPromotedAt;
+} = {
   messages: new Map(),
   cliConnected: new Map(),
+  sessions: new Map(),
+  llmAuthPromotedAt: {},
   appendMessage,
+  openLoginDialog,
+  noteLlmAuthPromotedAt,
 };
 vi.mock("../../store.js", () => {
   const useStore = (selector: (s: typeof storeState) => unknown) => selector(storeState);
@@ -37,7 +54,8 @@ vi.mock("../../store.js", () => {
 });
 
 import { TurnFailureCard, TurnFailureNotice } from "./TurnFailureCard.js";
-import { describeTurnFailure } from "../../../server/auth-status/auth-catalog.js";
+import { describeSignInRestored, describeTurnFailure, describeTurnNeedsRetry } from "../../../server/auth-status/auth-catalog.js";
+import { _resetPromotedAtLoaderForTest } from "../llm-login/sign-in-restored.js";
 import { PROVIDER_IDS, TURN_FAILURE_KINDS, type TurnFailure } from "../../../server/auth-status/auth-types.js";
 import type { ChatMessage } from "../../types.js";
 
@@ -51,6 +69,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   storeState.messages = new Map();
   storeState.cliConnected = new Map([[SID, true]]);
+  storeState.sessions = new Map();
+  storeState.llmAuthPromotedAt = {};
+  mockStatus.mockResolvedValue({ status: null });
+  _resetPromotedAtLoaderForTest();
 });
 
 describe("TurnFailureCard", () => {
@@ -79,8 +101,8 @@ describe("TurnFailureCard", () => {
       <TurnFailureCard failure={{ kind: "auth_rejected", provider: "codex", providerMessage: "401", credentialsCompared: false }} />,
     );
     expect(screen.getByText(/Could not compare this session's credentials/)).toBeInTheDocument();
-    // auth_rejected → relogin instruction with the Codex command.
-    expect(screen.getByText(/codex login --device-auth/)).toBeInTheDocument();
+    // auth_rejected → the sign-in window (phase 2c; was the manual command).
+    expect(screen.getByRole("button", { name: "Sign in to Codex again" })).toBeInTheDocument();
     unmount();
     render(<TurnFailureCard failure={{ kind: "cli_outdated", provider: "claude", providerMessage: "version 2.1.280 required", requiredVersion: "2.1.280" }} />);
     expect(screen.getByText("Required CLI version: 2.1.280 or newer")).toBeInTheDocument();
@@ -151,5 +173,91 @@ describe("TurnFailureNotice (store-connected)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restart the session" }));
     await waitFor(() => expect(screen.getByText("Restart requested.")).toBeInTheDocument());
     expect(mockRelaunch).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Phase 2c task 12 (S3-AC1/AC3/AC4/AC5): the sign-in action opens the
+ * window; after a later successful sign-in the card reads "sign-in restored"
+ * with Retry as the main action — selected from the card time vs the
+ * provider's last promotion, never by rewriting the failure, and nothing is
+ * sent without a click. The observer of a pair is labelled.
+ */
+describe("sign-in recovery (phase 2c)", () => {
+  const authFail: TurnFailure = { kind: "auth_rejected", provider: "claude", providerMessage: "401 Unauthorized" };
+  const withUser = (fm: ChatMessage) => storeState.messages.set(SID, [{ id: "u1", role: "user", content: "do it", timestamp: 0 }, fm]);
+
+  it("the sign_in action opens the sign-in window for that provider", () => {
+    render(<TurnFailureCard failure={authFail} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude again" }));
+    expect(openLoginDialog).toHaveBeenCalledWith("claude", "start");
+  });
+
+  it("S3-AC1/AC5: promoted after the failure → 'sign-in restored' + Retry; nothing sent until the click", () => {
+    const fm = { ...failureMsg(authFail), timestamp: 1000 };
+    withUser(fm);
+    storeState.llmAuthPromotedAt = { claude: 2000 };
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    expect(screen.getByRole("group", { name: describeSignInRestored("claude").title })).toHaveAttribute("data-recovery", "restored");
+    expect(screen.queryByRole("button", { name: "Sign in to Claude again" })).toBeNull();
+    expect(mockSend).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend).toHaveBeenCalledWith(SID, expect.objectContaining({ type: "user_message", content: "do it" }));
+  });
+
+  it("S3-AC4: no promotion for this provider (failed / cancelled sign-in, or the other provider) → card unchanged", () => {
+    const fm = { ...failureMsg(authFail), timestamp: 1000 };
+    withUser(fm);
+    storeState.llmAuthPromotedAt = { codex: 5000 };
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    expect(screen.getByRole("group", { name: describeTurnFailure("auth_rejected", "claude").title })).toHaveAttribute("data-recovery", "none");
+    expect(screen.getByRole("button", { name: "Sign in to Claude again" })).toBeInTheDocument();
+  });
+
+  it("a failure AFTER the last sign-in is not restored (it failed on the new sign-in)", () => {
+    const fm = { ...failureMsg(authFail), timestamp: 3000 };
+    withUser(fm);
+    storeState.llmAuthPromotedAt = { claude: 2000 };
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    expect(screen.getByTestId("turn-failure-card")).toHaveAttribute("data-recovery", "none");
+  });
+
+  it("a limit failure is never 'sign-in restored'", () => {
+    const fm = { ...failureMsg({ kind: "limit_window", provider: "claude", providerMessage: "limit", window: "five_hour", resetAt: null }), timestamp: 1 };
+    withUser(fm);
+    storeState.llmAuthPromotedAt = { claude: 2000 };
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    expect(screen.getByTestId("turn-failure-card")).toHaveAttribute("data-recovery", "none");
+    // Not a sign-in card: no status read for it.
+    expect(mockStatus).not.toHaveBeenCalled();
+  });
+
+  it("a sign-in failure card reads the last promotion once (status), for both providers", async () => {
+    const fm = { ...failureMsg({ kind: "auth_rejected", provider: "codex", providerMessage: "401" }), timestamp: 1 };
+    withUser(fm);
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    await waitFor(() => expect(mockStatus).toHaveBeenCalledTimes(1));
+  });
+
+  it("labels the observer of a Council pair", () => {
+    const fm = { ...failureMsg(authFail), timestamp: 1 };
+    withUser(fm);
+    storeState.sessions = new Map([[SID, { sessionGroupRole: "observer" }]]);
+    render(<TurnFailureNotice sessionId={SID} message={fm} />);
+    expect(screen.getByText("observer")).toBeInTheDocument();
+  });
+
+  it("retry_needed variant (S3-AC3) and restored are axe-clean for both providers", async () => {
+    const { container } = render(
+      <div>
+        {(["claude", "codex"] as const).flatMap((provider) => [
+          <TurnFailureCard key={`${provider}-r`} failure={{ ...authFail, provider }} recovery="restored" retry="ready" onRetry={() => {}} observer />,
+          <TurnFailureCard key={`${provider}-n`} failure={{ ...authFail, provider }} recovery="retry_needed" retry="ready" onRetry={() => {}} />,
+        ])}
+      </div>,
+    );
+    expect(screen.getAllByText(describeTurnNeedsRetry("claude").title).length).toBe(2);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

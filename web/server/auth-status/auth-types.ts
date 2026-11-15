@@ -97,6 +97,12 @@ export interface ProviderAuthStatus {
   expectedPlan?: string | null;
   planCheck?: PlanCheck;
   effectiveMethod?: EffectiveAuthMethod;
+  /**
+   * Phase 2c: epoch ms the last successful sign-in put new credentials in
+   * place (from the promotion epoch; null = never). The browser marks a
+   * sign-in failure that fired before it as "sign-in restored".
+   */
+  lastPromotedAt?: number | null;
 }
 
 // ─── Doctor findings (rendered in 1b; vocabulary fixed here) ──────────────────

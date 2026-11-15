@@ -548,6 +548,8 @@ export interface AppSettings {
   kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
   /** Diagnostics: report-only memory analysis switch (default off). */
   diagnosticsMemoryReport?: boolean;
+  /** Phase 2 (D7): the owner's expected plan per provider (absent = none). */
+  expectedPlans?: Partial<Record<ProviderId, string>>;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1038,6 +1040,52 @@ export interface LlmAuthDoctorRecheckResponse {
   retryAfterMs?: number;
 }
 
+/** One sign-in attempt as the server shows it (phase 2b, `routes/login-routes.ts`). */
+export type { RestLoginAttempt } from "../server/routes/login-routes.js";
+import type { RestLoginAttempt } from "../server/routes/login-routes.js";
+import type { ProviderId } from "../server/auth-status/auth-types.js";
+
+/**
+ * Body of every sign-in response. `attempt` is present on 200/201 and on most
+ * 409/429 refusals (the provider's current attempt); `existing` only on start;
+ * `refused` on a code the server turned away before the CLI (the attempt goes on).
+ */
+export interface LlmLoginResponse {
+  attempt?: RestLoginAttempt | null;
+  existing?: boolean;
+  refused?: "code_format" | "attempt_mismatch";
+  error?: string;
+  retryAfterMs?: number;
+}
+
+/**
+ * Sign-in REST (phase 2 D9): the Aura token is required even from localhost,
+ * where the shared middleware never asked for one — so a local tab may have
+ * no token in localStorage yet. A 401 here therefore first tries the local
+ * token hand-out (`/auth/auto`, loopback only) once and retries; it never
+ * logs the browser out (unlike `handle401`): the rest of the UI works without
+ * a token on localhost. Status + body come back without throwing; a thrown
+ * error means the request itself failed.
+ */
+async function loginRequest(method: "GET" | "POST", path: string, body?: object): Promise<{ status: number; body: LlmLoginResponse }> {
+  const send = () =>
+    fetch(`${BASE}${path}`, {
+      method,
+      headers: { ...(method === "POST" ? { "Content-Type": "application/json" } : {}), ...getAuthHeaders() },
+      body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+    });
+  let res = await send();
+  if (res.status === 401) {
+    const token = await autoAuth();
+    if (token) {
+      localStorage.setItem(AUTH_STORAGE_KEY, token);
+      res = await send();
+    }
+  }
+  const json = (await res.json().catch(() => ({}))) as LlmLoginResponse;
+  return { status: res.status, body: json };
+}
+
 export interface KbAnalysisRunResponse {
   runId?: string;
   startedAt?: number;
@@ -1280,6 +1328,13 @@ export const api = {
   llmAuthRecheck: () => postWithStatus<LlmAuthRecheckResponse>("/llm-auth/recheck"),
   llmAuthDoctor: () => get<{ report: DoctorReport | null }>("/llm-auth/doctor"),
   llmAuthDoctorRecheck: () => postWithStatus<LlmAuthDoctorRecheckResponse>("/llm-auth/doctor/recheck"),
+  // Sign-in from the UI (phase 2c). Polled over REST (~1.5 s, D4), never WS.
+  llmLoginGet: (provider: ProviderId) => loginRequest("GET", `/llm-auth/login/${provider}`),
+  llmLoginStart: (provider: ProviderId) => loginRequest("POST", `/llm-auth/login/${provider}`),
+  llmLoginCode: (provider: ProviderId, attemptId: string, code: string) =>
+    loginRequest("POST", `/llm-auth/login/${provider}/${encodeURIComponent(attemptId)}/code`, { code }),
+  llmLoginCancel: (provider: ProviderId, attemptId: string) =>
+    loginRequest("POST", `/llm-auth/login/${provider}/${encodeURIComponent(attemptId)}/cancel`),
 
   // Sweep orphans — preview is read-only; execute must echo the preview token.
   sweepPreview: () => get<SweepPreview>("/sweep/preview"),
@@ -1351,6 +1406,8 @@ export const api = {
     councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
     kbAnalysis?: import("../server/diagnostics/kb-analysis-settings.js").KbAnalysisSettings;
     diagnosticsMemoryReport?: boolean;
+    /** Phase 2 (D7): expected plan per provider; null removes it; the server validates the closed list. */
+    expectedPlans?: Partial<Record<ProviderId, string | null>>;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

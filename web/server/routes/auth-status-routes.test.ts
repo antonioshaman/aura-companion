@@ -269,3 +269,43 @@ describe("status carries expectedPlan, planCheck and the effective sign-in metho
     expect(body.status.providers.codex.effectiveMethod.alsoSet).toEqual({ source: "settings", variable: "OPENAI_API_KEY" });
   });
 });
+
+/**
+ * Phase 2c: the status carries when the last sign-in put new credentials in
+ * place, so the browser can mark older sign-in failures "sign-in restored"
+ * (a selector, nothing rewritten). Source: the promotion epoch file.
+ */
+describe("status carries lastPromotedAt", () => {
+  it("passes the fact through per provider and defaults to null", async () => {
+    const { root } = app({
+      signInFacts: (provider) => ({
+        expectedPlan: null,
+        effectiveMethod: { method: "subscription", source: "sign_in" },
+        ...(provider === "claude" ? { lastPromotedAt: 1_794_700_000_000 } : {}),
+      }),
+    });
+    const body = await (await root.request("/api/llm-auth/status")).json();
+    expect(body.status.providers.claude.lastPromotedAt).toBe(1_794_700_000_000);
+    expect(body.status.providers.codex.lastPromotedAt).toBeNull();
+  });
+
+  it("lastPromotedAt reads promotedAt from the epoch file; missing / broken / zero → null", async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { lastPromotedAt } = await import("./auth-status-routes.js");
+    const { PROMOTION_SCHEMA_VERSION } = await import("../llm-login/credential-promotion.js");
+    const dir = mkdtempSync(join(tmpdir(), "aura-epoch-"));
+    try {
+      expect(lastPromotedAt(dir, "claude")).toBeNull();
+      writeFileSync(join(dir, "epoch-claude.json"), JSON.stringify({ schemaVersion: PROMOTION_SCHEMA_VERSION, epoch: 2, promotedAt: 1234, fingerprint: "f" }));
+      expect(lastPromotedAt(dir, "claude")).toBe(1234);
+      writeFileSync(join(dir, "epoch-codex.json"), JSON.stringify({ schemaVersion: PROMOTION_SCHEMA_VERSION, epoch: 0, promotedAt: 0, fingerprint: "" }));
+      expect(lastPromotedAt(dir, "codex")).toBeNull();
+      writeFileSync(join(dir, "epoch-codex.json"), "{not json");
+      expect(lastPromotedAt(dir, "codex")).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

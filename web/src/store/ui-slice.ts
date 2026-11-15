@@ -1,6 +1,20 @@
 import { HOME_DRAFT, useDraftStore } from "./drafts.js";
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
+import type { ProviderId } from "../../server/auth-status/auth-types.js";
+
+/**
+ * The sign-in window (LLM auth phase 2c, task 11). Only which provider and how
+ * it was opened — never the link, codes or attempt: those live in the panel's
+ * own state and come from the server (GET after a reload). `start` POSTs (the
+ * server answers with the running attempt if there is one); `resume` only
+ * reads. `collapsed` = closed with the attempt still running (chip shown).
+ */
+export interface LoginDialogState {
+  provider: ProviderId;
+  intent: "start" | "resume";
+  collapsed: boolean;
+}
 
 export type DiffBase = "last-commit" | "default-branch";
 import { type TaskPanelConfig, getInitialTaskPanelConfig, getDefaultConfig, persistTaskPanelConfig } from "../components/task-panel-sections.js";
@@ -47,6 +61,13 @@ export interface UiSlice {
   chatTabReentryTickBySession: Map<string, number>;
   diffPanelSelectedFile: Map<string, string>;
   diffBase: DiffBase;
+  loginDialog: LoginDialogState | null;
+  /**
+   * Epoch ms of each provider's last successful sign-in (server clock, from
+   * the status `lastPromotedAt`). Only grows. A sign-in failure that fired
+   * before it renders as "sign-in restored" (selector, nothing rewritten).
+   */
+  llmAuthPromotedAt: Partial<Record<ProviderId, number>>;
 
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
@@ -67,6 +88,14 @@ export interface UiSlice {
   markChatTabReentry: (sessionId: string) => void;
   setDiffPanelSelectedFile: (sessionId: string, filePath: string | null) => void;
   setDiffBase: (base: DiffBase) => void;
+  /** Opens (or re-opens) the sign-in window; a different provider replaces the current one. */
+  openLoginDialog: (provider: ProviderId, intent?: "start" | "resume") => void;
+  /** "Close": hides the window, the attempt goes on (chip). */
+  collapseLoginDialog: () => void;
+  /** Drops the window and the chip (attempt finished or dismissed). */
+  closeLoginDialog: () => void;
+  /** Records a provider's last promotion; an older or missing value never lowers it. */
+  noteLlmAuthPromotedAt: (provider: ProviderId, at: number | null | undefined) => void;
 }
 
 export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => ({
@@ -83,6 +112,8 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
   chatTabReentryTickBySession: new Map(),
   diffPanelSelectedFile: new Map(),
   diffBase: getInitialDiffBase(),
+  loginDialog: null,
+  llmAuthPromotedAt: {},
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
@@ -194,4 +225,12 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
     }
     set({ diffBase: base });
   },
+  openLoginDialog: (provider, intent = "start") => set({ loginDialog: { provider, intent, collapsed: false } }),
+  collapseLoginDialog: () => set((s) => (s.loginDialog ? { loginDialog: { ...s.loginDialog, collapsed: true } } : s)),
+  closeLoginDialog: () => set({ loginDialog: null }),
+  noteLlmAuthPromotedAt: (provider, at) =>
+    set((s) => {
+      if (typeof at !== "number" || !(at > 0) || (s.llmAuthPromotedAt[provider] ?? 0) >= at) return s;
+      return { llmAuthPromotedAt: { ...s.llmAuthPromotedAt, [provider]: at } };
+    }),
 });

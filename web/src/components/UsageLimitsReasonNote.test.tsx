@@ -5,6 +5,7 @@ import "@testing-library/jest-dom";
 import "vitest-axe/extend-expect";
 import { axe } from "vitest-axe";
 import { UsageLimitsReasonNote } from "./UsageLimitsReasonNote.js";
+import { useStore } from "../store.js";
 import { describeLimitsPending, describeUsageLimitsReason, formatAction } from "../../server/auth-status/auth-catalog.js";
 import { USAGE_LIMITS_REASONS } from "../../server/auth-status/auth-types.js";
 
@@ -27,8 +28,20 @@ describe("UsageLimitsReasonNote", () => {
   });
 
   it("open_status is a link to the Diagnostics page", () => {
-    render(<UsageLimitsReasonNote entry={describeUsageLimitsReason("no_credentials")} />);
+    render(<UsageLimitsReasonNote entry={{ title: "T", detail: "D", action: { kind: "open_status" } }} />);
     expect(screen.getByRole("link", { name: "Open provider status" })).toHaveAttribute("href", "#/diagnostics");
+  });
+
+  // Phase 2c task 12: an invalid / missing Claude sign-in opens the same
+  // sign-in window as the Diagnostics card and the turn-failure card.
+  it("auth_invalid / no_credentials offer the sign-in window", () => {
+    for (const reason of ["auth_invalid", "no_credentials"] as const) {
+      useStore.getState().closeLoginDialog();
+      const { unmount } = render(<UsageLimitsReasonNote entry={describeUsageLimitsReason(reason)} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude again" }));
+      expect(useStore.getState().loginDialog).toEqual({ provider: "claude", intent: "start", collapsed: false });
+      unmount();
+    }
   });
 
   it("retry calls back on click and is absent without a handler", () => {
@@ -62,8 +75,8 @@ describe("UsageLimitsReasonNote", () => {
   // usage reasons only use open_status / retry / none today, but an entry
   // with a command-style action must show it as plain text, not vanish.
   it("renders command-style actions as plain text", () => {
+    // (sign_in is a button since phase 2c — covered above.)
     const cases = [
-      { kind: "sign_in" as const, provider: "claude" as const },
       { kind: "update_cli" as const, command: "claude update" },
       { kind: "run_as_root" as const, command: "sudo aura-companion doctor --offline" },
       { kind: "run_as_service_user" as const },
