@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -204,6 +204,23 @@ describe.skipIf(!linux)("spawnLoginProcess against the fake CLI", () => {
     proc.writeLine("SYNTHcode#wrong-state");
     expect((await proc.exited).exitCode).toBe(1);
     expect(transcript.verdict()).toEqual({ kind: "failed", reason: "code_rejected" });
+  });
+
+  it("creates the CLI config dir (0700) before the start — codex 0.162.1 refuses a missing CODEX_HOME (prod 2026-11-15)", async () => {
+    // The fake CLI mirrors the real refusal: without this mkdir the attempt
+    // fails at once as cli_output_unrecognised.
+    for (const provider of ["codex", "claude"] as const) {
+      const home = mkdtempSync(join(tmpdir(), `runner-cfg-${provider}-`));
+      try {
+        const res = await spawnLoginProcess({ provider, cliPath: fakeCli("wait"), stagingHome: home, serviceEnv: { PATH: process.env.PATH }, hardTtlMs: null, timeoutBinary: null, killGraceMs: 300 }, () => {});
+        const dir = configDirFor(provider, home);
+        expect(statSync(dir).isDirectory()).toBe(true);
+        expect(statSync(dir).mode & 0o777).toBe(0o700);
+        if (res.ok) await res.process.kill();
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
   });
 
   it("codex: device-code output parses ready; success exits 0 with auth.json in staging only", async () => {

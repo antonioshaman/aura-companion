@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertNever, type LoginFailureReason, type ProviderId } from "../auth-status/auth-types.js";
 import { escalateKill, type KillEscalation } from "../auth-status/probe-runner.js";
@@ -141,6 +141,14 @@ export function spawnLoginProcess(
   onOutput: (chunk: Buffer, stream: "stdout" | "stderr") => void,
 ): Promise<SpawnLoginResult> {
   const env = loginEnv(spec.provider, spec.stagingHome, spec.serviceEnv);
+  // The config dir the env points at must exist: codex 0.162.1 refuses to
+  // start when CODEX_HOME names a missing dir (first UI sign-in on prod,
+  // 2026-11-15 → "Error loading configuration … path does not exist").
+  try {
+    mkdirSync(configDirFor(spec.provider, spec.stagingHome), { recursive: true, mode: 0o700 });
+  } catch {
+    return Promise.resolve({ ok: false, reason: "spawn_failed" });
+  }
   const argv = LOGIN_ARGV[spec.provider];
   const timeoutBinary = spec.timeoutBinary === undefined ? defaultTimeoutBinary() : spec.timeoutBinary;
   const [file, args] =

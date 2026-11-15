@@ -133,6 +133,13 @@ if (provider === "claude") {
   rl.on("close", () => { setInterval(() => {}, 1 << 30); });
 } else {
   const dir = process.env.CODEX_HOME || join(home, ".codex");
+  // codex 0.162.1 refuses to start when CODEX_HOME is set to a missing dir
+  // (observed on prod 2026-11-15 — the first UI sign-in failed this way).
+  if (process.env.CODEX_HOME && !existsSync(dir)) {
+    process.stderr.write(`WARNING: proceeding, even though we could not create PATH aliases: CODEX_HOME points to "${dir}", but that path does not exist\n`);
+    process.stderr.write(`Error loading configuration: CODEX_HOME points to "${dir}", but that path does not exist\n`);
+    process.exit(1);
+  }
   const authPath = join(dir, "auth.json");
   // Destructive start: auth.json is gone in the first second, whatever the outcome.
   try { unlinkSync(authPath); } catch { /* absent */ }
