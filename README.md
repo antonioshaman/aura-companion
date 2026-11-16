@@ -32,20 +32,36 @@ Toggle **Council Mode** on the New Session dialog and pick a pairing — `claude
 
 ## Quick Start
 
+The same four steps on Ubuntu/Debian, macOS and Windows (Windows runs it inside WSL2 — step 0).
+
+**0. Windows only — get Ubuntu via WSL2.** In PowerShell *as Administrator*: `wsl --install -d Ubuntu`, restart if asked, open **Ubuntu** from the Start menu and do every step below in that window.
+
+**1. Install Bun, Node.js and at least one agent CLI.**
+
 ```bash
-git clone https://github.com/antonioshaman/aura-companion.git
-cd aura-companion
-cd web && bun install && bun run dev
+curl -fsSL https://bun.sh/install | bash && source ~/.bashrc   # macOS: source ~/.zshrc
+# Ubuntu/WSL2 without Node.js: sudo apt-get install -y nodejs npm
+npm install -g @anthropic-ai/claude-code   # Claude Code
+npm install -g @openai/codex               # Codex (optional)
 ```
 
-Open http://localhost:5174.
-
-**Requirements:** [Bun](https://bun.sh/) ≥ 1.0, Claude Code CLI or Codex CLI.
-
-Or run the published package directly (no checkout needed):
+**2. Start Aura Companion.**
 
 ```bash
-bunx aura-companion          # starts the server on http://localhost:3456
+bunx aura-companion
+```
+
+**3. Open http://localhost:3456** (on Windows — in your normal Windows browser). The first-run wizard checks each CLI and signs you in to Claude Code / Codex right in the browser.
+
+**4. Optional — keep it running in the background:** `bunx aura-companion install` (launchd on macOS, systemd on Linux / WSL2 with systemd enabled).
+
+**On a server / VPS:** same steps, then list every address you open it from in `COMPANION_ALLOWED_ORIGIN` (e.g. `http://203.0.113.5:3456`) — see [Installation → Remote access](docs/get-started/installation.mdx#remote-access--origin-allowlist-required-for-non-loopback).
+
+**Developing Aura itself** (hot reload on http://localhost:5174):
+
+```bash
+git clone https://github.com/antonioshaman/aura-companion.git
+cd aura-companion/web && bun install && bun run dev
 ```
 
 ## Self-Learning
