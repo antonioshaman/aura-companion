@@ -416,6 +416,12 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
         detail: "The server is not running as the service user, so the sign-in was not started.",
         action: { kind: "run_as_service_user" },
       };
+    case "running_as_root":
+      return {
+        title: `${name}: sign-in is never run as root`,
+        detail: `Aura is running as root, and a sign-in started from the browser would store ${name} credentials for root. Run Aura as a normal user (create one, e.g. \`adduser aura\`, then start Aura as that user — see the server setup guide), or sign in by hand in your SSH session as the user Aura runs as: \`${manualSignInCommand(provider)}\`.`,
+        action: { kind: "none" },
+      };
     case "unsupported_platform":
       return {
         title: `${name}: sign-in from the browser is not available on this system`,
@@ -489,13 +495,13 @@ export function describeEffectiveMethod(effective: EffectiveAuthMethod, provider
     case "environment":
       return {
         title: `${name} sessions use ${variable} instead of the sign-in`,
-        detail: `${variable} is set in the service environment and takes priority over the sign-in.`,
+        detail: `${variable} is set in the service environment and takes priority over the sign-in. To use the sign-in, remove it from the service environment (systemd: \`systemctl --user edit aura-companion\`; Docker: the container's env) and restart Aura.`,
         action: { kind: "none" },
       };
     case "settings":
       return {
         title: `${name} sessions use ${variable} instead of the sign-in`,
-        detail: `${variable} is set in the settings and takes priority over the sign-in.`,
+        detail: `${variable} is set in the settings and takes priority over the sign-in. To use the sign-in, remove it in Settings → Providers ("Remove saved …").`,
         action: { kind: "none" },
       };
     default:

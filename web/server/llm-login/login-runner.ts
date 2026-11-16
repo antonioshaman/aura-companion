@@ -65,7 +65,7 @@ export function loginEnv(provider: ProviderId, stagingHome: string, serviceEnv: 
   return env;
 }
 
-export type LoginRefusal = Extract<LoginFailureReason, "wrong_service_user" | "unsupported_platform" | "cli_missing">;
+export type LoginRefusal = Extract<LoginFailureReason, "wrong_service_user" | "running_as_root" | "unsupported_platform" | "cli_missing">;
 
 /**
  * Checks before any process starts. The sign-in runs only as the service
@@ -85,7 +85,7 @@ export function loginPreflight(opts: {
   cliPath: string | null;
 }): LoginRefusal | null {
   // Never as root (spec 🚫), even when no unit is known or the unit itself says root.
-  if (opts.callerUid === 0 || opts.callerUser === "root") return "wrong_service_user";
+  if (opts.callerUid === 0 || opts.callerUser === "root") return "running_as_root";
   if (opts.serviceUser !== null && opts.serviceUser !== opts.callerUser) return "wrong_service_user";
   if (opts.provider === "claude" && opts.platform === "darwin") return "unsupported_platform";
   if (!opts.cliPath || !opts.cliPath.startsWith("/")) return "cli_missing";

@@ -113,7 +113,8 @@ describe("loginEnv / loginPreflight (pure)", () => {
 
   it("refuses the wrong user, Claude on macOS, a missing or relative CLI path; Codex on macOS is fine", () => {
     const base = { platform: "linux" as const, callerUser: "svc", callerUid: 1000, serviceUser: "svc", cliPath: "/usr/bin/x" };
-    expect(loginPreflight({ ...base, provider: "claude", callerUser: "root" })).toBe("wrong_service_user");
+    // Root has its own reason (friedman P2-5): "not the service user" was false on a fresh root VPS.
+    expect(loginPreflight({ ...base, provider: "claude", callerUser: "root" })).toBe("running_as_root");
     expect(loginPreflight({ ...base, provider: "codex", callerUser: "other" })).toBe("wrong_service_user");
     expect(loginPreflight({ ...base, provider: "claude", platform: "darwin" })).toBe("unsupported_platform");
     expect(loginPreflight({ ...base, provider: "codex", platform: "darwin" })).toBeNull();
@@ -126,10 +127,11 @@ describe("loginEnv / loginPreflight (pure)", () => {
   it("never runs as root — not with an unknown service user, not when the unit itself says root (observer review 202 STOP)", () => {
     const base = { platform: "linux" as const, cliPath: "/usr/bin/x" };
     for (const provider of ["claude", "codex"] as const) {
-      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: null })).toBe("wrong_service_user");
-      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: "root" })).toBe("wrong_service_user");
+      // Still refused in every case; the reason now says why (running_as_root, friedman P2-5).
+      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: null })).toBe("running_as_root");
+      expect(loginPreflight({ ...base, provider, callerUser: "root", callerUid: 0, serviceUser: "root" })).toBe("running_as_root");
       // uid 0 under another name (e.g. a renamed root account) is still root.
-      expect(loginPreflight({ ...base, provider, callerUser: "toor", callerUid: 0, serviceUser: "toor" })).toBe("wrong_service_user");
+      expect(loginPreflight({ ...base, provider, callerUser: "toor", callerUid: 0, serviceUser: "toor" })).toBe("running_as_root");
     }
   });
 });
