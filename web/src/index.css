@@ -341,6 +341,14 @@
 .btn-primary-aa:hover {
   background-color: var(--color-cc-primary-btn-hover);
 }
+/* WCAG AA link text — the brand orange is 3.0:1 on light surfaces; use the
+   darker button shade there (≥4.8:1). Dark theme keeps the brand orange (≥4.8:1). */
+.link-primary-aa {
+  color: var(--color-cc-primary-btn);
+}
+.dark .link-primary-aa {
+  color: var(--color-cc-primary);
+}
 .btn-codex-aa {
   background-color: var(--color-cc-codex-btn);
 }

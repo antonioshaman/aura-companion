@@ -8,6 +8,7 @@ import { ObserverFindingsBlock, parseObserverFindingsMessage } from "./chat/Obse
 import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
 import { GuardDenialCard } from "./GuardDenialBanner.js";
 import { TurnFailureCard, TurnFailureNotice } from "./chat/TurnFailureCard.js";
+import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 
 export function MessageBubble({
   message,
@@ -24,7 +25,12 @@ export function MessageBubble({
   }
 
   if (message.role === "system" && message.systemVariant === "turn-failure" && message.turnFailure) {
-    return sessionId ? <TurnFailureNotice sessionId={sessionId} message={message} /> : <TurnFailureCard failure={message.turnFailure} />;
+    // A failure kind from a newer server must break only this card, not the chat.
+    return (
+      <SectionErrorBoundary label="Turn failure card">
+        {sessionId ? <TurnFailureNotice sessionId={sessionId} message={message} /> : <TurnFailureCard failure={message.turnFailure} />}
+      </SectionErrorBoundary>
+    );
   }
 
   if (message.role === "system" && message.systemVariant === "resume-interrupted") {

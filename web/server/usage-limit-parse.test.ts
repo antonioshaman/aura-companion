@@ -110,9 +110,19 @@ describe("isClaudeUsageLimitText", () => {
     "You've hit your weekly limit · resets Oct 21, 9am",
     "You're out of extra usage · resets Oct 21, 9am",
     "You're out of usage credits. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
-    "API Error: 429 rate_limit_error",
   ])("recognises %s", (text) => {
     expect(isClaudeUsageLimitText(text)).toBe(true);
+  });
+
+  // A bare 429 is any throttle (per-minute, org rate limit), not a usage
+  // window: treating it as one parked sessions for 5 hours (willison #1).
+  // Only a rejected rate_limit_event or window wording proves the window.
+  it.each([
+    "API Error: 429 rate_limit_error",
+    'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}',
+    "Rate limit exceeded, please retry",
+  ])("does not treat a plain 429 throttle as a usage window: %s", (text) => {
+    expect(isClaudeUsageLimitText(text)).toBe(false);
   });
 
   it("ignores normal assistant prose that mentions limits", () => {

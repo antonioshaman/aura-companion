@@ -225,10 +225,12 @@ export function isClaudeUsageLimitText(text: string): boolean {
     /hit your (?:session|weekly|daily|usage|opus|sonnet|[a-z0-9 ]{0,20})?\s*limit/.test(lower) ||
     lower.includes("out of extra usage") ||
     lower.includes("out of usage credits") ||
-    lower.includes("usage limit reached") ||
-    lower.includes("rate_limit_error") ||
-    lower.includes("rate limit exceeded")
+    lower.includes("usage limit reached")
   );
+  // Not `rate_limit_error` / "rate limit exceeded": that is the type of EVERY
+  // Anthropic 429, including one-minute throttles. A real usage window is
+  // proven by a rejected `rate_limit_event` or by wording that names the
+  // window (council review 2026-11-15, willison #1).
 }
 
 export interface ClaudeRateLimitInfo {

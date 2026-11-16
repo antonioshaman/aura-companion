@@ -375,6 +375,8 @@ export type AuthAction =
   | { kind: "retry" }
   | { kind: "restart_session" }
   | { kind: "update_cli"; command: string }
+  /** The CLI is not on PATH at all — install it (not "update"). */
+  | { kind: "install_cli"; command: string }
   | { kind: "run_as_service_user" }
   /** Doctor only: a location this user may not list; root can (metadata only). */
   | { kind: "run_as_root"; command: string }

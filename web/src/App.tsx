@@ -498,7 +498,10 @@ export default function App() {
       )}
       <DockerUpdateDialog />
       {/* LLM sign-in window / chip (phase 2c): one instance for every entry point. */}
-      <SignInHost />
+      {/* A sign-in state from a newer server must not blank the whole app. */}
+      <SectionErrorBoundary label="Sign-in window">
+        <SignInHost />
+      </SectionErrorBoundary>
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
     </div>
   );

@@ -82,13 +82,14 @@ function ActionRow({
       );
     case "open_status":
       return (
-        <a href="#/diagnostics" className="text-xs font-medium text-cc-primary underline underline-offset-2">
+        <a href="#/diagnostics" className="text-xs font-medium link-primary-aa underline underline-offset-2">
           {formatAction(action)}
         </a>
       );
     case "sign_in":
       return <SignInButton provider={action.provider} mode="sign_in_again" className={buttonClass} />;
     case "update_cli":
+    case "install_cli":
     case "run_as_root":
     case "run_as_service_user":
       return <p className="text-xs text-cc-fg break-words">{formatAction(action)}</p>;

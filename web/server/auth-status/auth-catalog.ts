@@ -81,6 +81,14 @@ export function signInSteps(provider: ProviderId): { replyCode: boolean; deviceC
   }
 }
 
+function installCliAction(provider: ProviderId): AuthAction {
+  switch (provider) {
+    case "claude": return { kind: "install_cli", command: "npm install -g @anthropic-ai/claude-code" };
+    case "codex": return { kind: "install_cli", command: "npm install -g @openai/codex" };
+    default: return assertNever(provider);
+  }
+}
+
 function updateCliAction(provider: ProviderId): AuthAction {
   switch (provider) {
     case "claude": return { kind: "update_cli", command: "claude update" };
@@ -141,7 +149,7 @@ export function describeNotVerified(reason: NotVerifiedReason, provider: Provide
         action: reloginAction(provider),
       };
     case "cli_missing":
-      return { title, detail: `The ${name} CLI was not found on the service PATH.`, action: updateCliAction(provider) };
+      return { title, detail: `The ${name} CLI was not found on the service PATH.`, action: installCliAction(provider) };
     case "probe_inconclusive":
       return { title, detail: "The CLI status output was not understood. Local status only.", action: { kind: "retry" } };
     case "rotation_detected":
@@ -401,7 +409,7 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
         action: reloginAction(provider),
       };
     case "cli_missing":
-      return { title: `${name}: CLI not found`, detail: `The ${name} CLI was not found on the service PATH.`, action: updateCliAction(provider) };
+      return { title: `${name}: CLI not found`, detail: `The ${name} CLI was not found on the service PATH.`, action: installCliAction(provider) };
     case "wrong_service_user":
       return {
         title: `${name}: sign-in must run as the service user`,
@@ -608,6 +616,7 @@ export function formatAction(action: AuthAction, surface: "ui" | "cli" = "ui"): 
     case "retry": return "Retry";
     case "restart_session": return "Restart the session";
     case "update_cli": return `Update the CLI: \`${action.command}\``;
+    case "install_cli": return `Install the CLI: \`${action.command}\``;
     case "run_as_service_user": return "Run as the service user";
     case "run_as_root": return `Re-run as root to include it: \`${action.command}\``;
     case "open_status": return "Open provider status";

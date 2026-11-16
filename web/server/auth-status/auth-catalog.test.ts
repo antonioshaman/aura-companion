@@ -258,7 +258,15 @@ describe("sign-in catalog", () => {
   });
 
   it("failures that a new attempt cannot fix carry their own action, never a sign-in loop", () => {
-    expect(describeLoginFailure("cli_missing", "codex").action.kind).toBe("update_cli");
+    // A missing CLI must be installed, not "updated": `claude update` cannot run
+    // when there is no `claude` (council review 2026-11-15, friedman P2-6).
+    expect(describeLoginFailure("cli_missing", "codex").action).toEqual({ kind: "install_cli", command: "npm install -g @openai/codex" });
+    expect(describeLoginFailure("cli_missing", "claude").action).toEqual({
+      kind: "install_cli",
+      command: "npm install -g @anthropic-ai/claude-code",
+    });
+    // The status page (not-verified reason) gives the same install action.
+    expect(describeNotVerified("cli_missing", "claude").action.kind).toBe("install_cli");
     expect(describeLoginFailure("wrong_service_user", "claude").action.kind).toBe("run_as_service_user");
     // macOS (D6): the UI cannot sign Claude in — the manual Terminal command is the way out.
     const mac = describeLoginFailure("unsupported_platform", "claude");

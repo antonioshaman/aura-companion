@@ -2938,6 +2938,30 @@ describe("Persistence", () => {
     expect(session!.processedClientMessageIdSet.has("restored-client-1")).toBe(true);
   });
 
+  // Council review B3: only the in-memory renewal tracker closes
+  // "reconnecting"; after a restart nothing would, and the notice stuck.
+  it("restoreFromDisk: clears a stale 'reconnecting' credential renewal, keeps final states", () => {
+    const base = {
+      model: "m", cwd: "/saved", tools: [], permissionMode: "default", claude_code_version: "1.0",
+      mcp_servers: [], agents: [], slash_commands: [], skills: [], total_cost_usd: 0, num_turns: 0,
+      context_used_percent: 0, is_compacting: false, git_branch: "", is_worktree: false,
+      is_containerized: false, repo_root: "", git_ahead: 0, git_behind: 0,
+      total_lines_added: 0, total_lines_removed: 0,
+    };
+    const rec = (id: string, state: "reconnecting" | "renewed") => ({
+      id,
+      state: { ...base, session_id: id, credential_renewal: { provider: "claude" as const, promotedAt: 1, state } },
+      messageHistory: [], pendingMessages: [], pendingPermissions: [],
+    });
+    store.saveSync(rec("stuck", "reconnecting") as never);
+    store.saveSync(rec("done", "renewed") as never);
+
+    bridge.restoreFromDisk();
+
+    expect(bridge.getSession("stuck")!.state.credential_renewal).toBeNull();
+    expect(bridge.getSession("done")!.state.credential_renewal?.state).toBe("renewed");
+  });
+
   it("restoreFromDisk: skips malformed records (missing id or state)", () => {
     // AURA-LOCAL: defence-in-depth guard. SessionStore.loadAll() is the producer-side
     // filter for *.runtime.json sister files; this test exercises the consumer-side
