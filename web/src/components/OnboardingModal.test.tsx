@@ -1,167 +1,158 @@
 // @vitest-environment jsdom
 /**
- * Tests for the OnboardingModal component.
+ * Tests for the OnboardingModal component (the first-run wizard).
  *
- * This modal appears on first launch when onboardingCompleted is false.
- * It guides users through configuring Claude Code (OAuth token) and Codex (OpenAI API key).
- *
- * Key behaviors tested:
- * - Welcome step renders with provider options
- * - Claude setup step shows command and token input
- * - Codex setup step shows API key input
- * - Saving tokens calls the API correctly
- * - Skip flow marks onboarding as completed
- * - Done step shows correct configured status
- * - Accessibility audit passes
+ * It appears on first launch when onboardingCompleted is false. Since the
+ * 2026-11-15 council review (P1 #3) every provider step is built on the
+ * in-browser sign-in (the same flow as Diagnostics → LLM sign-in):
+ * - the wizard reads /api/llm-auth/status first and shows what is already
+ *   signed in (a signed-in provider gets "Continue", no sign-in button);
+ * - "Sign in to <provider>" embeds the sign-in panel inside the modal (the
+ *   global SignInHost renders UNDER the modal, so it must not be used);
+ * - a missing CLI shows the install command and "Check again";
+ * - a token / API key is only an "Advanced" override;
+ * - no terminal command the CLI does not have (the old `codex --login`);
+ * - Escape = "set up later" (marks onboarding completed and closes);
+ * - every step is axe-clean.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
+import "vitest-axe/extend-expect";
+import { axe } from "vitest-axe";
 
-// Mock the api module
-vi.mock("../api.js", () => ({
-  api: {
-    updateSettings: vi.fn().mockResolvedValue({}),
-    getSettings: vi.fn().mockResolvedValue({ codexDeviceAuthConfigured: false }),
-  },
+const mocks = vi.hoisted(() => ({
+  updateSettings: vi.fn(),
+  getSettings: vi.fn(),
+  llmAuthStatus: vi.fn(),
+  llmAuthRecheck: vi.fn(),
+  llmLoginStart: vi.fn(),
+  llmLoginGet: vi.fn(),
+  llmLoginCode: vi.fn(),
+  llmLoginCancel: vi.fn(),
 }));
+vi.mock("../api.js", () => ({ api: mocks }));
 
-import { OnboardingModal } from "./OnboardingModal.js";
-import { api } from "../api.js";
+import { OnboardingModal, CLI_INSTALL_COMMAND } from "./OnboardingModal.js";
+import { statusSnapshot } from "./diagnostics/llm-auth-fixtures.js";
+import { loginAttempt } from "./llm-login/login-fixtures.js";
 
-const mockUpdateSettings = vi.mocked(api.updateSettings);
-const mockGetSettings = vi.mocked(api.getSettings);
+const ok = (body: object, status = 200) => Promise.resolve({ status, body });
+
+/** Neither provider signed in (the common fresh-install state). */
+const NOBODY = statusSnapshot({ state: "not_signed_in" }, { state: "not_signed_in" });
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  mockUpdateSettings.mockResolvedValue({} as ReturnType<typeof api.updateSettings> extends Promise<infer T> ? T : never);
-  mockGetSettings.mockResolvedValue({ codexDeviceAuthConfigured: false } as ReturnType<typeof api.getSettings> extends Promise<infer T> ? T : never);
+  for (const m of Object.values(mocks)) m.mockReset();
+  mocks.updateSettings.mockResolvedValue({});
+  mocks.getSettings.mockResolvedValue({});
+  mocks.llmAuthStatus.mockResolvedValue({ status: NOBODY });
+  mocks.llmAuthRecheck.mockResolvedValue({ status: 200, body: {} });
+  mocks.llmLoginGet.mockReturnValue(ok({ attempt: null }));
+  mocks.llmLoginCancel.mockReturnValue(ok({ attempt: null }));
 });
 
+/** Open a provider step and wait until its status has been read. */
+async function openStep(name: "Claude Code" | "Codex") {
+  fireEvent.click(screen.getByText(name));
+  await waitFor(() => expect(screen.queryByText(/^Checking /)).not.toBeInTheDocument());
+}
+
 describe("OnboardingModal", () => {
-  it("renders the welcome step with provider options", () => {
+  it("renders the welcome step with provider options", async () => {
     render(<OnboardingModal onComplete={vi.fn()} />);
-    expect(screen.getByText("Welcome to The Companion")).toBeInTheDocument();
+    expect(screen.getByText("Welcome to Aura Companion")).toBeInTheDocument();
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
     expect(screen.getByText("Codex")).toBeInTheDocument();
+    // Status badges appear once the server answered.
+    await waitFor(() => expect(screen.getAllByText("Not signed in")).toHaveLength(2));
   });
 
-  it("navigates to Claude setup when Claude Code is clicked", () => {
+  it("marks an already signed-in provider on the welcome step", async () => {
+    mocks.llmAuthStatus.mockResolvedValue({ status: statusSnapshot({ state: "working" }, { state: "not_signed_in" }) });
     render(<OnboardingModal onComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Claude Code"));
+    await waitFor(() => expect(screen.getByText("Signed in")).toBeInTheDocument());
+    expect(screen.getByText("Not signed in")).toBeInTheDocument();
+  });
+
+  it("navigates to Claude setup when Claude Code is clicked — sign-in button, no terminal command", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
     expect(screen.getByText("Set up Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("claude setup-token")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in to Claude Code" })).toBeInTheDocument();
+    // The token command lives only behind the Advanced override.
+    expect(screen.queryByText("claude setup-token")).not.toBeInTheDocument();
   });
 
-  it("navigates to Codex setup when Codex is clicked", () => {
+  it("navigates to Codex setup when Codex is clicked — never the non-existent `codex --login`", async () => {
     render(<OnboardingModal onComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Codex"));
+    await openStep("Codex");
     expect(screen.getByText("Set up Codex")).toBeInTheDocument();
-    expect(screen.getByText("codex --login")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in to Codex" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("codex --login");
   });
 
   it("skips all setup when skip link is clicked", async () => {
     const onComplete = vi.fn();
     render(<OnboardingModal onComplete={onComplete} />);
-
     fireEvent.click(screen.getByText(/Skip setup/));
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalledWith({ onboardingCompleted: true });
-    });
-    await waitFor(() => {
-      expect(onComplete).toHaveBeenCalled();
-    });
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ onboardingCompleted: true }));
+    await waitFor(() => expect(onComplete).toHaveBeenCalled());
   });
 
-  it("saves Claude token and navigates to Codex step", async () => {
-    render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Claude setup
-    fireEvent.click(screen.getByText("Claude Code"));
-    expect(screen.getByText("Set up Claude Code")).toBeInTheDocument();
-
-    // Enter token
-    const input = screen.getByLabelText("OAuth Token");
-    fireEvent.change(input, { target: { value: "test-oauth-token" } });
-
-    // Save
-    fireEvent.click(screen.getByText("Save & Continue"));
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalledWith({ claudeCodeOAuthToken: "test-oauth-token" });
-    });
-
-    // Should navigate to Codex step
-    await waitFor(() => {
-      expect(screen.getByText("Set up Codex")).toBeInTheDocument();
-    });
-  });
-
-  it("skips Claude step and goes to Codex", () => {
-    render(<OnboardingModal onComplete={vi.fn()} />);
-
-    fireEvent.click(screen.getByText("Claude Code"));
-    fireEvent.click(screen.getByText("Skip"));
-
-    expect(screen.getByText("Set up Codex")).toBeInTheDocument();
-  });
-
-  it("saves Codex API key and completes onboarding", async () => {
+  it("Escape means 'set up later': completes onboarding and closes", async () => {
     const onComplete = vi.fn();
     render(<OnboardingModal onComplete={onComplete} />);
-
-    // Go directly to Codex setup
-    fireEvent.click(screen.getByText("Codex"));
-
-    // Expand API key accordion
-    fireEvent.click(screen.getByText("Or use an API key instead"));
-
-    // Enter API key
-    const input = screen.getByLabelText("OpenAI API Key");
-    fireEvent.change(input, { target: { value: "sk-test-key" } });
-
-    // Save — button shows "Save & Finish" when API key is entered
-    fireEvent.click(screen.getByText("Save & Finish"));
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalledWith({ openaiApiKey: "sk-test-key" });
-    });
-
-    // Should show done step
-    await waitFor(() => {
-      expect(screen.getByText("Get Started")).toBeInTheDocument();
-    });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ onboardingCompleted: true }));
+    await waitFor(() => expect(onComplete).toHaveBeenCalled());
   });
 
-  it("navigates back from Codex to Claude step", () => {
+  it("saves an advanced Claude token and navigates to Codex step", async () => {
     render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    fireEvent.click(screen.getByText(/Advanced: paste an OAuth token/));
+    // The terminal hint for the headless token is part of the override.
+    expect(screen.getByText("claude setup-token")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Claude OAuth token"), { target: { value: "test-oauth-token" } });
+    fireEvent.click(screen.getByText("Save token"));
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ claudeCodeOAuthToken: "test-oauth-token" }));
+    await waitFor(() => expect(screen.getByText("Set up Codex")).toBeInTheDocument());
+  });
 
-    // Go to Codex via welcome
-    fireEvent.click(screen.getByText("Codex"));
+  it("skips Claude step and goes to Codex", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    fireEvent.click(screen.getByText("Skip"));
     expect(screen.getByText("Set up Codex")).toBeInTheDocument();
+  });
 
-    // Go back
+  it("saves an advanced Codex API key and completes onboarding", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Codex");
+    fireEvent.click(screen.getByText(/Advanced: use an OpenAI API key/));
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), { target: { value: "sk-test-key" } });
+    fireEvent.click(screen.getByText("Save API key"));
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ openaiApiKey: "sk-test-key" }));
+    await waitFor(() => expect(screen.getByText("Get Started")).toBeInTheDocument());
+    expect(screen.getByText("Codex is ready.")).toBeInTheDocument();
+  });
+
+  it("navigates back from Codex to Claude step", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Codex");
     fireEvent.click(screen.getByText("Back"));
     expect(screen.getByText("Set up Claude Code")).toBeInTheDocument();
   });
 
   it("shows done step with correct configured status", async () => {
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Claude, enter token, save
-    fireEvent.click(screen.getByText("Claude Code"));
-    const input = screen.getByLabelText("OAuth Token");
-    fireEvent.change(input, { target: { value: "token" } });
-    fireEvent.click(screen.getByText("Save & Continue"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Set up Codex")).toBeInTheDocument();
-    });
-
-    // Skip Codex
+    await openStep("Claude Code");
+    fireEvent.click(screen.getByText(/Advanced: paste an OAuth token/));
+    fireEvent.change(screen.getByLabelText("Claude OAuth token"), { target: { value: "token" } });
+    fireEvent.click(screen.getByText("Save token"));
+    await waitFor(() => expect(screen.getByText("Set up Codex")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Skip"));
-
     await waitFor(() => {
       expect(screen.getByText("You're all set!")).toBeInTheDocument();
       expect(screen.getByText("Claude Code is ready.")).toBeInTheDocument();
@@ -170,148 +161,166 @@ describe("OnboardingModal", () => {
 
   it("shows 'Setup Skipped' when no providers configured", async () => {
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Skip through Claude and Codex
-    fireEvent.click(screen.getByText("Claude Code"));
+    await openStep("Claude Code");
     fireEvent.click(screen.getByText("Skip"));
     fireEvent.click(screen.getByText("Skip"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Setup Skipped")).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByText("Setup Skipped")).toBeInTheDocument());
   });
 
   it("calls onComplete when Get Started is clicked on done step", async () => {
     const onComplete = vi.fn();
     render(<OnboardingModal onComplete={onComplete} />);
-
-    // Skip everything to get to done
-    fireEvent.click(screen.getByText("Claude Code"));
+    await openStep("Claude Code");
     fireEvent.click(screen.getByText("Skip"));
     fireEvent.click(screen.getByText("Skip"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Get Started")).toBeInTheDocument();
-    });
-
+    await waitFor(() => expect(screen.getByText("Get Started")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Get Started"));
     expect(onComplete).toHaveBeenCalled();
   });
 
   it("displays error when save fails", async () => {
-    mockUpdateSettings.mockRejectedValueOnce(new Error("Network error"));
-
+    mocks.updateSettings.mockRejectedValueOnce(new Error("Network error"));
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    fireEvent.click(screen.getByText("Claude Code"));
-    const input = screen.getByLabelText("OAuth Token");
-    fireEvent.change(input, { target: { value: "bad-token" } });
-    fireEvent.click(screen.getByText("Save & Continue"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Network error")).toBeInTheDocument();
-    });
+    await openStep("Claude Code");
+    fireEvent.click(screen.getByText(/Advanced: paste an OAuth token/));
+    fireEvent.change(screen.getByLabelText("Claude OAuth token"), { target: { value: "bad-token" } });
+    fireEvent.click(screen.getByText("Save token"));
+    await waitFor(() => expect(screen.getByText("Network error")).toBeInTheDocument());
   });
 
   // Verifies the Codex save error branch is exercised
   it("displays error when Codex save fails", async () => {
-    mockUpdateSettings.mockRejectedValueOnce(new Error("API key invalid"));
-
+    mocks.updateSettings.mockRejectedValueOnce(new Error("API key invalid"));
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Codex setup
-    fireEvent.click(screen.getByText("Codex"));
-
-    // Expand API key accordion, enter key and save
-    fireEvent.click(screen.getByText("Or use an API key instead"));
-    const input = screen.getByLabelText("OpenAI API Key");
-    fireEvent.change(input, { target: { value: "bad-key" } });
-    fireEvent.click(screen.getByText("Save & Finish"));
-
-    await waitFor(() => {
-      expect(screen.getByText("API key invalid")).toBeInTheDocument();
-    });
+    await openStep("Codex");
+    fireEvent.click(screen.getByText(/Advanced: use an OpenAI API key/));
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), { target: { value: "bad-key" } });
+    fireEvent.click(screen.getByText("Save API key"));
+    await waitFor(() => expect(screen.getByText("API key invalid")).toBeInTheDocument());
   });
 
-  // Verifies "I've logged in" button checks device auth via getSettings
-  it("checks Codex device auth when 'I've logged in' is clicked", async () => {
-    mockGetSettings.mockResolvedValueOnce({ codexDeviceAuthConfigured: true } as ReturnType<typeof api.getSettings> extends Promise<infer T> ? T : never);
-
+  // Replaces the old "I've logged in" check: an already signed-in Codex is
+  // read from the status endpoint and goes straight to "Continue".
+  it("an already signed-in Codex shows its account and Continue finishes onboarding", async () => {
+    mocks.llmAuthStatus.mockResolvedValue({ status: statusSnapshot({ state: "not_signed_in" }, { state: "working" }) });
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Codex setup
-    fireEvent.click(screen.getByText("Codex"));
-
-    // Click "I've logged in" — should check device auth
-    fireEvent.click(screen.getByText("I've logged in"));
-
-    await waitFor(() => {
-      expect(mockGetSettings).toHaveBeenCalled();
-    });
-    // Device auth found — should complete onboarding
-    await waitFor(() => {
-      expect(screen.getByText("You're all set!")).toBeInTheDocument();
-    });
+    await openStep("Codex");
+    expect(screen.getByText("Codex is signed in as owner@example.com.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in to Codex" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Continue"));
+    await waitFor(() => expect(screen.getByText("You're all set!")).toBeInTheDocument());
+    expect(screen.getByText("Codex is ready.")).toBeInTheDocument();
   });
 
-  // Verifies error when device auth not found
-  it("shows error when Codex device auth is not configured", async () => {
-    mockGetSettings.mockResolvedValueOnce({ codexDeviceAuthConfigured: false } as ReturnType<typeof api.getSettings> extends Promise<infer T> ? T : never);
-
+  // Replaces the old "No Codex auth found. Run codex --login" error: the
+  // sign-in now happens inside the wizard (embedded panel, real REST calls).
+  it("'Sign in to Codex' starts the in-browser sign-in inside the modal and shows the device code", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("codex", "awaiting_user"), existing: false }, 201));
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: loginAttempt("codex", "awaiting_user") }));
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Codex setup
-    fireEvent.click(screen.getByText("Codex"));
-
-    // Click "I've logged in" — no auth found
-    fireEvent.click(screen.getByText("I've logged in"));
-
-    await waitFor(() => {
-      expect(screen.getByText(/No Codex auth found/)).toBeInTheDocument();
-    });
+    await openStep("Codex");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Codex" }));
+    await waitFor(() => expect(mocks.llmLoginStart).toHaveBeenCalledWith("codex"));
+    const panel = await screen.findByTestId("sign-in-panel");
+    // Inside the wizard's dialog, not the global host.
+    expect(screen.getByRole("dialog", { name: "Provider setup" })).toContainElement(panel);
+    await waitFor(() => expect(screen.getByText("ABCD-12345")).toBeInTheDocument());
   });
 
-  // Verifies copy button works (exercises CopyButton component, lines 634-636)
-  it("renders copy button on Claude setup step", () => {
-    // Mock clipboard API
-    Object.assign(navigator, {
-      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
-    });
-
+  it("closing the embedded sign-in while it runs cancels the attempt", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("codex", "awaiting_user"), existing: false }, 201));
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: loginAttempt("codex", "awaiting_user") }));
     render(<OnboardingModal onComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Claude Code"));
+    await openStep("Codex");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Codex" }));
+    await waitFor(() => expect(screen.getByTestId("sign-in-panel")).toHaveAttribute("data-state", "awaiting_user"));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(mocks.llmLoginCancel).toHaveBeenCalled());
+    expect(screen.queryByTestId("sign-in-panel")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in to Codex" })).toBeInTheDocument();
+  });
 
-    const copyBtn = screen.getByLabelText("Copy command");
-    fireEvent.click(copyBtn);
+  it("a successful embedded sign-in turns the step into 'signed in' with Continue", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("claude", "succeeded"), existing: false }, 201));
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: loginAttempt("claude", "succeeded") }));
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    // After success the status endpoint reports Claude working.
+    mocks.llmAuthStatus.mockResolvedValue({ status: statusSnapshot({ state: "working" }, { state: "not_signed_in" }) });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude Code" }));
+    await waitFor(() => expect(screen.getByText("Claude Code is signed in as owner@example.com.")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Continue"));
+    expect(screen.getByText("Set up Codex")).toBeInTheDocument();
+  });
 
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("claude setup-token");
+  it("a missing CLI shows the install command and 'Check again' re-reads the status", async () => {
+    mocks.llmAuthStatus.mockResolvedValue({
+      status: statusSnapshot({ state: "not_verified", reason: "cli_missing" }, { state: "not_signed_in" }),
+    });
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    expect(screen.getByText(CLI_INSTALL_COMMAND.claude)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in to Claude Code" })).not.toBeInTheDocument();
+    mocks.llmAuthStatus.mockResolvedValue({ status: NOBODY });
+    fireEvent.click(screen.getByText("Check again"));
+    await waitFor(() => expect(mocks.llmAuthRecheck).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sign in to Claude Code" })).toBeInTheDocument());
+  });
+
+  it("a failed status read still offers sign-in", async () => {
+    mocks.llmAuthStatus.mockRejectedValue(new Error("offline"));
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    expect(screen.getByRole("button", { name: "Sign in to Claude Code" })).toBeInTheDocument();
+  });
+
+  // Verifies copy button works on the install command (CopyButton component)
+  it("renders copy button on the install command", async () => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    mocks.llmAuthStatus.mockResolvedValue({
+      status: statusSnapshot({ state: "not_signed_in" }, { state: "not_verified", reason: "cli_missing" }),
+    });
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Codex");
+    fireEvent.click(screen.getByLabelText("Copy command"));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(CLI_INSTALL_COMMAND.codex);
   });
 
   // Verifies error is cleared when navigating between steps
   it("clears error when navigating between steps", async () => {
-    mockUpdateSettings.mockRejectedValueOnce(new Error("Save failed"));
-
+    mocks.updateSettings.mockRejectedValueOnce(new Error("Save failed"));
     render(<OnboardingModal onComplete={vi.fn()} />);
-
-    // Go to Claude, trigger error
-    fireEvent.click(screen.getByText("Claude Code"));
-    const input = screen.getByLabelText("OAuth Token");
-    fireEvent.change(input, { target: { value: "bad-token" } });
-    fireEvent.click(screen.getByText("Save & Continue"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Save failed")).toBeInTheDocument();
-    });
-
-    // Navigate to Codex — error should be cleared
+    await openStep("Claude Code");
+    fireEvent.click(screen.getByText(/Advanced: paste an OAuth token/));
+    fireEvent.change(screen.getByLabelText("Claude OAuth token"), { target: { value: "bad-token" } });
+    fireEvent.click(screen.getByText("Save token"));
+    await waitFor(() => expect(screen.getByText("Save failed")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Skip"));
     expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
   });
 
   it("passes accessibility audit", async () => {
-    const { axe } = await import("vitest-axe");
     render(<OnboardingModal onComplete={vi.fn()} />);
-    const results = await axe(document.body);
-    expect(results).toHaveNoViolations();
+    await waitFor(() => expect(screen.getAllByText("Not signed in")).toHaveLength(2));
+    expect(await axe(document.body)).toHaveNoViolations();
+  });
+
+  // Per-step axe scans (review P1 #3): each screen a first-time user sees.
+  it("every step is axe-clean (provider steps, advanced override, embedded sign-in, done)", async () => {
+    mocks.llmLoginStart.mockReturnValue(ok({ attempt: loginAttempt("claude", "awaiting_user"), existing: false }, 201));
+    mocks.llmLoginGet.mockReturnValue(ok({ attempt: loginAttempt("claude", "awaiting_user") }));
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await openStep("Claude Code");
+    expect(await axe(document.body)).toHaveNoViolations();
+    fireEvent.click(screen.getByText(/Advanced: paste an OAuth token/));
+    expect(await axe(document.body)).toHaveNoViolations();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude Code" }));
+    await waitFor(() => expect(screen.getByTestId("sign-in-panel")).toHaveAttribute("data-state", "awaiting_user"));
+    expect(await axe(document.body)).toHaveNoViolations();
+    fireEvent.click(screen.getByText("Skip"));
+    expect(await axe(document.body)).toHaveNoViolations();
+    fireEvent.click(screen.getByText("Skip"));
+    await waitFor(() => expect(screen.getByText("Setup Skipped")).toBeInTheDocument());
+    expect(await axe(document.body)).toHaveNoViolations();
   });
 });

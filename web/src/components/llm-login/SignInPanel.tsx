@@ -616,6 +616,76 @@ function SignInSession({ provider, intent, collapsed }: { provider: ProviderId; 
   );
 }
 
+/**
+ * The same sign-in, embedded in a host that owns its own layout (the
+ * first-run wizard). `SignInHost` renders under a modal, so the wizard
+ * cannot open the global window; it mounts this instead. Closing here while
+ * the attempt runs cancels it — there is no chip to come back to.
+ * `onSucceeded` fires once with the provider's fresh status.
+ */
+export function EmbeddedSignIn({
+  provider,
+  onClose,
+  onSucceeded,
+}: {
+  provider: ProviderId;
+  onClose: () => void;
+  onSucceeded: (status: ProviderAuthStatus | null) => void;
+}) {
+  const { view, start, submitCode, cancel } = useLoginAttempt(provider, "start");
+  const [status, setStatus] = useState<ProviderAuthStatus | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const a = view.attempt;
+  const running = a ? !isTerminalLoginState(a.state) : !view.loaded;
+  const now = useNow(running);
+  const onSucceededRef = useRef(onSucceeded);
+  onSucceededRef.current = onSucceeded;
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
+  const succeededId = a?.state === "succeeded" ? a.id : null;
+  useEffect(() => {
+    if (!succeededId) return;
+    let live = true;
+    api.llmAuthStatus().then(
+      (r) => {
+        notePromotedFromStatus(r.status);
+        const s = r.status?.providers[provider] ?? null;
+        if (!live) return;
+        setStatus(s);
+        onSucceededRef.current(s);
+      },
+      () => {
+        if (live) onSucceededRef.current(null);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [succeededId, provider]);
+
+  const close = useCallback(() => {
+    if (a && (a.state === "starting" || a.state === "awaiting_user")) cancel();
+    onClose();
+  }, [a, cancel, onClose]);
+
+  return (
+    <SignInPanel
+      provider={provider}
+      view={view}
+      now={now}
+      status={status}
+      onSubmitCode={submitCode}
+      onCancel={cancel}
+      onClose={close}
+      onStartAgain={() => void start()}
+      headingRef={headingRef}
+    />
+  );
+}
+
 /** Mounted once in App: the window (or chip) for the provider in `loginDialog`. */
 export function SignInHost() {
   const dialog = useStore((s) => s.loginDialog);
