@@ -82,6 +82,16 @@ import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { autoResumeStaleAction } from "./auto-resume-visibility.js";
 import type { TurnFailure } from "./auth-status/auth-types.js";
+import { describeTurnFailure } from "./auth-status/auth-catalog.js";
+
+/**
+ * The `message` fallback of a turn-failure `error` frame (old browsers,
+ * exports, Markdown copies). Built in ONE place from the final kind, after
+ * the bridge's stale-epoch adjustment, so it never contradicts the card (dahl #3).
+ */
+function turnFailureMessage(failure: TurnFailure): string {
+  return `${describeTurnFailure(failure.kind, failure.provider).title}: ${failure.providerMessage}`;
+}
 import type { CredentialRenewalRecord } from "./session-types.js";
 
 /**
@@ -147,6 +157,17 @@ function mapClearReasonToCliFailedReason(reason: RelaunchExhaustedReason): CliFa
   const _: never = reason;
   return _;
 }
+
+/**
+ * Settings frames that must reach the process the held input goes to (the new
+ * one), in order behind it — not the old process the renewal is about to stop
+ * (dahl #6). Interrupt and permission answers still pass a hold: they belong
+ * to the turn that is running now.
+ */
+const HELD_WITH_INPUT_TYPES = new Set<BrowserOutgoingMessage["type"]>([
+  "set_model",
+  "set_permission_mode",
+]);
 
 const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "user_message",
@@ -393,7 +414,7 @@ export class WsBridge {
         return true;
       }
     });
-    const frame: BrowserIncomingMessage = { type: "error", message: failure.providerMessage, turnFailure: failure, timestamp: Date.now() };
+    const frame: BrowserIncomingMessage = { type: "error", message: turnFailureMessage(failure), turnFailure: failure, timestamp: Date.now() };
     this.appendHistory(session, frame);
     this.persistSession(session);
     this.broadcastToBrowsers(session, frame);
@@ -1486,6 +1507,7 @@ export class WsBridge {
       if (msg.type === "error" && msg.turnFailure) {
         if (msg.timestamp === undefined) msg.timestamp = Date.now();
         if (this.credentialGate) msg.turnFailure = this.credentialGate.adjustTurnFailure(sessionId, msg.turnFailure);
+        msg.message = turnFailureMessage(msg.turnFailure);
         this.appendHistory(session, msg);
         this.persistSession(session);
       }
@@ -2911,6 +2933,11 @@ export class WsBridge {
     // Delegate to the backend adapter if connected; otherwise queue for later flush.
     // For Claude: adapter may exist but WS is disconnected (CLI cycling). Queue at
     // bridge level so handleCLIOpen flushes via adapter.send() after reconnect.
+    if (session.backendAdapter?.isConnected() && HELD_WITH_INPUT_TYPES.has(msg.type) && this.holdingInput(session.id)) {
+      this.enqueuePendingMessage(session, JSON.stringify(msg));
+      this.persistSession(session);
+      return;
+    }
     if (session.backendAdapter?.isConnected()) {
       // Held input stays queued; a control frame (interrupt, permission) still
       // reaches the running process directly.

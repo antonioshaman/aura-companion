@@ -91,7 +91,7 @@ export function LoginPage() {
               <button
                 type="button"
                 onClick={() => setShowToken(!showToken)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-cc-muted hover:text-cc-fg transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-cc-hover"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[11px] text-cc-fg transition-colors cursor-pointer px-2 min-h-[24px] min-w-[24px] rounded hover:bg-cc-border"
                 tabIndex={-1}
               >
                 {showToken ? "Hide" : "Show"}

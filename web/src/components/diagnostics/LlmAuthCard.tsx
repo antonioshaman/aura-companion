@@ -303,7 +303,8 @@ export function LlmAuthView({
           </button>
         </div>
       </div>
-      {notice && <p className="text-[11px] text-cc-warning">{notice}</p>}
+      {/* Mounted empty: a check result appears inside an existing live region (watson P2-4). */}
+      <p role="status" className={notice ? "text-[11px] text-cc-warning" : "sr-only"}>{notice ?? ""}</p>
 
       {status.tag === "loading" && <p className="text-xs text-cc-muted">Loading…</p>}
       {status.tag === "failed" && <p className="text-xs text-cc-error">Source unavailable: the status request failed ({status.message}).</p>}

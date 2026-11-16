@@ -317,6 +317,26 @@ describe("CredentialRenewal — Claude barrier before the rename", () => {
     expect(h.renewal.isHolding("k-late")).toBe(true);
   });
 
+  it("a barrier-stopped session revived while the barrier waits (browser attach → auto-relaunch) is stopped again before the rename (ritchie A2)", async () => {
+    // The revived CLI read the OLD .credentials.json; left running through the
+    // rename it writes its stale refresh over the new sign-in.
+    const h = harness([session("k-idle", "claude"), session("k-busy", "claude", { busy: true })]);
+    const barrier = h.renewal.beforePromote("claude");
+    await settle();
+    expect(h.events).toEqual(["stop:k-idle:marked=true"]);
+    h.byId.get("k-idle")!.alive = true; // auto-relaunch revived it on the old credentials
+    h.byId.get("k-busy")!.busy = false;
+    h.renewal.notePhase("k-busy", "ready");
+    await barrier;
+    expect(h.events).toEqual(["stop:k-idle:marked=true", "stop:k-busy:marked=true", "stop:k-idle:marked=true"]);
+    expect(h.byId.get("k-idle")!.alive).toBe(false);
+    h.promote("claude");
+    await settle();
+    // Relaunched once each onto the new sign-in; the intentional mark is released (not leaked by the second stop).
+    expect(h.relaunch.mock.calls.map((c) => c[0]).sort()).toEqual(["k-busy", "k-idle"]);
+    expect(h.intentional.size).toBe(0);
+  });
+
   it("is a no-op for Codex: sessions write their own copy, never the primary file being replaced", async () => {
     const h = harness([session("c1", "codex"), session("k1", "claude")]);
     await h.renewal.beforePromote("codex");

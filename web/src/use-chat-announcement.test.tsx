@@ -7,6 +7,7 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useChatAnnouncement } from "./use-chat-announcement.js";
 import type { ChatMessage } from "./types.js";
+import { describeTurnFailure } from "../server/auth-status/auth-catalog.js";
 const message = (over: Partial<ChatMessage> = {}): ChatMessage => ({ id: "a", role: "assistant", content: "hello", timestamp: Date.now(), ...over });
 function Feed({ messages, session = "one" }: { messages: ChatMessage[]; session?: string }) {
   const text = useChatAnnouncement(session, messages);
@@ -67,5 +68,19 @@ describe("chat announcements", () => {
     const view = render(<Feed messages={[message({ isStreaming: true })]} />);
     view.rerender(<Feed messages={[message({ streamStatus })]} />);
     expect(screen.getByRole("status").textContent).toContain(streamStatus === "errored" ? "failed" : "interrupted");
+  });
+
+  // watson P2-5: a failed turn (expired sign-in, limit) arrives as a system
+  // card; without this a screen-reader user never hears why or what to do.
+  it("announces a live turn-failure card with its title and action, but not one replayed from history", () => {
+    const failure = { kind: "auth_rejected", provider: "claude", providerMessage: "401" } as const;
+    const card = (id: string): ChatMessage => ({ id, role: "system", content: "x", timestamp: Date.now(), systemVariant: "turn-failure", turnFailure: failure });
+    const view = render(<Feed messages={[]} />);
+    view.rerender(<Feed messages={[card("hist-turn-failure-0")]} />);
+    expect(screen.getByRole("status").textContent).toBe("");
+    view.rerender(<Feed messages={[card("hist-turn-failure-0"), card("live-1")]} />);
+    const text = screen.getByRole("status").textContent ?? "";
+    expect(text.startsWith(`Turn failed: ${describeTurnFailure("auth_rejected", "claude").title}.`)).toBe(true);
+    expect(text.length).toBeGreaterThan(`Turn failed: ${describeTurnFailure("auth_rejected", "claude").title}.`.length);
   });
 });

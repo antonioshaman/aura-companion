@@ -144,6 +144,10 @@ describe("TurnFailureNotice (store-connected)", () => {
     expect(appendMessage).toHaveBeenCalledWith(SID, expect.objectContaining({ role: "user", content: "do the thing" }));
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.getByText("Sent again.")).toBeInTheDocument();
+    // watson P2-4: the clicked button is gone — its replacement is spoken
+    // (status) and holds focus, so keyboard users keep their place.
+    expect(screen.getByRole("status")).toHaveTextContent("Sent again.");
+    expect(screen.getByText("Sent again.")).toHaveFocus();
   });
 
   it("does not offer Retry once a newer user message exists, or while the CLI is disconnected", () => {
@@ -169,6 +173,8 @@ describe("TurnFailureNotice (store-connected)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restart the session" }));
     expect(mockRelaunch).toHaveBeenCalledWith(SID);
     await waitFor(() => expect(screen.getByText("Restart failed: boom")).toBeInTheDocument());
+    // The failure is spoken at once (alert), not left as silent text.
+    expect(screen.getByRole("alert")).toHaveTextContent("Restart failed: boom");
     mockRelaunch.mockResolvedValueOnce({});
     fireEvent.click(screen.getByRole("button", { name: "Restart the session" }));
     await waitFor(() => expect(screen.getByText("Restart requested.")).toBeInTheDocument());

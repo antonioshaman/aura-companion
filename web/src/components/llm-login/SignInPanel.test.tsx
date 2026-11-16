@@ -132,6 +132,30 @@ describe("SignInPanel (presentational)", () => {
     expect(screen.getByText(/4 tries left/)).toBeInTheDocument();
     expect(screen.getByLabelText("Code from the sign-in page")).toHaveValue("not-a-code");
     expect(screen.getByLabelText("Code from the sign-in page")).toHaveAttribute("aria-invalid", "true");
+    // watson P2-3: the refusal is spoken at once (alert), with the tries left.
+    expect(screen.getByRole("alert")).toHaveTextContent(/4 tries left/);
+  });
+
+  it("while a typed code is checked, the focused submit button keeps focus (aria-disabled, not disabled) and a resubmit is ignored", () => {
+    // A `disabled` focused button drops keyboard focus to <body> (watson P2-3/P2-4).
+    const onSubmitCode = vi.fn();
+    const { rerender } = render(
+      <SignInPanel provider="claude" view={loginView(loginAttempt("claude", "awaiting_user"))} now={LOGIN_NOW} onSubmitCode={onSubmitCode} />,
+    );
+    fireEvent.change(screen.getByLabelText("Code from the sign-in page"), { target: { value: `abc#${"Z".repeat(43)}` } });
+    const submit = screen.getByRole("button", { name: "Submit code" });
+    submit.focus();
+    fireEvent.click(submit);
+    expect(onSubmitCode).toHaveBeenCalledTimes(1);
+    rerender(
+      <SignInPanel provider="claude" view={loginView(loginAttempt("claude", "awaiting_user", { submitting: true, version: 3 }))} now={LOGIN_NOW} onSubmitCode={onSubmitCode} />,
+    );
+    const checking = screen.getByRole("button", { name: "Checking…" });
+    expect(checking).not.toBeDisabled();
+    expect(checking).toHaveAttribute("aria-disabled", "true");
+    expect(checking).toHaveFocus();
+    fireEvent.click(checking);
+    expect(onSubmitCode).toHaveBeenCalledTimes(1);
   });
 
   it("while the code is checked the submit button says so and is disabled", () => {
@@ -298,6 +322,9 @@ describe("SignInChip", () => {
       <SignInChip provider="codex" attempt={loginAttempt("codex", "awaiting_user")} onOpen={onOpen} onCancel={onCancel} />,
     );
     expect(screen.getByTestId("sign-in-chip")).toHaveTextContent(/Codex sign-in in progress · until/);
+    // watson P2-2: the chip text is a status region mounted with the chip, so
+    // the later "Signed in" / "failed" change is spoken.
+    expect(screen.getByRole("status")).toHaveTextContent(/Codex sign-in in progress/);
     // The chip never carries the link or the code.
     expect(screen.getByTestId("sign-in-chip")).not.toHaveTextContent(FAKE_DEVICE_CODE);
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));

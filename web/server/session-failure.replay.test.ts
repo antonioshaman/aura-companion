@@ -117,6 +117,17 @@ describe("Claude replay → turnFailure", () => {
     expect(failures(messages).map((f) => f.kind)).toEqual(["network"]);
   });
 
+  it("a turn killed before its result does not leak its auth fact into the next process's first failure (dahl #2)", () => {
+    // Old process (pre-renewal): the assistant frame says authentication_failed,
+    // then the renewal relaunch kills it — no result frame ever arrives.
+    adapter.handleRawMessage(JSON.stringify({ type: "assistant", message: { id: "m1", type: "message", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "Invalid API key · Please run /login" }], stop_reason: "stop_sequence", usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, error: "authentication_failed", uuid: "u1", session_id: "c1" }));
+    // New process on the new sign-in: its first failure is a provider 500.
+    // A leaked auth fact would turn it into "sign in again" right after the renewal.
+    adapter.attachWebSocket(mockSocket("sess-replay"));
+    adapter.handleRawMessage(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error_status: 500, terminal_reason: "api_error", result: "API Error: 500 Internal server error", duration_ms: 10, uuid: "u2", session_id: "c2" }));
+    expect(failures(messages)).toEqual([]);
+  });
+
   it("'version X or newer is required' → cli_outdated", () => {
     adapter.handleRawMessage(JSON.stringify({
       type: "result", subtype: "success", is_error: true, api_error_status: 400, terminal_reason: "api_error",

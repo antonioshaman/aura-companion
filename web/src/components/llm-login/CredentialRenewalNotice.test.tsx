@@ -5,7 +5,7 @@ import "@testing-library/jest-dom";
 import "vitest-axe/extend-expect";
 import { axe } from "vitest-axe";
 import { useStore } from "../../store.js";
-import { CredentialRenewalBanner, CredentialRenewalNotice } from "./CredentialRenewalNotice.js";
+import { CredentialRenewalBanner, CredentialRenewalNotice, SESSION_RECONNECTED_TEXT } from "./CredentialRenewalNotice.js";
 import { describeSessionReconnectFailed, describeSessionReconnecting } from "../../../server/auth-status/auth-catalog.js";
 
 /**
@@ -65,10 +65,29 @@ describe("CredentialRenewalNotice (store-connected)", () => {
     useStore.getState().updateSession(SID, { credential_renewal: { provider: "claude", promotedAt: 5, state: "renewed" } } as never);
     rerender(<CredentialRenewalNotice sessionId={SID} />);
     expect(screen.queryByTestId("credential-renewal-notice")).toBeNull();
+    // ...and the end of the renewal is spoken in the same, already-mounted region.
+    expect(screen.getByRole("status")).toHaveTextContent(SESSION_RECONNECTED_TEXT);
   });
 
-  it("renders nothing without a record", () => {
-    const { container } = render(<CredentialRenewalNotice sessionId="none" />);
-    expect(container).toBeEmptyDOMElement();
+  it("renders no visible notice without a record — only the empty, pre-mounted live region", () => {
+    render(<CredentialRenewalNotice sessionId="none" />);
+    expect(screen.queryByTestId("credential-renewal-notice")).toBeNull();
+    expect(screen.getByTestId("credential-renewal-live")).toBeEmptyDOMElement();
+  });
+
+  // watson P2-6: the region exists BEFORE the first message, so the change
+  // into "Reconnecting…" happens inside it (what screen readers announce).
+  it("the first renewal message appears inside a live region that was mounted empty beforehand", async () => {
+    useStore.getState().addSession({ session_id: SID } as never);
+    const { rerender, container } = render(<CredentialRenewalNotice sessionId={SID} />);
+    const region = screen.getByRole("status");
+    expect(region).toBeEmptyDOMElement();
+    useStore.getState().updateSession(SID, { credential_renewal: { provider: "codex", promotedAt: 5, state: "reconnecting" } } as never);
+    rerender(<CredentialRenewalNotice sessionId={SID} />);
+    expect(screen.getByRole("status")).toBe(region);
+    expect(region).toHaveTextContent(describeSessionReconnecting("codex").title);
+    // One live region only (no nested status inside it).
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

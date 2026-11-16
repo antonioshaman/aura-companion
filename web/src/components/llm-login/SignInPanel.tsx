@@ -34,7 +34,7 @@ import { notePromotedFromStatus } from "./sign-in-restored.js";
 const buttonClass =
   "px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium bg-cc-active text-cc-fg hover:bg-cc-hover cursor-pointer disabled:opacity-50 disabled:cursor-default";
 const primaryClass =
-  "inline-flex items-center px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium btn-primary-aa text-white cursor-pointer disabled:opacity-50 disabled:cursor-default";
+  "inline-flex items-center px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium btn-primary-aa text-white cursor-pointer disabled:opacity-50 disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default";
 const linkButtonClass = "text-xs font-medium link-primary-aa underline underline-offset-2 cursor-pointer";
 
 /** After this long in `starting`, say so (the CLI is slow, not stuck). */
@@ -155,7 +155,15 @@ function ReplyCodeForm({
           aria-invalid={err ? true : undefined}
           className="min-w-0 flex-1 rounded-md border border-cc-border bg-cc-bg px-2 py-1.5 text-xs font-mono-code text-cc-fg"
         />
-        <button type="submit" className={primaryClass} disabled={busy || code.trim() === "" || !onSubmitCode}>
+        {/* aria-disabled while checking, not `disabled`: a disabled focused
+            button drops keyboard focus to <body> (watson P2-3/P2-4); onSubmit
+            already ignores a submit while busy. */}
+        <button
+          type="submit"
+          className={primaryClass}
+          disabled={code.trim() === "" || !onSubmitCode}
+          aria-disabled={busy || undefined}
+        >
           {busy ? "Checking…" : "Submit code"}
         </button>
       </div>
@@ -163,7 +171,9 @@ function ReplyCodeForm({
         Paste the whole code, including the part after “#”.
       </p>
       {err && (
-        <div id={errorId} className="text-xs text-cc-error">
+        // role="alert": a refused code is spoken at once, not only when the
+        // input is focused again (watson P2-3).
+        <div id={errorId} role="alert" className="text-xs text-cc-error">
           <p className="font-medium">{err.title}</p>
           <p>
             {err.detail} {attempt.submissionsLeft > 0 ? `${attempt.submissionsLeft} tries left.` : "No tries left — start again."}
@@ -486,7 +496,9 @@ export function SignInChip({
       data-testid="sign-in-chip"
       className="flex flex-wrap items-center gap-2 rounded-full border border-cc-border bg-cc-card px-3 py-1.5 shadow-lg text-xs text-cc-fg"
     >
-      <span className="tabular-nums">{text}</span>
+      {/* A status region mounted with the chip: once the window is closed to
+          the chip, "Signed in" / "Sign-in failed" is spoken (watson P2-2). */}
+      <span role="status" className="tabular-nums">{text}</span>
       <button ref={openRef} type="button" className={linkButtonClass} onClick={onOpen}>
         {running ? "Continue" : "Show"}
       </button>

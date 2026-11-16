@@ -612,6 +612,12 @@ export class ClaudeAdapter implements IBackendAdapter {
     // A fresh spawn is a fresh classification opportunity — the
     // previous spawn's rate-limit fatality does not carry.
     this.modelFallbackFiredForThisSpawn = false;
+    // Per-turn failure facts belong to the process that produced them: a turn
+    // killed before its `result` (renewal relaunch, drift kill, crash) must
+    // not classify the next process's first failure (dahl #2).
+    this.turnRateLimit = null;
+    this.turnAssistantError = null;
+    this.turnLastRetry = null;
     // A fresh transport by definition cannot be silent yet.
     this.silenceWatchdog.disarm();
     // Baseline the drift detector's "bun freshness" signal to attach

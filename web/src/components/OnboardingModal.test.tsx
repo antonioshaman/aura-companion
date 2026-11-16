@@ -223,7 +223,8 @@ describe("OnboardingModal", () => {
     await waitFor(() => expect(mocks.llmLoginStart).toHaveBeenCalledWith("codex"));
     const panel = await screen.findByTestId("sign-in-panel");
     // Inside the wizard's dialog, not the global host.
-    expect(screen.getByRole("dialog", { name: "Provider setup" })).toContainElement(panel);
+    // The dialog is named by the current step's heading (watson P2-7).
+    expect(screen.getByRole("dialog", { name: "Set up Codex" })).toContainElement(panel);
     await waitFor(() => expect(screen.getByText("ABCD-12345")).toBeInTheDocument());
   });
 
@@ -297,6 +298,35 @@ describe("OnboardingModal", () => {
     await waitFor(() => expect(screen.getByText("Save failed")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Skip"));
     expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
+  });
+
+  // watson P2-7: a step change must tell a screen reader where the user is —
+  // focus lands on the step heading (not mid-content on "Copy command"), the
+  // dialog is named by it, and the step indicator speaks real text.
+  it("each step change focuses the step heading, names the dialog by it and announces 'Step x of y'", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Welcome to Aura Companion" })).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "Welcome to Aura Companion" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Step 1 of 3");
+    await openStep("Claude Code");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Set up Claude Code" })).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "Set up Claude Code" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Step 2 of 3");
+  });
+
+  // watson P2-8: a control that disables itself while saving drops focus to
+  // <body>; the next Tab must come back into the dialog, not reach the app
+  // behind the overlay.
+  it("Tab from outside the dialog (focus fell to <body>) is pulled back into the dialog", async () => {
+    render(<OnboardingModal onComplete={vi.fn()} />);
+    const dialog = screen.getByRole("dialog");
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    (document.activeElement as HTMLElement).blur();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
   });
 
   it("passes accessibility audit", async () => {
