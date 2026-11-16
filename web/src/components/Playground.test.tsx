@@ -70,7 +70,9 @@ describe("Playground accessible names", () => {
     // notice), so their landmarks repeat; in the app each renders once. It is a
     // best-practice rule, not a WCAG criterion.
     expect(await axe(container, { rules: { "landmark-unique": { enabled: false } } })).toHaveNoViolations();
-  }, 60_000);
+    // 180 s: the whole Playground (every SignInPanel state, every card) under
+    // the CI coverage instrumentation took >60 s twice on 2026-11-16 (#467, #469).
+  }, 180_000);
 });
 
 // aura-check uiux.native-alert (baseline 2026-10-28, ruling accepted → fixed):
