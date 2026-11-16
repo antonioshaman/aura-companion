@@ -153,7 +153,7 @@ export type PromotionOutcome =
    * credentials are live but a later step failed — the attempt dir is KEPT
    * (startup recovery needs its staged account data).
    */
-  | { ok: false; reason: Extract<LoginFailureReason, "promotion_failed" | "promotion_incomplete"> };
+  | { ok: false; reason: Extract<LoginFailureReason, "promotion_failed" | "storage_split" | "promotion_incomplete"> };
 
 export interface LoginAttemptsDeps {
   attemptsRoot: string;
@@ -166,6 +166,8 @@ export interface LoginAttemptsDeps {
   serviceEnv: NodeJS.ProcessEnv;
   /** Moves verified credentials in place (credential-promotion.ts). */
   promote: (ctx: PromotionContext) => Promise<PromotionOutcome>;
+  /** Staging and the live credential dir share a filesystem (credential-promotion.ts `sameStorage`); absent = assume yes. */
+  sameStorage?: (provider: ProviderId) => boolean;
   now?: () => number;
   ttlMs?: Partial<Record<ProviderId, number>>;
   readyBudgetMs?: number;
@@ -247,9 +249,11 @@ export class LoginAttempts {
     };
 
     const cliPath = this.deps.resolveCli(provider);
+    // ritchie B4: refuse BEFORE the browser step when the rename can never be
+    // atomic — otherwise the user signs in and only then gets a generic failure.
     const refusal = loginPreflight({
       provider, platform: this.deps.platform, callerUser: this.deps.callerUser, callerUid: this.deps.callerUid, serviceUser: this.deps.serviceUser, cliPath,
-    });
+    }) ?? (this.deps.sameStorage && !this.deps.sameStorage(provider) ? "storage_split" as const : null);
     if (refusal) {
       const failed = reduceLoginAttempt(fresh, { type: "failed", reason: refusal });
       this.last.set(provider, failed);

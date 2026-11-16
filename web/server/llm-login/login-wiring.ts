@@ -6,7 +6,7 @@ import { parseSystemdUnit } from "../auth-status/status-core.js";
 import { log } from "../logger.js";
 import { resolveBinary } from "../path-resolver.js";
 import { getCredentialRenewal } from "../credential-renewal.js";
-import { promoteCredentials, readEpoch, recoverPromotions, type PromotedCredentials, type PromotionDeps } from "./credential-promotion.js";
+import { promoteCredentials, readEpoch, recoverPromotions, sameStorage, type PromotedCredentials, type PromotionDeps } from "./credential-promotion.js";
 import type { PromotionContext, PromotionOutcome } from "./login-attempt.js";
 import { LoginAttempts, sweepOrphanAttempts, type LoginAttemptsDeps } from "./login-attempt.js";
 import { LLM_AUTH_ATTEMPTS_DIR, LLM_AUTH_STATE_DIR } from "./state-dir.js";
@@ -101,6 +101,7 @@ export function serviceLoginAttemptsDeps(over: Partial<LoginAttemptsDeps> = {}):
     serviceUser: parseSystemdUnit(readUnitTexts()).user,
     serviceEnv: process.env,
     promote: (ctx) => promoteAndRenew(ctx, servicePromotionDeps()),
+    sameStorage: (provider) => sameStorage(provider, LLM_AUTH_ATTEMPTS_DIR, process.env),
     ...over,
   };
 }

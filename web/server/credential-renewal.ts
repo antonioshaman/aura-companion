@@ -249,11 +249,27 @@ export class CredentialRenewal {
     // checkpoint 205). The last pass ends synchronously and the promotion
     // renames right after the await — no launch can slip in between.
     for (;;) {
-      const targets = this.deps.listSessions().filter((s) => s.provider === provider && s.alive && !s.archived && !s.containerized && !this.tracked.has(s.sessionId));
+      // A session the barrier already stopped can be alive again: a browser
+      // attach or the keepalive revives it through auto-relaunch on the OLD
+      // credentials. It must be stopped once more before the rename, or it
+      // writes its stale refresh over the new file (ritchie A2).
+      const targets = this.deps.listSessions().filter((s) => {
+        if (s.provider !== provider || !s.alive || s.archived || s.containerized) return false;
+        const t = this.tracked.get(s.sessionId);
+        return !t || t.phase === "stopped";
+      });
       if (targets.length === 0) break;
       const busy: string[] = [];
       for (const s of targets) {
-        this.tracked.set(s.sessionId, { provider, phase: "stopping", ownsStopMark: false, promotedAt: null });
+        const prev = this.tracked.get(s.sessionId);
+        if (prev) {
+          prev.phase = "stopping";
+          log.warn("credential-renewal", "a barrier-stopped session came back before the promotion; stopping it again", {
+            event: "credential_renewal.barrier_revived", provider, sessionId: s.sessionId,
+          });
+        } else {
+          this.tracked.set(s.sessionId, { provider, phase: "stopping", ownsStopMark: false, promotedAt: null });
+        }
         if (this.deps.isBusy(s.sessionId)) busy.push(s.sessionId);
       }
       for (const s of targets) {
@@ -286,7 +302,8 @@ export class CredentialRenewal {
     const t = this.tracked.get(sessionId);
     if (!t) return;
     // EC-52: mark before the kill; released after the relaunch (or the restore).
-    t.ownsStopMark = this.deps.markIntentional(sessionId);
+    // `||`: a second stop of a revived session must not forget the first mark.
+    t.ownsStopMark = this.deps.markIntentional(sessionId) || t.ownsStopMark;
     try {
       await this.deps.stop(sessionId);
     } catch (err) {

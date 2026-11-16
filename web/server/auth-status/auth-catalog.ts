@@ -428,6 +428,12 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
         detail: `The sign-in finished, but the new credentials could not be verified or moved in place. ${unchanged}`,
         action: reloginAction(provider),
       };
+    case "storage_split":
+      return {
+        title: `${name}: sign-in cannot finish with this storage layout`,
+        detail: `Aura's data folder (COMPANION_HOME) and the ${name} credentials folder are on different disks or volumes, so the new sign-in could not be moved in place safely. Put them on the same disk (for example one Docker volume for the home folder), or sign in in the server's Terminal: ${manualSignInLine(provider)}. ${unchanged}`,
+        action: { kind: "none" },
+      };
     case "promotion_incomplete":
       return {
         title: `${name}: new sign-in in place, finishing it failed`,

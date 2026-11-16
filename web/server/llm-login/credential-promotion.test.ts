@@ -14,6 +14,7 @@ import {
   readEpoch,
   readJournal,
   recoverPromotions,
+  sameStorage,
   type PromotionDeps,
 } from "./credential-promotion.js";
 import { STAGING_HOME_DIR, type PromotionContext } from "./login-attempt.js";
@@ -159,10 +160,37 @@ describe("promoteCredentials — success", () => {
     expect(order).toEqual(["barrier:claude:old", "promoted:new"]);
   });
 
-  it("honours CLAUDE_CONFIG_DIR / CODEX_HOME of the service (the paths sessions read)", () => {
+  it("targets the paths sessions read: CLAUDE_CONFIG_DIR for Claude, ~/.codex for Codex even when the service sets CODEX_HOME", () => {
     expect(liveCredentialPaths("claude", { HOME: "/h", CLAUDE_CONFIG_DIR: "/c" })).toEqual({ credentials: "/c/.credentials.json", accountConfig: "/c/.claude.json" });
     expect(liveCredentialPaths("claude", { HOME: "/h" })).toEqual({ credentials: "/h/.claude/.credentials.json", accountConfig: "/h/.claude.json" });
-    expect(liveCredentialPaths("codex", { HOME: "/h", CODEX_HOME: "/x" }).credentials).toBe("/x/auth.json");
+    // ritchie B2: Codex sessions symlink their auth.json from ~/.codex
+    // (getLegacyCodexHome, never CODEX_HOME — codex-home.ts) and the status card
+    // reads ~/.codex too. Promoting into $CODEX_HOME would report success while
+    // every relaunched session kept the old sign-in.
+    expect(liveCredentialPaths("codex", { HOME: "/h", CODEX_HOME: "/x" }).credentials).toBe("/h/.codex/auth.json");
+    expect(liveCredentialPaths("codex", { HOME: "/h" }).credentials).toBe("/h/.codex/auth.json");
+  });
+});
+
+describe("sameStorage (ritchie B4)", () => {
+  // Staging under COMPANION_HOME must share a filesystem with the CLI's
+  // credential dir, or the atomic rename can never succeed.
+  it("is true for two dirs on one filesystem, including a live dir that does not exist yet", () => {
+    const base = mkdtempSync(join(tmpdir(), "same-storage-"));
+    try {
+      expect(sameStorage("codex", join(base, "attempts"), { HOME: join(base, "home") })).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform === "linux")("is false when the live dir resolves to another filesystem (/proc vs the temp dir)", () => {
+    const base = mkdtempSync(join(tmpdir(), "same-storage-"));
+    try {
+      expect(sameStorage("codex", base, { HOME: "/proc" })).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

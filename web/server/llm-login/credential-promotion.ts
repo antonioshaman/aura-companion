@@ -117,10 +117,35 @@ export function liveCredentialPaths(provider: ProviderId, env: NodeJS.ProcessEnv
       return { credentials: join(dir, ".credentials.json"), accountConfig: env.CLAUDE_CONFIG_DIR ? join(dir, ".claude.json") : join(home, ".claude.json") };
     }
     case "codex":
-      return { credentials: join(env.CODEX_HOME || join(home, ".codex"), "auth.json"), accountConfig: null };
+      // Not CODEX_HOME: sessions get their auth.json symlinked from ~/.codex
+      // (codex-home.ts getLegacyCodexHome) and the status card reads ~/.codex,
+      // so that is the one file a sign-in must replace (ritchie B2).
+      return { credentials: join(home, ".codex", "auth.json"), accountConfig: null };
     default:
       return assertNever(provider);
   }
+}
+
+/**
+ * Whether a sign-in staged under `attemptsRoot` can ever be renamed into the
+ * provider's live credential dir: rename(2) is atomic only within one
+ * filesystem. Compares the nearest existing ancestors (the live dir may not
+ * exist yet). Unknown (stat failed) counts as "same" — the promotion's own
+ * check still fails closed (ritchie B4).
+ */
+export function sameStorage(provider: ProviderId, attemptsRoot: string, env: NodeJS.ProcessEnv): boolean {
+  const devOf = (path: string): number | null => {
+    for (let p = path; ; p = dirname(p)) {
+      try {
+        return statSync(p).dev;
+      } catch {
+        if (dirname(p) === p) return null;
+      }
+    }
+  };
+  const a = devOf(attemptsRoot);
+  const b = devOf(dirname(liveCredentialPaths(provider, env).credentials));
+  return a === null || b === null || a === b;
 }
 
 /** The same files inside an attempt's staging home (the runner sets CLAUDE_CONFIG_DIR / CODEX_HOME). */
@@ -326,7 +351,10 @@ export async function promoteCredentials(ctx: PromotionContext, deps: PromotionD
   const liveDir = dirname(live.credentials);
   try {
     mkdirSync(liveDir, { recursive: true, mode: 0o700 });
-    if (statSync(dirname(staged.credentials)).dev !== statSync(liveDir).dev) return fail(provider, "cross_device");
+    if (statSync(dirname(staged.credentials)).dev !== statSync(liveDir).dev) {
+      fail(provider, "cross_device");
+      return { ok: false, reason: "storage_split" };
+    }
   } catch {
     return fail(provider, "live_dir_unavailable");
   }

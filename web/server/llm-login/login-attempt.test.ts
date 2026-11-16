@@ -322,6 +322,15 @@ describe.skipIf(!linux)("LoginAttempts", () => {
     expect((await missing.start("codex")).attempt!.failure).toBe("cli_missing");
   });
 
+  it("refuses before any browser step when staging and the live credential dir are on different filesystems (ritchie B4)", async () => {
+    // Otherwise the user completes the sign-in and only then gets a generic
+    // "could not be put in place": rename(2) cannot cross devices.
+    const r = registry({ codex: "success" }, { sameStorage: () => false });
+    const res = await r.start("codex");
+    expect(res).toMatchObject({ kind: "refused", attempt: { state: "failed", failure: "storage_split" } });
+    expect(attemptDirs()).toEqual([]);
+  });
+
   it("the sentinel is written before the spawn and carries pid + start time after it", async () => {
     const r = registry({ codex: "wait" });
     const a = (await r.start("codex")).attempt!;

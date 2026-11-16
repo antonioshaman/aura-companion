@@ -167,6 +167,7 @@ export function spawnLoginProcess(
     }
 
     let killedByUs = false;
+    let reaped = false;
     let outputCapped = false;
     let escalation: KillEscalation | null = null;
     const sizes = { stdout: 0, stderr: 0 };
@@ -202,6 +203,9 @@ export function spawnLoginProcess(
     // CLI's stdout/stderr keeps the pipes open, so `close` would wait for the
     // very process the sweep must kill (observer review 202 WARN).
     child.on("exit", () => {
+      // Node reaps the leader before emitting `exit`: from here on its PID (and
+      // the group id it named) may be reused by an unrelated process.
+      reaped = true;
       try {
         if (pgid !== undefined) sweepSession(pgid);
       } catch { /* EC-53: /proc read races must not escape an event handler */ }
@@ -229,9 +233,12 @@ export function spawnLoginProcess(
           return true;
         },
         kill(): Promise<LoginExit> {
+          // Already reaped: the exit sweep cleaned the session by /proc membership,
+          // and signalling `-pid` now could hit a group that reused the PID.
+          if (reaped) return exited;
           if (!killedByUs) {
             killedByUs = true;
-            // The group exists while the child (its leader) is unreaped — `close` has not fired.
+            // The group exists while the child (its leader) is unreaped — `exit` has not fired.
             escalation = escalateKill((sig) => process.kill(-pid, sig), graceMs);
           }
           return exited;

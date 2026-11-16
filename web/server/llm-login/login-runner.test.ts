@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginTranscript } from "./login-transcript.js";
 import {
   configDirFor,
@@ -263,6 +263,23 @@ describe.skipIf(!linux)("spawnLoginProcess against the fake CLI", () => {
     const exit = await proc.exited;
     expect(exit).toMatchObject({ exitCode: 1, killedByUs: false });
     await waitFor(() => sessionMembers(proc.pid).length === 0);
+  });
+
+  it("kill() after a natural exit signals nothing: the reaped PID may already name another group (ritchie A1)", async () => {
+    // finalize() calls kill() on every outcome, including a CLI that already
+    // exited. Signalling -pid then (and a SIGKILL 5 s later) could hit an
+    // unrelated process group that reused the PID.
+    const { proc } = await start({ provider: "codex", cliPath: fakeCli("no_network") });
+    await proc.exited;
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const exit = await proc.kill();
+      expect(exit).toMatchObject({ exitCode: 1, killedByUs: false });
+      await new Promise((r) => setTimeout(r, 400)); // past killGraceMs: no armed escalation either
+      expect(killSpy.mock.calls.filter(([pid]) => pid === -proc.pid)).toEqual([]);
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 
   it("a descendant holding the CLI's pipes does not stall the exit: it is swept on exit (observer review 202 WARN)", async () => {

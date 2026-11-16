@@ -6,6 +6,7 @@ import { WsBridge, type CredentialDeliveryGate, type SocketData } from "./ws-bri
 import { SessionStore } from "./session-store.js";
 import { companionBus } from "./event-bus.js";
 import type { TurnFailure } from "./auth-status/auth-types.js";
+import { describeTurnFailure } from "./auth-status/auth-catalog.js";
 
 /**
  * LLM auth task 13 — the bridge side of the credential renewal gate. The
@@ -136,6 +137,21 @@ describe("WsBridge credential gate", () => {
     expect(s.session.pendingMessages).toHaveLength(1);
   });
 
+  it("while holding, set_model / set_permission_mode queue behind the held message and reach the NEW process in order (dahl #6)", () => {
+    // Sent straight through, they would hit the process the renewal is about to
+    // stop, ahead of the held message on the wire.
+    const s = attach("g4c");
+    holding.add("g4c");
+    bridge.handleBrowserMessage(s.browser, JSON.stringify({ type: "user_message", content: "held" }));
+    bridge.handleBrowserMessage(s.browser, JSON.stringify({ type: "set_model", model: "gpt-x" }));
+    bridge.handleBrowserMessage(s.browser, JSON.stringify({ type: "set_permission_mode", mode: "plan" }));
+    expect(s.send).not.toHaveBeenCalled();
+    expect(s.session.pendingMessages.map((raw) => JSON.parse(raw).type)).toEqual(["user_message", "set_model", "set_permission_mode"]);
+    holding.delete("g4c");
+    bridge.releaseHeldMessages("g4c");
+    expect(userTypes(s.send)).toEqual(["user_message", "set_model", "set_permission_mode"]);
+  });
+
   it("no adapter-driven flush (session meta) delivers held input to the old process", () => {
     const s = attach("g4b");
     holding.add("g4b");
@@ -189,6 +205,8 @@ describe("WsBridge credential gate", () => {
     expect(s.send).not.toHaveBeenCalled();
     const last = s.session.messageHistory.at(-1) as any;
     expect(last).toMatchObject({ type: "error", turnFailure: failure });
+    // Same envelope shape as an adapter-built frame: title + provider text.
+    expect(last.message).toBe(`${describeTurnFailure("stale_session_credentials", "codex").title}: Reconnecting with the new sign-in failed: x`);
     expect(typeof last.timestamp).toBe("number");
     // The user's message is still in the chat — Retry re-sends it on click.
     expect(s.session.messageHistory.some((m: any) => m.type === "user_message" && m.content === "lost?")).toBe(true);
@@ -209,6 +227,9 @@ describe("WsBridge credential gate", () => {
     s.emit({ type: "error", message: "x", turnFailure: { kind: "auth_rejected", provider: "codex", providerMessage: "401", credentialsCompared: true } });
     const last = s.session.messageHistory.at(-1) as any;
     expect(last.turnFailure.kind).toBe("stale_session_credentials");
+    // dahl #3: the `message` fallback (old browsers, exports) is rebuilt from
+    // the FINAL kind, so it never says "sign in again" next to a "repeat the turn" card.
+    expect(last.message).toBe(`${describeTurnFailure("stale_session_credentials", "codex").title}: 401`);
   });
 
   it("publishes the renewal record to the session state (replayed in session_init)", () => {

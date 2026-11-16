@@ -330,13 +330,19 @@ export type LoginFailureReason =
   | "unsupported_platform"
   /** The CLI succeeded but the new credentials could not be checked or moved in place. */
   | "promotion_failed"
+  /**
+   * Aura's sign-in staging (under COMPANION_HOME) and the CLI's credential dir
+   * are on different filesystems: the atomic rename can never succeed, so the
+   * sign-in is refused before the browser step (ritchie B4).
+   */
+  | "storage_split"
   /** The new credentials ARE in place, but a later step (account, epoch) failed; finished at the next server start. */
   | "promotion_incomplete";
 
 export const LOGIN_FAILURE_REASONS: readonly LoginFailureReason[] = [
   "code_rejected", "code_format", "attempt_mismatch", "expired", "network", "cli_output_unrecognised",
   "cli_missing", "wrong_service_user", "unsupported_platform", "promotion_failed",
-  "promotion_incomplete",
+  "storage_split", "promotion_incomplete",
 ];
 
 /** The signed-in plan against the owner's optional expectation. `unknown` is never `match`. */
