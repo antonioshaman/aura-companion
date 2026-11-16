@@ -917,7 +917,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     OpenAI API Key (Codex)
                   </label>
                   <p className="text-xs text-cc-muted">
-                    Used to authenticate Codex sessions. You can also use <code className="font-mono-code bg-cc-code-bg px-1 py-0.5 rounded text-cc-code-fg">codex --login</code> for device-based auth.
+                    Used to authenticate Codex sessions. To use your ChatGPT plan instead, sign in from Diagnostics → LLM sign-in (or run <code className="font-mono-code bg-cc-code-bg px-1 py-0.5 rounded text-cc-code-fg">aura-companion auth login codex</code>).
                   </p>
                   <input
                     id="openai-api-key"
