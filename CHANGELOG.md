@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.11.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.10.0...aura-companion-v2.11.0) (2026-11-16)
+
+
+### Features
+
+* **auth:** add the LLM auth status foundation (phase 1a) ([#455](https://github.com/antonioshaman/aura-companion/issues/455)) ([394d91e](https://github.com/antonioshaman/aura-companion/commit/394d91e976b9206817a18085512b33cfc20541ec))
+* **auth:** classify turn failures and clear stale limit banners (phase 1c, tasks 10-13) ([#457](https://github.com/antonioshaman/aura-companion/issues/457)) ([7109319](https://github.com/antonioshaman/aura-companion/commit/7109319dbb12422c2d16370b214c5abd3009f1ec))
+* **auth:** live sessions and council pairs move to a new sign-in without being recreated (phase 2d) ([#463](https://github.com/antonioshaman/aura-companion/issues/463)) ([d71bc77](https://github.com/antonioshaman/aura-companion/commit/d71bc77470e5e92aeea05cd1b79b5b1dff74ee38))
+* **auth:** LLM auth doctor, status/doctor REST and CLI (phase 1b) ([#456](https://github.com/antonioshaman/aura-companion/issues/456)) ([3e74559](https://github.com/antonioshaman/aura-companion/commit/3e74559a8c8565a9d0eefd9e42d5baddff3103b8))
+* **auth:** show turn failures, limit reasons and provider status in the UI (phase 1d, tasks 14-15) ([#458](https://github.com/antonioshaman/aura-companion/issues/458)) ([6a06da0](https://github.com/antonioshaman/aura-companion/commit/6a06da0bcef55ec3265d5d880ac39b4bbf935d19))
+* **auth:** sign-in core — staging, attempts and credential promotion (phase 2a) ([#460](https://github.com/antonioshaman/aura-companion/issues/460)) ([3071550](https://github.com/antonioshaman/aura-companion/commit/307155073383621dea97bfec4b960a08ccb11f60))
+* **auth:** sign-in REST, auth login CLI, plan check and leak canary (phase 2b) ([#461](https://github.com/antonioshaman/aura-companion/issues/461)) ([d895ff1](https://github.com/antonioshaman/aura-companion/commit/d895ff10ea2fd170dd8b117797a7ad93e4176e7c))
+* **auth:** sign-in window, entry points, plan check and "sign-in restored" cards (phase 2c) ([#462](https://github.com/antonioshaman/aura-companion/issues/462)) ([f84f4c6](https://github.com/antonioshaman/aura-companion/commit/f84f4c6a47b74dfc153fcd83cb7daaad9d64b01a))
+
+
+### Bug Fixes
+
+* **auth:** create the CLI config dir before a sign-in — Codex refused a missing CODEX_HOME ([#465](https://github.com/antonioshaman/aura-companion/issues/465)) ([2c22373](https://github.com/antonioshaman/aura-companion/commit/2c223730942e1923945aea464d9446867c5a3c72))
+* **auth:** keep turn-failure cards after reload and align the Codex auth badge (phase 1 follow-ups) ([#459](https://github.com/antonioshaman/aura-companion/issues/459)) ([61c75b3](https://github.com/antonioshaman/aura-companion/commit/61c75b3f2a9b0049bab66df178602c7a51ffa4a8))
+* first-run review P2 batch — sign-in contrast, missing-CLI hint, safer service unit, renewal edge cases ([#469](https://github.com/antonioshaman/aura-companion/issues/469)) ([48e04b5](https://github.com/antonioshaman/aura-companion/commit/48e04b5a725c31b03cea9ab98b1afce74a2f0982))
+* **install:** one install path for Ubuntu, macOS and Windows (WSL2) ([#468](https://github.com/antonioshaman/aura-companion/issues/468)) ([0224aab](https://github.com/antonioshaman/aura-companion/commit/0224aabb6a487717345c0d6b23b537dbb94baa3c))
+* **onboarding:** build the first-run wizard on the in-browser sign-in ([#467](https://github.com/antonioshaman/aura-companion/issues/467)) ([e987c8a](https://github.com/antonioshaman/aura-companion/commit/e987c8a308e452326493ec95dc239f31cc8feb34))
+* **security:** allow the server's own loopback origin and block DNS-rebinding and cross-site requests on the localhost bypass ([#466](https://github.com/antonioshaman/aura-companion/issues/466)) ([accff45](https://github.com/antonioshaman/aura-companion/commit/accff4522af4da06e5a6bb8f10c2408f097addcd))
+* **sessions:** pin session cwd so an agent `cd` cannot split a council pair ([#452](https://github.com/antonioshaman/aura-companion/issues/452)) ([a06354a](https://github.com/antonioshaman/aura-companion/commit/a06354a07c2fd61d140f28a1121d4c475f2bedfe))
+
 ## [2.10.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.9.1...aura-companion-v2.10.0) (2026-11-03)
 
 
