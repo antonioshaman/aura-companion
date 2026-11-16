@@ -145,6 +145,34 @@ jobs:
         working-directory: platform
         run: bun run build
 
+  # Windows users run Aura inside WSL2. On native Windows the CLI must point
+  # them there instead of failing with a bare "unsupported platform": `help`
+  # works, `install` exits 1 with the WSL2 steps.
+  windows-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: CLI help runs
+        shell: bash
+        run: bun web/bin/cli.ts help | grep -q "Usage: companion"
+
+      - name: install prints the WSL2 guide
+        shell: bash
+        run: |
+          set +e
+          out=$(bun web/bin/cli.ts install 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" -eq 1
+          echo "$out" | grep -q "wsl --install -d Ubuntu"
+          echo "$out" | grep -q "bunx aura-companion"
+
   # In-repo council catalog + vendored skills (PLAN-aura-uiux-agent-enrichment
   # Tasks 1-4). verify-catalog.sh is the catalog's own canary gate (P0, C1-C6,
   # C10-C15: inline-panel ban, capability universe, mirrors byte-identical,

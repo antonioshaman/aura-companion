@@ -292,6 +292,24 @@ describe("install", () => {
     await expect(service.install()).rejects.toThrow("process.exit(1)");
   });
 
+  it("prints the WSL2 setup steps on Windows instead of a bare error", async () => {
+    // A Windows user typing `aura-companion install` must get a path forward:
+    // install WSL2, run the server inside Ubuntu, open localhost in the browser.
+    mockPlatform.set("win32");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    vi.resetModules();
+    service = await import("./service.js");
+
+    await expect(service.install()).rejects.toThrow("process.exit(1)");
+    const printed = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("wsl --install -d Ubuntu");
+    expect(printed).toContain("bunx aura-companion");
+    expect(printed).toContain("http://localhost:3456");
+    errSpy.mockRestore();
+  });
+
   it("exits with error if binary not found globally", async () => {
     mockExecSync.mockImplementation((cmd: string) => {
       if (cmd.startsWith("which")) throw new Error("not found");

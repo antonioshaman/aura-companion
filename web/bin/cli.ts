@@ -48,6 +48,15 @@ Options:
 `);
 }
 
+// Native Windows is not a supported host: the agent CLIs, the service manager
+// and the POSIX paths the server uses live in WSL2. Point the user there
+// before they hit a half-working server (the service commands exit with the
+// same guide from service.ts).
+if (process.platform === "win32" && (command === undefined || command === "serve")) {
+  const { WINDOWS_WSL2_GUIDE } = await import("../server/service.js");
+  console.warn(`${WINDOWS_WSL2_GUIDE}\n\nStarting anyway on native Windows — some features may not work.\n`);
+}
+
 switch (command) {
   case "help":
   case "-h":

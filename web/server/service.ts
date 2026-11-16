@@ -37,7 +37,37 @@ const UNIT_PATH = join(SYSTEMD_DIR, UNIT_NAME);
 
 // ─── Platform check ─────────────────────────────────────────────────────────────
 
+/**
+ * Step-by-step guide printed on Windows. Aura Companion runs on Windows through
+ * WSL2 (Ubuntu): the agent CLIs, the background service (systemd) and the
+ * POSIX paths it relies on all live there, and the browser on Windows reaches
+ * http://localhost:3456 through WSL2's localhost forwarding.
+ */
+export const WINDOWS_WSL2_GUIDE = `Aura Companion runs on Windows through WSL2 (Ubuntu). Set it up once:
+
+  1. Open PowerShell as Administrator and run:
+       wsl --install -d Ubuntu
+     Restart Windows if asked, then open "Ubuntu" from the Start menu.
+
+  2. In the Ubuntu window, install Bun, Node.js and an agent CLI:
+       curl -fsSL https://bun.sh/install | bash && source ~/.bashrc
+       sudo apt-get update && sudo apt-get install -y nodejs npm git
+       sudo npm install -g @anthropic-ai/claude-code   # and/or @openai/codex
+
+  3. Start Aura Companion (still in Ubuntu):
+       bunx aura-companion
+
+  4. Open http://localhost:3456 in your Windows browser. The first-run
+     wizard signs you in to Claude Code / Codex.
+
+  To keep it running in the background, run "bunx aura-companion install"
+  inside Ubuntu (needs systemd: https://learn.microsoft.com/windows/wsl/systemd).`;
+
 function ensureSupportedPlatform(): void {
+  if (process.platform === "win32") {
+    console.error(WINDOWS_WSL2_GUIDE);
+    process.exit(1);
+  }
   if (process.platform !== "darwin" && process.platform !== "linux") {
     console.error(
       "Service management is only supported on macOS (launchd) and Linux (systemd).",

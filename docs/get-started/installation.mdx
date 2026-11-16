@@ -5,80 +5,84 @@ description: Install Aura Companion and create your first session
 
 # Installation
 
-## Requirements
+## Quick install (Ubuntu, macOS, Windows)
 
-- [Bun](https://bun.sh) runtime (>= 1.0)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or [Codex](https://github.com/openai/codex) CLI
-- Git
+One path for every machine — your laptop or a server.
 
-Install Bun and at least one agent CLI:
+### 0. Windows only: install WSL2
+
+Aura Companion runs on Windows inside WSL2 (Ubuntu). Open PowerShell **as Administrator**:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Restart Windows if asked, then open **Ubuntu** from the Start menu. Run every following step in that Ubuntu window. Your Windows browser reaches the server at `http://localhost:3456` automatically.
+
+### 1. Install Bun, Node.js and an agent CLI
 
 ```bash
 # Bun
 curl -fsSL https://bun.sh/install | bash
+source ~/.bashrc          # macOS: source ~/.zshrc
 
-# Claude Code
+# Node.js (for npm) — Ubuntu / WSL2, if `npm` is missing
+sudo apt-get update && sudo apt-get install -y nodejs npm git
+
+# Claude Code and/or Codex
 npm install -g @anthropic-ai/claude-code
-
-# Codex (optional)
 npm install -g @openai/codex
 ```
 
-## Authenticate your agent CLI
+On Ubuntu, if `npm install -g` fails with `EACCES`, prefix it with `sudo`.
 
-### Claude Code
+### 2. Start Aura Companion
 
-Run `claude` once and follow the auth prompt. Aura Companion uses whatever credentials the `claude` binary on your `PATH` already has.
+```bash
+bunx aura-companion
+```
 
-### Codex — two auth modes
+### 3. Open the browser and sign in
 
-Codex supports two distinct auth modes — pick one before first run.
+Open [http://localhost:3456](http://localhost:3456). The first-run wizard shows whether each CLI is installed and signed in; click **Sign in to Claude Code** / **Sign in to Codex** and finish the sign-in in the browser. No terminal login is needed. If a CLI is missing, the wizard shows the install command and a **Check again** button.
 
-- **ChatGPT login (recommended if you have a Plus / Pro / Team subscription).** Usage counts against your subscription quota, **not** the per-token OpenAI API bill.
+You can also sign in from a terminal: `bunx aura-companion auth login claude` (or `codex`), and check the result with `bunx aura-companion auth status`.
 
-  ```bash
-  codex login
-  ```
+### 4. Optional: run in the background
 
-  Follow the browser flow. Verify with:
+```bash
+bunx aura-companion install     # launchd (macOS) or systemd --user (Linux, WSL2 with systemd)
+bunx aura-companion status
+```
 
-  ```bash
-  cat ~/.codex/auth.json | grep auth_mode  # → "auth_mode": "chatgpt"
-  ```
+On WSL2 the background service needs systemd enabled — see [Microsoft's guide](https://learn.microsoft.com/windows/wsl/systemd).
 
-- **API key.** Billed per token at OpenAI API rates. Set `OPENAI_API_KEY` in your environment before launching Aura Companion. Use this only if you don't have a ChatGPT subscription or want a separate billing line.
+### Codex: subscription vs API key
 
-  ```bash
-  export OPENAI_API_KEY=sk-...
-  ```
+The wizard's sign-in uses your ChatGPT subscription (Plus / Pro / Team) — usage counts against the subscription, not the per-token API bill. To bill an OpenAI API key instead, open **Advanced: use an OpenAI API key instead** in the wizard, or set `OPENAI_API_KEY` before starting the server. If both exist, the subscription sign-in wins.
 
-If both are present, `auth.json` wins. To switch from API-key to ChatGPT mode after the fact, run `codex login` again — it overwrites `auth.json`.
-
-## Run from source
-
-The fastest way to use Aura Companion's Council Mode and self-learning skills is to clone the repo and run from source:
+## Run from source (contributors)
 
 ```bash
 git clone https://github.com/antonioshaman/aura-companion.git
 cd aura-companion/web
 bun install
-bun run dev
+bun run dev             # http://localhost:5174 with hot reload; backend on :3457
 ```
 
-Open [http://localhost:5174](http://localhost:5174) — Vite dev server with HMR. The backend listens on `:3456`.
-
-For a production-style build served from a single port:
+Production-style build from source:
 
 ```bash
 cd aura-companion/web
-bun install
 bun run build
-bun run start         # serves built UI on http://localhost:3456
+bun run start           # http://localhost:3456
 ```
 
-<Tip>
-The upstream npm package (`the-companion`) does **not** include Aura Companion's Council Mode, 29 skills, or self-learning system. Always use the `git clone` path above to get the full feature set.
-</Tip>
+The `aura-companion` npm package and the source tree ship the same features (Council Mode, skills, self-learning). The upstream `the-companion` package does not.
+
+## On a server (VPS)
+
+Follow steps 1–4 on the server, then allow the address you open it from (next section). For HTTPS behind a reverse proxy or systemd details see [Deploy with systemd on a VPS](/deploy/vps-systemd).
 
 ## Remote access — Origin allowlist (REQUIRED for non-loopback)
 
@@ -127,10 +131,10 @@ For always-on access, register Aura Companion as a systemd unit (Linux) — see 
 ### 1. Start the server
 
 ```bash
-cd aura-companion/web && bun run dev
+bunx aura-companion
 ```
 
-Open [http://localhost:5174](http://localhost:5174) (dev) or [http://localhost:3456](http://localhost:3456) (production build).
+Open [http://localhost:3456](http://localhost:3456) (or [http://localhost:5174](http://localhost:5174) when running `bun run dev` from source).
 
 ### 2. Create a session
 
