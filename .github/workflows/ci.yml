@@ -159,7 +159,8 @@ jobs:
 
       - name: CLI help runs
         shell: bash
-        run: bun web/bin/cli.ts help | grep -q "Usage: companion"
+        run: |
+          bun web/bin/cli.ts help | grep -q "Usage: companion"
 
       - name: install prints the WSL2 guide
         shell: bash
