@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage } from "./types.js";
+import { describeTurnFailure, formatAction } from "../server/auth-status/auth-catalog.js";
 
 const INTERVAL_MS = 1500;
 const MAX_CHARS = 240;
@@ -27,6 +28,17 @@ export function useChatAnnouncement(sessionId: string, messages: ChatMessage[]):
       setAnnouncement("");
     }
     const s = state.current!;
+    // A turn that failed (sign-in expired, limit hit) is a system card, not
+    // assistant prose: say why and what to do, once, when it arrives live
+    // (watson P2-5). History replays (`hist-` ids, or present at mount) stay silent.
+    const failure = messages.find((m) => m.systemVariant === "turn-failure" && m.turnFailure && !s.seen.has(m.id) && !m.id.startsWith("hist-"));
+    if (failure?.turnFailure) {
+      const entry = describeTurnFailure(failure.turnFailure.kind, failure.turnFailure.provider);
+      const action = entry.action.kind === "none" ? "" : ` ${formatAction(entry.action)}`;
+      setAnnouncement(`Turn failed: ${entry.title}.${action}`);
+      s.seen = new Set(messages.map((m) => m.id));
+      return;
+    }
     const latest = [...messages].reverse().find((m) => m.role === "assistant" && !m.parentToolUseId && spokenText(m).trim());
     if (!latest) return;
     const text = spokenText(latest);

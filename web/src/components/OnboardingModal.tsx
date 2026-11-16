@@ -10,6 +10,8 @@ type Step = "welcome" | "claude" | "codex" | "done";
 const STEPS: Step[] = ["welcome", "claude", "codex", "done"];
 
 /** Shared selector for focusable, non-disabled elements (M1 fix) */
+/** The current step's heading: names the dialog and takes focus on each step change. */
+const STEP_HEADING_ID = "onboarding-step-heading";
 const FOCUSABLE_SELECTOR =
   'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
@@ -103,6 +105,15 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
 
+      // Focus fell out of the dialog (a control disabled itself while saving
+      // → <body>): pull it back instead of letting Tab reach the app behind
+      // the overlay (watson P2-8).
+      if (!dialog!.contains(document.activeElement)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+        return;
+      }
+
       if (e.shiftKey) {
         if (document.activeElement === first) {
           e.preventDefault();
@@ -120,9 +131,13 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [handleSkipAll]);
 
-  // Focus the first focusable element whenever the step changes.
+  // On every step change focus the step's heading, so a screen reader reads
+  // where the user is before any control (watson P2-7); the dialog is named
+  // by the same heading.
   useEffect(() => {
-    dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+    const dialog = dialogRef.current;
+    const heading = dialog?.querySelector<HTMLElement>(`#${STEP_HEADING_ID}`);
+    (heading ?? dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR))?.focus();
   }, [step]);
 
   const handleSaveClaude = useCallback(async () => {
@@ -197,7 +212,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Provider setup"
+        aria-labelledby={STEP_HEADING_ID}
         className="w-full max-w-[520px] mx-6"
         style={{
           transform: entered ? "translateY(0)" : "translateY(12px)",
@@ -212,8 +227,9 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           <div
             className="flex items-center gap-1.5 mb-6 justify-center"
             role="status"
-            aria-label={`Step ${stepIndex + 1} of ${STEPS.length - 1}`}
           >
+            {/* Live regions announce content, not aria-label (watson P2-7). */}
+            <span className="sr-only">{`Step ${stepIndex + 1} of ${STEPS.length - 1}`}</span>
             {STEPS.slice(0, 3).map((s, i) => (
               <div
                 key={s}
@@ -340,7 +356,7 @@ function WelcomeStep({
         <div className="text-[10px] uppercase tracking-[0.12em] text-cc-muted font-medium mb-2">
           First time setup
         </div>
-        <h2 className="text-xl font-semibold text-cc-fg leading-tight">
+        <h2 id={STEP_HEADING_ID} tabIndex={-1} className="text-xl font-semibold text-cc-fg leading-tight outline-none">
           Welcome to Aura Companion
         </h2>
         <p className="text-sm text-cc-muted mt-1.5 leading-relaxed">
@@ -469,7 +485,7 @@ function ProviderSetupStep({
     <div className="p-7 pb-6" data-testid={`onboarding-step-${provider}`}>
       <div className="mb-5">
         <div className="text-[10px] uppercase tracking-[0.12em] text-cc-muted font-medium mb-2">{stepLabel}</div>
-        <h2 className="text-xl font-semibold text-cc-fg leading-tight">Set up {name}</h2>
+        <h2 id={STEP_HEADING_ID} tabIndex={-1} className="text-xl font-semibold text-cc-fg leading-tight outline-none">Set up {name}</h2>
         <p className="text-sm text-cc-muted mt-1.5 leading-relaxed">{PROVIDER_PITCH[provider]}</p>
       </div>
 
@@ -661,7 +677,7 @@ function DoneStep({
         )}
       </div>
 
-      <h2 className="text-xl font-semibold text-cc-fg mb-2">
+      <h2 id={STEP_HEADING_ID} tabIndex={-1} className="text-xl font-semibold text-cc-fg mb-2 outline-none">
         {noneConfigured ? "Setup Skipped" : "You're all set!"}
       </h2>
 

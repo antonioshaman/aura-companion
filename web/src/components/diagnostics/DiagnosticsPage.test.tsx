@@ -52,6 +52,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// The page has several status regions (the LLM sign-in card keeps one mounted
+// for its check results), so announcements are looked up among all of them.
 describe("DiagnosticsPage", () => {
   it("renders all cards, has one page announcer, and passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
@@ -87,7 +89,7 @@ describe("DiagnosticsPage", () => {
     mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ inFlight: null, lastRun: { runId: "r7", at: NOW + 50, trigger: "manual" } }));
     fireEvent.click(btn);
     expect(await screen.findByRole("button", { name: "Run analysis now" })).not.toHaveAttribute("aria-disabled");
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Analysis finished: 2 findings."));
+    await waitFor(() => expect(screen.getAllByRole("status").some((el) => el.textContent?.includes("Analysis finished: 2 findings."))).toBe(true));
   });
 
   it("stays 'running…' while the accepted run is still in flight, then settles", async () => {
@@ -120,7 +122,7 @@ describe("DiagnosticsPage", () => {
     mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ decisions: { "got-017": { decision: "keep", ts: Date.now() } } }));
     fireEvent.click(archive);
     expect(await screen.findByText(/kept/)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("got-017: kept."));
+    await waitFor(() => expect(screen.getAllByRole("status").some((el) => el.textContent?.includes("got-017: kept."))).toBe(true));
   });
 
   it("a failed refresh keeps the last good data with a stale note", async () => {

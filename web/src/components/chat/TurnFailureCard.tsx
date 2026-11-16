@@ -64,20 +64,27 @@ function ActionRow({
 }) {
   switch (action.kind) {
     case "retry":
-      if (retry === "sent") return <p className="text-xs text-cc-muted">Sent again.</p>;
+      if (retry === "sent") return <Outcome text="Sent again." />;
       return (
         <button type="button" className={buttonClass} onClick={onRetry} disabled={retry === "unavailable" || !onRetry}>
           {formatAction(action)}
         </button>
       );
     case "restart_session":
-      if (restart.tag === "done") return <p className="text-xs text-cc-muted">Restart requested.</p>;
+      if (restart.tag === "done") return <Outcome text="Restart requested." />;
       return (
         <div className="space-y-1">
-          <button type="button" className={buttonClass} onClick={onRestart} disabled={restart.tag === "pending" || !onRestart}>
+          {/* aria-disabled while pending: `disabled` on the focused button drops focus to <body> (watson P2-4). */}
+          <button
+            type="button"
+            className={buttonClass}
+            onClick={restart.tag === "pending" ? undefined : onRestart}
+            disabled={!onRestart}
+            aria-disabled={restart.tag === "pending" || undefined}
+          >
             {restart.tag === "pending" ? "Restarting…" : formatAction(action)}
           </button>
-          {restart.tag === "failed" && <p className="text-xs text-cc-error">Restart failed: {restart.message}</p>}
+          {restart.tag === "failed" && <p role="alert" className="text-xs text-cc-error">Restart failed: {restart.message}</p>}
         </div>
       );
     case "open_status":
@@ -100,6 +107,26 @@ function ActionRow({
       throw new Error(`unhandled turn-failure action ${JSON.stringify(never)}`);
     }
   }
+}
+
+/**
+ * What replaces a Retry / Restart button once it did its job. Spoken (status),
+ * and it takes focus when the clicked button vanished from under it — else
+ * focus would fall to <body> (watson P2-4).
+ */
+function Outcome({ text }: { text: string }) {
+  return (
+    <p
+      role="status"
+      tabIndex={-1}
+      ref={(el) => {
+        if (el && (document.activeElement === null || document.activeElement === document.body)) el.focus();
+      }}
+      className="text-xs text-cc-muted outline-none"
+    >
+      {text}
+    </p>
+  );
 }
 
 function recoveryEntry(recovery: FailureRecovery, failure: TurnFailure) {

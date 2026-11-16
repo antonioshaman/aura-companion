@@ -108,6 +108,12 @@ describe("pure core", () => {
     it("a blank state → skipped", () => {
       expect(decide([clean, summarizeState(REF, raw({ elements: 0, passNodes: 0 }))], 2, null)).toMatchObject({ status: "skipped", reason: expect.stringMatching(/^blank page/) });
     });
+    // watson P2-11: an unauthenticated scan of #/playground only saw the token
+    // login; its contrast "FAIL" was about the login page, not the Playground.
+    it("a state that only showed the token login → skipped (never pass or fail), even with violations", () => {
+      const gated = summarizeState(REF, raw({ loginGate: true, violations: [VIOLATION] }));
+      expect(decide([clean, gated], 2, null)).toMatchObject({ status: "skipped", reason: expect.stringMatching(/^login page: .*not authenticated/) });
+    });
     it("fewer states than planned → skipped", () => expect(decide([clean], 2, null).status).toBe("skipped"));
     it("nothing scanned → skipped", () => expect(decide([], 0, null).status).toBe("skipped"));
   });

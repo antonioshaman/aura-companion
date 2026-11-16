@@ -105,6 +105,8 @@ export interface StateResult {
   violations: Violation[];
   incomplete: ManualCheck[];
   blank: boolean;
+  /** The page was the token login (the scan is not authenticated), not the screen asked for. */
+  loginGate?: boolean;
 }
 
 export interface ScanArtifact {
@@ -133,6 +135,8 @@ export interface RawAxeState {
   passNodes: number;
   violations: { id: string; impact: string | null; tags: string[]; help: string; helpUrl: string; nodes: { target: unknown[] }[] }[];
   incomplete: { id: string; tags: string[]; help: string; nodes: { target: unknown[] }[] }[];
+  /** The token login form (`#auth-token`) is on the page. Absent in old runs = false. */
+  loginGate?: boolean;
 }
 
 // ─── Pure core ───────────────────────────────────────────────────────────────
@@ -186,7 +190,7 @@ export function summarizeState(state: StateRef, raw: RawAxeState): StateResult {
   // passes document-level rules (html-has-lang, document-title): only rendered
   // boxes show that nothing was drawn.
   const blank = raw.elements === 0 || raw.rendered === 0 || nodesChecked === 0;
-  return { state, elements: raw.elements, rendered: raw.rendered, nodesChecked, violations, incomplete, blank };
+  return { state, elements: raw.elements, rendered: raw.rendered, nodesChecked, violations, incomplete, blank, loginGate: raw.loginGate === true };
 }
 
 /**
@@ -198,6 +202,10 @@ export function decide(states: readonly StateResult[], expected: number, abort: 
   if (abort) return { status: "skipped", reason: abort };
   const blank = states.find((s) => s.blank);
   if (blank) return { status: "skipped", reason: `blank page: ${stateLabel(blank.state)} has ${blank.elements} element(s), ${blank.rendered} with a rendered box, and axe checked ${blank.nodesChecked} node(s)` };
+  // A scan that only saw the token login says nothing about the screen asked
+  // for (council review 2026-11-15, watson P2-11): never a pass or a fail of it.
+  const gated = states.find((s) => s.loginGate);
+  if (gated) return { status: "skipped", reason: `login page: ${stateLabel(gated.state)} showed the token login instead of the app — the scan is not authenticated (scan a loopback server, which signs the browser in by itself)` };
   if (states.length < expected) return { status: "skipped", reason: `only ${states.length} of ${expected} state(s) were scanned` };
   if (states.length === 0) return { status: "skipped", reason: "nothing was scanned" };
   if (states.some((s) => s.violations.length > 0)) return { status: "fail", reason: null };
@@ -405,6 +413,7 @@ export function pageScript(): string {
       return r.width > 0 && r.height > 0; // an empty block <div id="root"> is full-width but 0 px tall
     }).length : 0,
     passNodes: r.passes.reduce((s, v) => s + v.nodes.length, 0),
+    loginGate: document.getElementById("auth-token") !== null,
     violations: r.violations.map(pick),
     incomplete: r.incomplete.map(pick),
   });
