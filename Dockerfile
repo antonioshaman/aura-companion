@@ -12,7 +12,12 @@
 # PATH so shipped skills can run their scripts.
 #
 #   docker build -t aura-companion .
-#   docker run -p 3456:3456 -v aura-home:/home/node aura-companion
+#   docker run -p 3456:3456 -v aura-home:/home/node --stop-timeout 30 aura-companion
+#
+# tini is PID 1: it forwards SIGTERM to the server and reaps orphaned tool
+# subprocesses of the CLIs (bun is not an init). --stop-timeout 30 (compose:
+# stop_grace_period: 30s) gives the graceful shutdown time to stop council
+# pairs and persist state; docker's default 10 s can cut it off.
 #
 # All state (sessions, ~/.companion, CLI logins) lives in /home/node: mount a volume.
 # Sessions run inside this container; Aura's Docker "container sessions" need a
@@ -39,7 +44,7 @@ ARG CLAUDE_CODE_VERSION=2.1.283
 ARG CODEX_VERSION=0.162.1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python-is-python3 git ca-certificates \
+ && apt-get install -y --no-install-recommends python3 python-is-python3 git ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN npm install -g --no-audit --no-fund \
@@ -64,4 +69,5 @@ WORKDIR /home/node
 EXPOSE 3456
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
   CMD ["bun", "-e", "fetch('http://127.0.0.1:3456/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bun", "/opt/aura-companion/bin/cli.ts", "serve"]
