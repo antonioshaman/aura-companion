@@ -5309,6 +5309,40 @@ describe("localhost bypass ignores proxied requests (SEC-S1)", () => {
     expect(await res.json()).toEqual({ ok: false });
   });
 
+  // Council review 2026-11-15 P1 #2: a page on another site, opened in the
+  // local user's browser, can fire a "simple" (text/plain) cross-site POST at
+  // localhost with no preflight. The localhost bypass must not run it.
+  it("localhost bypass refuses a state-changing request carrying a foreign Origin; own/no Origin pass", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      const post = (headers: Record<string, string>) =>
+        app.request("/api/llm-auth/recheck", { method: "POST", headers: { "Content-Type": "text/plain", ...headers }, body: "{}" }, loopbackEnv);
+      expect((await post({ Origin: "https://evil.example" })).status).toBe(403);
+      expect((await post({ Origin: "null" })).status).toBe(403);
+      expect((await post({ Origin: "http://localhost:3456", Host: "localhost:3456" })).status).not.toBe(403);
+      expect((await post({})).status).not.toBe(403);
+      // A cross-site GET cannot read the answer (no CORS) and stays as before.
+      const get = await app.request("/api/sessions", { headers: { Origin: "https://evil.example" } }, loopbackEnv);
+      expect(get.status).toBe(200);
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+  });
+
+  it("DNS rebinding: loopback with a foreign Host gets no token from /auth/auto and no bypass", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      const auto = await app.request("/api/auth/auto", { headers: { Host: "rebind.attacker.test:3456" } }, loopbackEnv);
+      expect(await auto.json()).toEqual({ ok: false });
+      const api = await app.request("/api/sessions", { headers: { Host: "rebind.attacker.test:3456" } }, loopbackEnv);
+      expect(api.status).toBe(401);
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+  });
+
   it("auth middleware: proxied loopback without token -> 401, clean loopback -> passes", async () => {
     const { verifyToken } = await import("./auth-manager.js");
     // No valid token anywhere: only the localhost bypass could let it through.

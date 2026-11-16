@@ -535,7 +535,7 @@ const server = Bun.serve<SocketData>({
     // without an Origin check at upgrade time. CLI socket (subprocess,
     // not browser) is excluded — it carries no Origin header by design.
     const reqOrigin = req.headers.get("origin");
-    const originOk = isOriginAllowed({ origin: reqOrigin, localhost: isLocalhost });
+    const originOk = isOriginAllowed({ origin: reqOrigin, localhost: isLocalhost, requestHost: req.headers.get("host") });
     const getRequestCookie = (name: string): string | null => {
       const cookieHeader = req.headers.get("cookie");
       if (!cookieHeader) return null;

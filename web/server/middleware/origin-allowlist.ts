@@ -54,6 +54,31 @@ export interface OriginCheckOptions {
    * set so the assertion is hermetic across machines.
    */
   allowedOriginsOverride?: ReadonlySet<string>;
+  /**
+   * The request's Host header. A loopback caller whose Origin is this
+   * server's own loopback origin (same host:port as Host) is the UI the
+   * server itself served (council review 2026-11-15 P1 #1).
+   */
+  requestHost?: string | null;
+}
+
+function isLoopbackName(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1";
+}
+
+/** Origin is `http(s)://<loopback name>:<port>` and names the same host:port as the request. */
+function isOwnLoopbackOrigin(origin: string, requestHost: string | null | undefined): boolean {
+  if (!requestHost) return false;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (!isLoopbackName(url.hostname)) return false;
+  return url.host.toLowerCase() === requestHost.trim().toLowerCase();
 }
 
 /**
@@ -91,6 +116,10 @@ export function isOriginAllowed(opts: OriginCheckOptions): boolean {
 
   // Rule 3: production-configured allowlist match.
   if (envAllowed.has(origin)) return true;
+
+  // Rule 4: a loopback caller from the UI this server served (its own
+  // loopback origin). Never for a non-loopback caller.
+  if (localhost && isOwnLoopbackOrigin(origin, opts.requestHost)) return true;
 
   return false;
 }

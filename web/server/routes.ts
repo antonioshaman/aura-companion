@@ -80,6 +80,7 @@ import { getServiceAuthStatusCore } from "./auth-status/service-status.js";
 import { getServiceDoctorRunner } from "./auth-status/doctor-service.js";
 import { projectBackendAuthState, registerAuthStatusRoutes, serviceSignInFacts } from "./routes/auth-status-routes.js";
 import { registerLoginRoutes } from "./routes/login-routes.js";
+import { isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { getCredentialRenewal } from "./credential-renewal.js";
 import { getServiceLoginAttempts, startServiceLoginRecovery } from "./llm-login/login-wiring.js";
 import { MAX_CODE_SUBMISSIONS } from "./llm-login/login-attempt.js";
@@ -392,8 +393,20 @@ export function createRoutes(
       return next();
     }
 
-    // Localhost bypass — same machine as the server, always trusted
+    // Localhost bypass — same machine as the server. A browser page from
+    // another site can still send "simple" cross-site POSTs here (no
+    // preflight), so a state-changing request is trusted only without an
+    // Origin (CLI, curl) or from an allowed one, incl. this server's own UI
+    // (council review 2026-11-15 P1 #2).
     if (isLocalhostRequest(c)) {
+      const method = c.req.method.toUpperCase();
+      if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+        const origin = c.req.header("origin");
+        // `Origin: null` = sandboxed iframe / opaque redirect: never trusted.
+        if (origin !== undefined && (origin === "null" || !isOriginAllowed({ origin, localhost: true, requestHost: c.req.header("host") ?? null }))) {
+          return c.json({ error: "origin_not_allowed" }, 403);
+        }
+      }
       return next();
     }
 

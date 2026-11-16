@@ -155,6 +155,34 @@ describe("auth-manager", () => {
       }
     });
 
+    // Council review 2026-11-15 P1 #2 (DNS rebinding): a page from an
+    // attacker domain re-resolved to 127.0.0.1 connects from loopback with
+    // no proxy headers — only its Host header gives it away. A DNS name is
+    // trusted only when configured; loopback names and IP literals cannot be
+    // pointed at this box by an attacker.
+    it("rejects loopback whose Host is a foreign DNS name (DNS rebinding)", () => {
+      for (const host of ["evil.example", "evil.example:3456", "rebind.attacker.test:80"]) {
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ Host: host }))).toBe(false);
+      }
+    });
+
+    it("accepts loopback names, *.localhost, IP literals, no Host, and configured hosts", () => {
+      for (const host of ["localhost", "localhost:3456", "127.0.0.1:3456", "[::1]:3456", "app.localhost:3456", "65.108.82.189:3456", "LOCALHOST:3456"]) {
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ Host: host }))).toBe(true);
+      }
+      expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers())).toBe(true);
+      const prev = process.env.COMPANION_ALLOWED_ORIGIN;
+      process.env.COMPANION_ALLOWED_ORIGIN = "https://aura.example.org, http://box.lan:3456";
+      try {
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ Host: "aura.example.org" }))).toBe(true);
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ Host: "box.lan:3456" }))).toBe(true);
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ Host: "evil.example" }))).toBe(false);
+      } finally {
+        if (prev === undefined) delete process.env.COMPANION_ALLOWED_ORIGIN;
+        else process.env.COMPANION_ALLOWED_ORIGIN = prev;
+      }
+    });
+
     it("rejects loopback carrying any Tailscale-* header", () => {
       for (const h of ["Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-Funnel-Request"]) {
         expect(authManager.isDirectLocalRequest("::1", new Headers({ [h]: "?1" }))).toBe(false);
