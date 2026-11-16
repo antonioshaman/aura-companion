@@ -18,6 +18,27 @@ describe("isOriginAllowed", () => {
     expect(isOriginAllowed({ origin: null, localhost: false })).toBe(false);
   });
 
+  // ── Own origin (council review 2026-11-15 P1 #1) ───────────────────────
+  // A production server serves its UI from its own port; the browser's WS
+  // upgrade carries `Origin: http://localhost:<port>`. Rejecting it broke
+  // every fresh `bunx aura-companion` / `bun run start` / Docker install
+  // ("Connection timeout" after "Session started").
+  it.each([
+    ["http://localhost:3456", "localhost:3456"],
+    ["http://127.0.0.1:3456", "127.0.0.1:3456"],
+    ["http://[::1]:3456", "[::1]:3456"],
+    ["https://localhost:8443", "localhost:8443"],
+  ])("accepts the server's own loopback origin %s when it matches Host", (origin, host) => {
+    expect(isOriginAllowed({ origin, localhost: true, requestHost: host })).toBe(true);
+  });
+
+  it("does not accept a loopback origin for a different port, a non-loopback caller, or a non-loopback name", () => {
+    expect(isOriginAllowed({ origin: "http://localhost:9999", localhost: true, requestHost: "localhost:3456" })).toBe(false);
+    expect(isOriginAllowed({ origin: "http://localhost:3456", localhost: false, requestHost: "localhost:3456" })).toBe(false);
+    expect(isOriginAllowed({ origin: "http://evil.example:3456", localhost: true, requestHost: "evil.example:3456" })).toBe(false);
+    expect(isOriginAllowed({ origin: "http://localhost:3456", localhost: true })).toBe(false);
+  });
+
   // ── Rule 2: dev frontend origins ─────────────────────────────────────────
 
   it.each([

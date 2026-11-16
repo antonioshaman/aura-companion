@@ -82,7 +82,7 @@ The upstream npm package (`the-companion`) does **not** include Aura Companion's
 
 ## Remote access — Origin allowlist (REQUIRED for non-loopback)
 
-Aura Companion gates `/ws/browser`, `/ws/terminal`, and `/ws/novnc` WebSocket upgrades behind an Origin allowlist. **Localhost** (`http://localhost:5173`, `http://localhost:5174`, same-host requests with no `Origin` header) is allowed unconditionally. **Any other origin** — public IP, LAN hostname, tailscale `*.ts.net`, reverse-proxy domain — must be listed in `COMPANION_ALLOWED_ORIGIN`.
+Aura Companion gates `/ws/browser`, `/ws/terminal`, and `/ws/novnc` WebSocket upgrades behind an Origin allowlist. **Localhost** is allowed when the request really comes from this machine: the Vite dev origins (`http://localhost:5173`, `http://localhost:5174`), the page the server itself serves (for example `http://localhost:3456` or `http://127.0.0.1:3456`, matched against the request's `Host`), and same-host requests with no `Origin` header. Local requests whose `Host` header names a foreign domain (DNS rebinding) are refused, and a state-changing request (POST/PUT/DELETE) carrying a foreign `Origin` gets `403`. **Any other origin** — public IP, LAN hostname, tailscale `*.ts.net`, reverse-proxy domain — must be listed in `COMPANION_ALLOWED_ORIGIN`.
 
 If you reach the UI but every session reports `Connection timeout` after `Session started`, this is the cause: the browser WS upgrade is being rejected and the UI's generic banner doesn't say so.
 

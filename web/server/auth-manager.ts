@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -87,6 +88,59 @@ export function verifyToken(candidate: string | null | undefined): boolean {
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const PROXY_HEADERS = ["x-forwarded-for", "forwarded", "x-real-ip"];
 
+/** Hostname part of a Host header value ("[::1]:3456" → "::1", "a.b:80" → "a.b"), lower-cased. */
+export function hostnameOfHostHeader(host: string): string {
+  const h = host.trim().toLowerCase();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    return end === -1 ? h : h.slice(1, end);
+  }
+  const colon = h.lastIndexOf(":");
+  // More than one colon without brackets = a bare IPv6 literal, no port.
+  if (colon !== -1 && h.indexOf(":") === colon) return h.slice(0, colon);
+  return h;
+}
+
+export function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1";
+}
+
+/** Hosts named in COMPANION_ALLOWED_ORIGIN (and COMPANION_ALLOWED_HOSTS), lower-cased hostnames. */
+function configuredHostnames(): Set<string> {
+  const out = new Set<string>();
+  for (const raw of (process.env.COMPANION_ALLOWED_ORIGIN ?? "").split(",")) {
+    const v = raw.trim();
+    if (!v) continue;
+    try {
+      out.add(new URL(v).hostname.toLowerCase().replace(/^\[|\]$/g, ""));
+    } catch {
+      /* not a URL — ignored, as the origin allowlist ignores it */
+    }
+  }
+  for (const raw of (process.env.COMPANION_ALLOWED_HOSTS ?? "").split(",")) {
+    const v = raw.trim();
+    if (v) out.add(hostnameOfHostHeader(v));
+  }
+  return out;
+}
+
+/**
+ * Council review 2026-11-15 P1 #2 — DNS rebinding. A page from an attacker
+ * domain re-resolved to 127.0.0.1 reaches us from loopback with no proxy
+ * headers; only its Host header names the attacker's domain. Loopback names
+ * (`localhost`, `*.localhost`), IP literals and hosts the operator configured
+ * cannot be pointed here by an attacker, so only those keep the localhost
+ * trust. No Host at all (HTTP/1.0 tools) is not a browser and stays trusted.
+ */
+export function isTrustedLocalHost(host: string | null): boolean {
+  if (host === null || host.trim() === "") return true;
+  const name = hostnameOfHostHeader(host);
+  if (isLoopbackHostname(name)) return true;
+  if (isIP(name) !== 0) return true;
+  return configuredHostnames().has(name);
+}
+
 /**
  * True only for a request made directly on this machine: loopback TCP source
  * AND no reverse-proxy markers. A local proxy (Tailscale Funnel/Serve, nginx)
@@ -95,6 +149,7 @@ const PROXY_HEADERS = ["x-forwarded-for", "forwarded", "x-real-ip"];
  */
 export function isDirectLocalRequest(address: string | null | undefined, headers: Headers): boolean {
   if (!address || !LOOPBACK_ADDRESSES.has(address)) return false;
+  if (!isTrustedLocalHost(headers.get("host"))) return false;
   for (const name of PROXY_HEADERS) {
     if (headers.has(name)) return false;
   }
