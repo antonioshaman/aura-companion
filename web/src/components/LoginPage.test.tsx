@@ -51,7 +51,9 @@ describe("LoginPage", () => {
     expect(screen.getByLabelText("Auth Token")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Paste your token here")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
-    expect(screen.getByText(/Scan the QR code/)).toBeInTheDocument();
+    // friedman P2-1: the hint names a command that really prints the token
+    // (the old "server console" / "QR code in Settings" had no token to show).
+    expect(screen.getByText("aura-companion token")).toBeInTheDocument();
   });
 
   it("disables submit button when input is empty", () => {

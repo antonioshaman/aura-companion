@@ -140,3 +140,48 @@ export function apiCors(allowedOriginsOverride?: ReadonlySet<string>): Middlewar
     },
   });
 }
+
+// ── Discoverability (council review 2026-11-15, friedman P2-2) ──────────────
+// A browser on any non-localhost address is refused unless its origin is in
+// COMPANION_ALLOWED_ORIGIN, and the UI only shows "Connection timeout". These
+// say, in the server's own output, which exact line fixes it.
+
+/** The env line that adds `origin` to the current list (kept, comma-joined). */
+export function allowedOriginLine(origin: string, current: string | undefined = process.env.COMPANION_ALLOWED_ORIGIN): string {
+  const list = (current ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!list.includes(origin)) list.push(origin);
+  return `COMPANION_ALLOWED_ORIGIN=${list.join(",")}`;
+}
+
+/**
+ * Startup hint: bound beyond loopback with no allowlist → every remote
+ * browser will be refused. Null when there is nothing to say.
+ */
+export function startupOriginHint(host: string, port: number, current: string | undefined, remoteIps: readonly string[]): string | null {
+  if (isLoopbackName(host)) return null;
+  if ((current ?? "").trim() !== "") return null;
+  const example = remoteIps.length > 0 ? remoteIps.map((ip) => `http://${ip}:${port}`).join(",") : `http://<this-server>:${port}`;
+  return [
+    `  Opening Aura from another machine? Allow its address first, or chats fail with "Connection timeout":`,
+    `    COMPANION_ALLOWED_ORIGIN=${example}   (exact scheme://host:port; then restart)`,
+    `  Links that sign a browser in: aura-companion token`,
+  ].join("\n");
+}
+
+const reportedRefusals = new Set<string>();
+const MAX_REPORTED_REFUSALS = 32;
+
+/**
+ * Once per origin (bounded): the WebSocket upgrade refused this browser's
+ * origin. Returns the log line, or null when already reported / no origin.
+ */
+export function refusedOriginReport(origin: string | null): string | null {
+  if (!origin || reportedRefusals.has(origin) || reportedRefusals.size >= MAX_REPORTED_REFUSALS) return null;
+  reportedRefusals.add(origin);
+  return `Refused a browser from ${origin} (origin not allowed; the UI shows "Connection timeout"). To allow it set ${allowedOriginLine(origin)} and restart.`;
+}
+
+/** Test seam. */
+export function _resetRefusedOriginReportsForTest(): void {
+  reportedRefusals.clear();
+}
