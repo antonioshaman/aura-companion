@@ -688,7 +688,8 @@ const server = Bun.serve<SocketData>({
 getToken();
 console.log(`Server running on http://${host}:${server.port}`);
 console.log();
-console.log(`  Auth token: ${describeTokenSource()} — print it with links: aura-companion token`);
+console.log(`  Auth token: ${describeTokenSource()}`);
+console.log("  Print it with sign-in links: aura-companion token");
 {
   const hint = startupOriginHint(host, server.port ?? 3456, process.env.COMPANION_ALLOWED_ORIGIN, getAllAddresses().filter((a) => a.ip !== "localhost").map((a) => a.ip));
   if (hint) {
