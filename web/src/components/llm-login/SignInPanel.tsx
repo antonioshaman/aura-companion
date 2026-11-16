@@ -34,8 +34,8 @@ import { notePromotedFromStatus } from "./sign-in-restored.js";
 const buttonClass =
   "px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium bg-cc-active text-cc-fg hover:bg-cc-hover cursor-pointer disabled:opacity-50 disabled:cursor-default";
 const primaryClass =
-  "inline-flex items-center px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium bg-cc-primary text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-default";
-const linkButtonClass = "text-xs font-medium text-cc-primary underline underline-offset-2 cursor-pointer";
+  "inline-flex items-center px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium btn-primary-aa text-white cursor-pointer disabled:opacity-50 disabled:cursor-default";
+const linkButtonClass = "text-xs font-medium link-primary-aa underline underline-offset-2 cursor-pointer";
 
 /** After this long in `starting`, say so (the CLI is slow, not stuck). */
 export const SLOW_START_MS = 10_000;
@@ -100,6 +100,7 @@ function RecoveryAction({ action, onStartAgain }: { action: AuthAction; onStartA
         </button>
       );
     case "update_cli":
+    case "install_cli":
     case "run_as_service_user":
     case "run_as_root":
     case "restart_session":

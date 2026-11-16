@@ -235,6 +235,17 @@ describe("generateSystemdUnit", () => {
     expect(unit).not.toContain(MOCK_SERVICE_PATH);
   });
 
+  it("keeps live sessions on restart and stops a crash loop (council H-3)", () => {
+    // Without KillMode=process a `restart` or auto-update SIGTERMs every live
+    // claude/codex child; without StartLimit* a persistent fault spins forever.
+    const unit = service.generateSystemdUnit({ binPath: "/usr/local/bin/aura-companion" });
+    expect(unit).toContain("KillMode=process");
+    expect(unit).toContain("StartLimitBurst=5");
+    expect(unit).toContain("UMask=0077");
+    // The header tells users where their own settings survive a rewrite.
+    expect(unit).toContain("aura-companion.service.d/override.conf");
+  });
+
   it("targets default.target for user service", () => {
     const unit = service.generateSystemdUnit({ binPath: "/usr/local/bin/aura-companion" });
     expect(unit).toContain("WantedBy=default.target");
@@ -728,6 +739,24 @@ describe("start (linux)", () => {
     const updatedContent = readFileSync(unitPath(), "utf-8");
     expect(updatedContent).toContain("SuccessExitStatus=42");
     expect(updatedContent).toContain("Restart=always");
+  });
+
+  it("does not rewrite an up-to-date unit or reload systemd on start", async () => {
+    // A current unit is left byte-for-byte alone: no write, no daemon-reload.
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.startsWith("which")) return "/usr/local/bin/aura-companion\n";
+      if (cmd.startsWith("systemctl")) return "";
+      return "";
+    });
+    await service.install();
+    const before = readFileSync(unitPath(), "utf-8");
+
+    mockExecSync.mockClear();
+    service.refreshServiceDefinition();
+
+    expect(readFileSync(unitPath(), "utf-8")).toBe(before);
+    const reloads = mockExecSync.mock.calls.filter((c) => String(c[0]).includes("daemon-reload"));
+    expect(reloads).toHaveLength(0);
   });
 });
 

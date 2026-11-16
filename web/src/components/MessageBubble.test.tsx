@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { ChatMessage, ContentBlock } from "../types.js";
 
@@ -103,6 +104,22 @@ describe("MessageBubble - result error variants", () => {
     render(<MessageBubble message={msg} />);
     expect(screen.getByTestId("turn-failure-card").getAttribute("data-kind")).toBe("auth_rejected");
     expect(screen.queryByText("Claude rejected the sign-in: 401")).toBeNull();
+  });
+
+  // Council review A2: a tab whose bundle is older than the server can get a
+  // turn-failure kind it does not know. The catalog throws on it; that must
+  // break only this card (section fallback), never the whole chat.
+  it("contains a turn-failure kind from a newer server to this card", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const msg = makeMessage({
+      role: "system",
+      content: "something new",
+      systemVariant: "turn-failure",
+      turnFailure: { kind: "kind_from_the_future", provider: "claude" } as unknown as NonNullable<ChatMessage["turnFailure"]>,
+    });
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByText("Turn failure card failed to load")).toBeTruthy();
+    errSpy.mockRestore();
   });
 
   it("renders the --resume bookkeeping frame as a muted, collapsed note (not an error)", () => {

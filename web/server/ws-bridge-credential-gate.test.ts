@@ -156,6 +156,28 @@ describe("WsBridge credential gate", () => {
     expect(s.session.pendingMessages).toHaveLength(0);
   });
 
+  // Council review dahl #1: a renewal releases the held message right after
+  // the relaunch, while the new CLI is still starting/initializing (Claude
+  // sends system.init only after its first input). The turn must show as
+  // `streaming`, and the later system.init must not demote it to `ready`.
+  it("a message released into a relaunching CLI starts the turn, and system.init keeps it streaming", () => {
+    const s = attach("g5b");
+    holding.add("g5b");
+    bridge.handleBrowserMessage(s.browser, JSON.stringify({ type: "user_message", content: "continue" }));
+    // The renewal relaunch: the old process is gone, the new one is initializing.
+    s.session.stateMachine.transition("terminated", "test_relaunch");
+    s.session.stateMachine.transition("starting", "test_relaunch");
+    s.session.stateMachine.transition("initializing", "test_relaunch");
+    holding.delete("g5b");
+
+    bridge.releaseHeldMessages("g5b");
+    expect(userTypes(s.send)).toEqual(["user_message"]);
+    expect(s.session.stateMachine.phase).toBe("streaming");
+
+    s.emit({ type: "session_init", session: { session_id: "cli-x", model: "m", cwd: "/w" } });
+    expect(s.session.stateMachine.phase).toBe("streaming");
+  });
+
   it("a failed renewal drops held user messages into a history-backed 'repeat this turn' card", () => {
     const s = attach("g6");
     holding.add("g6");

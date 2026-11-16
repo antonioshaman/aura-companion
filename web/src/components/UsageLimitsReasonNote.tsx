@@ -17,14 +17,14 @@ export function UsageLimitsReasonNote({ entry, onRetry }: { entry: CatalogEntry;
   switch (action.kind) {
     case "open_status":
       actionNode = (
-        <a href="#/diagnostics" className="text-[11px] font-medium text-cc-primary underline underline-offset-2">
+        <a href="#/diagnostics" className="text-[11px] font-medium link-primary-aa underline underline-offset-2">
           {formatAction(action)}
         </a>
       );
       break;
     case "retry":
       actionNode = onRetry ? (
-        <button type="button" onClick={onRetry} className="text-[11px] font-medium text-cc-primary underline underline-offset-2 cursor-pointer">
+        <button type="button" onClick={onRetry} className="text-[11px] font-medium link-primary-aa underline underline-offset-2 cursor-pointer">
           {formatAction(action)}
         </button>
       ) : null;
@@ -33,11 +33,12 @@ export function UsageLimitsReasonNote({ entry, onRetry }: { entry: CatalogEntry;
       actionNode = (
         <SignInButton
           provider={action.provider}
-          className="text-[11px] font-medium text-cc-primary underline underline-offset-2 cursor-pointer"
+          className="text-[11px] font-medium link-primary-aa underline underline-offset-2 cursor-pointer"
         />
       );
       break;
     case "update_cli":
+    case "install_cli":
     case "run_as_root":
     case "run_as_service_user":
     case "restart_session":

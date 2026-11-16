@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -346,6 +346,24 @@ describe("mergeClaudeAccount", () => {
     expect(mergeClaudeAccount(staged, live)).toBe(true);
     expect(JSON.parse(readFileSync(live, "utf-8"))).toEqual({ oauthAccount: { emailAddress: "n@example.test" } });
     expect(statSync(live).mode & 0o777).toBe(0o600);
+  });
+
+  // Council review B1: the merge tmp used to be named after the PID and was
+  // not removed when the write failed, so a leftover from a crash (same PID
+  // after restart — always the case for PID 1 in Docker) made every later
+  // Claude sign-in fail with EEXIST. Names are random now and no tmp is left.
+  it("a leftover tmp from an earlier crash does not block the merge, and none is left behind", () => {
+    const staged = join(root, "staged.json");
+    const live = join(root, "live.json");
+    writeFileSync(staged, JSON.stringify({ oauthAccount: { emailAddress: "n@example.test" } }));
+    writeFileSync(live, JSON.stringify({ numStartups: 3 }), { mode: 0o600 });
+    const leftover = `${live}.aura-login-${process.pid}.tmp`;
+    writeFileSync(leftover, "partial");
+
+    expect(mergeClaudeAccount(staged, live)).toBe(true);
+    expect(JSON.parse(readFileSync(live, "utf-8"))).toEqual({ numStartups: 3, oauthAccount: { emailAddress: "n@example.test" } });
+    const tmps = readdirSync(root).filter((n) => n.startsWith("live.json.aura-login-") && join(root, n) !== leftover);
+    expect(tmps).toEqual([]);
   });
 });
 

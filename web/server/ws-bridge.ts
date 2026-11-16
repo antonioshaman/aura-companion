@@ -361,6 +361,14 @@ export class WsBridge {
     this.broadcastToBrowsers(session, { type: "session_update", session: { credential_renewal: record } });
   }
 
+  /** A queued user message delivered to a not-busy CLI puts the session in `streaming`. */
+  private markTurnStartedByQueuedMessage(session: Session): void {
+    const phase = session.stateMachine.phase;
+    if (phase === "ready" || phase === "starting" || phase === "initializing") {
+      session.stateMachine.transition("streaming", "user_message");
+    }
+  }
+
   /** Renewal done: deliver the held input to the (new) process — once. */
   releaseHeldMessages(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -657,6 +665,17 @@ export class WsBridge {
         stateMachine: new SessionStateMachine(p.id, "terminated"),
       };
       session.state.backend_type = session.backendType;
+      // "reconnecting" is only closed by the in-memory renewal tracker, which a
+      // restart wipes; the session comes back on the current sign-in anyway
+      // (boot-resume reads the credential files fresh). Without this the
+      // "reconnecting to the new sign-in" notice stays forever (council B3).
+      if (session.state.credential_renewal?.state === "reconnecting") {
+        session.state.credential_renewal = null;
+        log.info("ws-bridge", "Cleared stale credential renewal after restart", {
+          event: "credential_renewal.cleared_on_restore",
+          sessionId: p.id,
+        });
+      }
       // Archived sessions sit in the in-memory Map until server restart but
       // are not driving any live UI; trim their messageHistory + eventBuffer
       // to bounded retention so a long-uptime host with many archived
@@ -1252,7 +1271,12 @@ export class WsBridge {
         };
         this.refreshGitInfo(session, { notifyPoller: true });
         this.broadcastToBrowsers(session, { type: "session_init", session: session.state });
-        session.stateMachine.transition("ready", "system_init");
+        // Claude emits system.init only after its first input, so a turn may
+        // already be running (a message flushed on connect or released after a
+        // credential renewal). Don't demote that turn to "ready" (dahl #1).
+        if (session.stateMachine.phase !== "streaming") {
+          session.stateMachine.transition("ready", "system_init");
+        }
         this.persistSession(session);
         return;
       }
@@ -1800,7 +1824,7 @@ export class WsBridge {
       for (const raw of queued) {
         try {
           const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          adapter.send(queued_msg);
+          if (adapter.send(queued_msg) && queued_msg.type === "user_message") this.markTurnStartedByQueuedMessage(session);
         } catch {
           console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
         }
@@ -2995,10 +3019,9 @@ export class WsBridge {
 
       const sent = adapter.send(queuedMsg);
       // A queued user message that reaches an idle CLI starts its turn (a
-      // message held by the credential renewal never moved the phase).
-      if (sent && queuedMsg.type === "user_message" && session.stateMachine.phase === "ready") {
-        session.stateMachine.transition("streaming", "user_message");
-      }
+      // message held by the credential renewal never moved the phase). A CLI
+      // fresh from a relaunch is still starting/initializing — that counts.
+      if (sent && queuedMsg.type === "user_message") this.markTurnStartedByQueuedMessage(session);
       if (!sent && RETRYABLE_BACKEND_MESSAGE_TYPES.has(queuedMsg.type)) {
         const remaining = queued.slice(i);
         session.pendingMessages = remaining.concat(session.pendingMessages);

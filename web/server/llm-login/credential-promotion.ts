@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -256,21 +256,30 @@ export function mergeClaudeAccount(stagedConfig: string, liveConfig: string): bo
         return false;
       }
     }
-    const tmp = `${liveConfig}.aura-login-${process.pid}.tmp`;
+    // Random name + unlink on every failure: a tmp left by ENOSPC/EIO or a
+    // kill must never block the next sign-in with EEXIST (the old pid-named
+    // tmp collided whenever the server came back with the same PID, e.g. PID 1
+    // in Docker — council review 2026-11-15, ritchie B1).
+    const tmp = `${liveConfig}.aura-login-${randomBytes(6).toString("hex")}.tmp`;
     const fd = openSync(tmp, "wx", before ? before.mode & 0o777 : 0o600);
+    let renamed = false;
     try {
-      writeSync(fd, JSON.stringify({ ...config, oauthAccount: account }, null, 2));
-      fsyncSync(fd);
+      try {
+        writeSync(fd, JSON.stringify({ ...config, oauthAccount: account }, null, 2));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      const now = statOrNull(liveConfig);
+      const unchanged = (!before && !now) || (before && now && before.ino === now.ino && before.size === now.size && before.mtimeMs === now.mtimeMs);
+      if (!unchanged) continue;
+      renameSync(tmp, liveConfig);
+      renamed = true;
     } finally {
-      closeSync(fd);
+      if (!renamed) {
+        try { unlinkSync(tmp); } catch { /* already gone */ }
+      }
     }
-    const now = statOrNull(liveConfig);
-    const unchanged = (!before && !now) || (before && now && before.ino === now.ino && before.size === now.size && before.mtimeMs === now.mtimeMs);
-    if (!unchanged) {
-      unlinkSync(tmp);
-      continue;
-    }
-    renameSync(tmp, liveConfig);
     fsyncDir(dirname(liveConfig));
     return true;
   }

@@ -161,9 +161,19 @@ export function generateSystemdUnit(opts: UnitOptions): string {
   const port = opts.port ?? DEFAULT_PORT_PROD;
   const home = homedir();
 
-  return `[Unit]
+  // KillMode=process: a restart/auto-update (exit 42) signals only the server,
+  // so live claude/codex sessions survive and are re-attached (the same rule as
+  // docs/architecture/production-deployment.md). StartLimit*: a persistent
+  // fault (port in use, bad env) stops after 5 tries instead of spinning
+  // forever. UMask=0077: session JSON and recordings are private to the user.
+  return `# Managed by aura-companion: rewritten on "start" / "restart".
+# Put your own settings (e.g. Environment=COMPANION_ALLOWED_ORIGIN=...) in
+#   ${SYSTEMD_DIR}/${UNIT_NAME}.d/override.conf
+[Unit]
 Description=Aura Companion - Web UI for Claude Code
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -172,6 +182,9 @@ WorkingDirectory=${home}
 Restart=always
 RestartSec=5
 SuccessExitStatus=42
+KillMode=process
+TimeoutStopSec=30
+UMask=0077
 StandardOutput=append:${STDOUT_LOG}
 StandardError=append:${STDERR_LOG}
 Environment=NODE_ENV=production
@@ -669,6 +682,9 @@ export function refreshServiceDefinition(): void {
     const binPath = resolveBinPath();
     const path = getServicePath();
     const unit = generateSystemdUnit({ binPath, port, path });
+    let current = "";
+    try { current = readFileSync(UNIT_PATH, "utf-8"); } catch { /* rewrite */ }
+    if (current === unit) return;
     writeFileSync(UNIT_PATH, unit, "utf-8");
 
     try {
