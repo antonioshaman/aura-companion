@@ -16,6 +16,15 @@ import { claudeSupportsPluginDir, describeToolkit } from "../skill-exposure.js";
 import { getLegacyCodexHome } from "../codex-home.js";
 import { resolveBinary } from "../path-resolver.js";
 import { applyExpectedPlansPatch, type ExpectedPlans } from "../llm-login/plan-check.js";
+import { log } from "../logger.js";
+import { callerFields, credentialRequestRefusal } from "./credential-guard.js";
+
+/**
+ * Settings fields that decide which account sessions use (they override the
+ * stored sign-in, D5). Changing one is a second "swap the account" route, so
+ * it gets the sign-in routes' guard and an audit line (hunt #4).
+ */
+export const SESSION_CREDENTIAL_FIELDS = ["anthropicApiKey", "claudeCodeOAuthToken", "openaiApiKey"] as const;
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
 function codexModelsCachePath(): string {
@@ -61,6 +70,14 @@ export function registerSettingsRoutes(api: Hono): void {
 
   api.put("/settings", async (c) => {
     const body = await c.req.json().catch(() => ({}));
+    const credentialFields = SESSION_CREDENTIAL_FIELDS.filter((f) => body && typeof body === "object" && (body as Record<string, unknown>)[f] !== undefined);
+    if (credentialFields.length > 0) {
+      const refusal = credentialRequestRefusal(c);
+      if (refusal) {
+        log.warn("settings", "settings.credential_change_refused", { event: "settings.credential_change_refused", fields: credentialFields.join(","), why: refusal.why, ...callerFields(c) });
+        return c.json({ error: refusal.error }, refusal.status);
+      }
+    }
     if (body.anthropicApiKey !== undefined && typeof body.anthropicApiKey !== "string") {
       return c.json({ error: "anthropicApiKey must be a string" }, 400);
     }
@@ -204,6 +221,15 @@ export function registerSettingsRoutes(api: Hono): void {
 
     if (typeof body.linearApiKey === "string") {
       linearCache.clear();
+    }
+
+    // Audit (hunt #4): which credential field was set or cleared, by whom — never the value.
+    for (const field of credentialFields) {
+      const value = (body as Record<string, unknown>)[field];
+      if (typeof value !== "string") continue;
+      log.info("settings", "settings.credential_changed", {
+        event: "settings.credential_changed", field, action: value.trim() === "" ? "cleared" : "set", ...callerFields(c),
+      });
     }
 
     const settings = updateSettings({
