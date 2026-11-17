@@ -1,8 +1,7 @@
 import { userInfo } from "node:os";
 import { recordCodexLoginEvidence } from "../auth-status/codex-provider-evidence.js";
 import { codexTokenFingerprintAt } from "../auth-status/credential-locator.js";
-import { getServiceAuthStatusCore, probeStagedCredentials, readUnitTexts } from "../auth-status/service-status.js";
-import { parseSystemdUnit } from "../auth-status/status-core.js";
+import { getServiceAuthStatusCore, probeStagedCredentials, serviceUnitUser } from "../auth-status/service-status.js";
 import { log } from "../logger.js";
 import { resolveBinary } from "../path-resolver.js";
 import { getCredentialRenewal } from "../credential-renewal.js";
@@ -51,7 +50,16 @@ export function servicePromotionDeps(over: Partial<PromotionDeps> = {}): Promoti
     codexTokenFingerprint: codexTokenFingerprintAt,
     // D1 barrier: live Claude writers are stopped before the rename (Codex: no-op).
     beforePromote: async (provider) => {
-      await getCredentialRenewal()?.beforePromote(provider);
+      const renewal = getCredentialRenewal();
+      // fowler #4: a missing renewal silently skips the Claude barrier (live
+      // processes could overwrite the new sign-in). Never silent: say so.
+      if (!renewal) {
+        log.error("llm-login", "credential renewal not wired — promotion runs WITHOUT the session barrier", {
+          event: "credential_renewal.not_wired", provider,
+        });
+        return;
+      }
+      await renewal.beforePromote(provider);
     },
     noteCredentialsPromoted,
     ...over,
@@ -98,7 +106,7 @@ export function serviceLoginAttemptsDeps(over: Partial<LoginAttemptsDeps> = {}):
     platform: process.platform,
     callerUser: me.username,
     callerUid: process.getuid?.() ?? me.uid,
-    serviceUser: parseSystemdUnit(readUnitTexts()).user,
+    serviceUser: serviceUnitUser(),
     serviceEnv: process.env,
     promote: (ctx) => promoteAndRenew(ctx, servicePromotionDeps()),
     sameStorage: (provider) => sameStorage(provider, LLM_AUTH_ATTEMPTS_DIR, process.env),

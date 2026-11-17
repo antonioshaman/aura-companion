@@ -1840,18 +1840,9 @@ export class WsBridge {
     // so we must send it as soon as the WebSocket is open — NOT wait for
     // system.init (which would create a deadlock for slow-starting sessions
     // like Docker containers where the user message arrives before CLI connects).
-    if (session.pendingMessages.length > 0 && !this.holdingInput(sessionId)) {
-      console.log(`[ws-bridge] Flushing ${session.pendingMessages.length} queued message(s) on CLI connect for session ${sessionId}`);
-      const queued = session.pendingMessages.splice(0);
-      for (const raw of queued) {
-        try {
-          const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          if (adapter.send(queued_msg) && queued_msg.type === "user_message") this.markTurnStartedByQueuedMessage(session);
-        } catch {
-          console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
-        }
-      }
-    }
+    // One delivery choke point (fowler #3): the shared flush owns the
+    // credential-renewal hold, turn start and re-queue on a failed send.
+    this.flushQueuedBrowserMessages(session, adapter, "cli_connect");
 
     return adapter;
   }

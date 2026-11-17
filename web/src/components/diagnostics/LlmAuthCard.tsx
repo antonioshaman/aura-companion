@@ -26,6 +26,7 @@ import {
   verifiedByLabel,
   formatKnown,
   providerLabel,
+  PLAN_MISMATCH_HINT,
 } from "../../../server/auth-status/auth-catalog.js";
 import { ago, dateTime } from "./format.js";
 import { SignInButton, type SignInButtonMode } from "../llm-login/SignInButton.js";
@@ -139,7 +140,7 @@ function PlanControls({
                   Remove the expectation
                 </button>
               </div>
-              <p className="text-[11px] text-cc-muted">Sign out at the provider first, or open the sign-in link in a private window.</p>
+              <p className="text-[11px] text-cc-muted">{PLAN_MISMATCH_HINT}</p>
             </div>
           )}
         </div>
