@@ -416,8 +416,11 @@ describe("SignInHost (store + REST)", () => {
     const banner = await screen.findByTestId("sign-in-elsewhere");
     expect(banner).toHaveTextContent("already in progress");
     expect(within(banner).getByRole("button", { name: "Cancel sign-in" })).toBeInTheDocument();
+    // saarinen S-8: one Cancel at a time — the footer one waits for "Continue here".
+    expect(screen.getAllByRole("button", { name: "Cancel sign-in" })).toHaveLength(1);
     fireEvent.click(within(banner).getByRole("button", { name: "Continue here" }));
     expect(screen.queryByTestId("sign-in-elsewhere")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Cancel sign-in" })).toHaveLength(1);
     expect(screen.getByText(FAKE_DEVICE_CODE)).toBeInTheDocument();
   });
 

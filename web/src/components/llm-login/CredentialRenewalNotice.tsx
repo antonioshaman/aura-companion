@@ -22,9 +22,12 @@ export function CredentialRenewalBanner({ record, live = true }: { record: Crede
       data-state={record.state}
       className={`flex items-start gap-2 px-4 py-2 text-xs ${failed ? "text-cc-warning" : "text-cc-fg"}`}
     >
-      {!failed && (
-        <span aria-hidden="true" className="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-cc-primary motion-safe:animate-pulse" />
-      )}
+      {/* A fixed 8px leading slot in both states, so the text never jumps;
+          a neutral dot for a background system state (saarinen S-13). */}
+      <span
+        aria-hidden="true"
+        className={`mt-1 inline-block h-2 w-2 shrink-0 rounded-full ${failed ? "bg-cc-warning" : "bg-cc-muted motion-safe:animate-pulse"}`}
+      />
       <div className="min-w-0">
         <p className="font-medium">{entry.title}</p>
         <p className="text-cc-muted">{entry.detail}</p>

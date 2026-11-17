@@ -16,3 +16,9 @@ export const secondaryButtonClass = `${base} bg-cc-active text-cc-fg hover:bg-cc
 
 /** Low-weight inline action (chip, notes). */
 export const linkButtonClass = "text-xs font-medium link-primary-aa underline underline-offset-2 cursor-pointer disabled:opacity-50 disabled:cursor-default";
+
+/** Window chrome (Close): same hit area, no fill until hovered (saarinen S-9). */
+export const ghostButtonClass = `${base} text-cc-muted hover:text-cc-fg hover:bg-cc-hover`;
+
+/** A secondary / destructive inline action next to an accent link (saarinen S-15). */
+export const mutedLinkButtonClass = "text-xs font-medium text-cc-muted hover:text-cc-fg underline underline-offset-2 cursor-pointer disabled:opacity-50 disabled:cursor-default";
