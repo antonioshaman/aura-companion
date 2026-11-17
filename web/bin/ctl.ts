@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 /**
  * CLI handler module for `companion` management subcommands.
  * Each subcommand maps 1:1 to a Companion REST API endpoint.
@@ -35,8 +38,24 @@ function stripGlobalFlags(argv: string[]): string[] {
   return result;
 }
 
+/**
+ * The server's own token, when this user has one (~/.companion/auth.json, the
+ * same file the server reads). Routes that change session credentials refuse
+ * the localhost bypass (council review 2026-11-15, hunt #4), so the CLI sends
+ * the token like the browser does. Read only — never generated here.
+ */
+export function authHeaders(env: NodeJS.ProcessEnv = process.env, authFile = join(homedir(), ".companion", "auth.json")): Record<string, string> {
+  if (env.COMPANION_AUTH_TOKEN) return { Authorization: `Bearer ${env.COMPANION_AUTH_TOKEN}` };
+  try {
+    const token = (JSON.parse(readFileSync(authFile, "utf-8")) as { token?: unknown }).token;
+    return typeof token === "string" && token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function apiGet(base: string, path: string): Promise<unknown> {
-  const res = await fetch(`${base}${path}`);
+  const res = await fetch(`${base}${path}`, { headers: authHeaders() });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((body as { error?: string }).error || `HTTP ${res.status}`);
@@ -47,7 +66,7 @@ async function apiGet(base: string, path: string): Promise<unknown> {
 async function apiPost(base: string, path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -60,7 +79,7 @@ async function apiPost(base: string, path: string, body?: unknown): Promise<unkn
 async function apiPut(base: string, path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${base}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -73,7 +92,7 @@ async function apiPut(base: string, path: string, body: unknown): Promise<unknow
 async function apiPatch(base: string, path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${base}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -86,7 +105,7 @@ async function apiPatch(base: string, path: string, body: unknown): Promise<unkn
 async function apiDelete(base: string, path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${base}${path}`, {
     method: "DELETE",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {

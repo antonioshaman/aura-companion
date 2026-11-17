@@ -1,10 +1,8 @@
 import type { Context, Hono, MiddlewareHandler } from "hono";
-import { getCookie } from "hono/cookie";
 import { PROVIDER_IDS, isTerminalLoginState, type ProviderId } from "../auth-status/auth-types.js";
 import { signInSteps, type SessionRenewalCounts } from "../auth-status/auth-catalog.js";
-import { verifyToken } from "../auth-manager.js";
 import { log } from "../logger.js";
-import { isOriginAllowed } from "../middleware/origin-allowlist.js";
+import { callerFields, credentialOriginAllowed, hasAuraToken, isJsonContentType } from "./credential-guard.js";
 import {
   ATTEMPT_ID_PATTERN,
   MAX_REPLY_CODE_LENGTH,
@@ -102,9 +100,7 @@ function isProviderId(value: string): value is ProviderId {
 }
 
 function defaultHasAuraToken(c: Context): boolean {
-  const header = c.req.header("Authorization");
-  const bearer = header?.startsWith("Bearer ") ? header.slice(7) : null;
-  return verifyToken(bearer) || verifyToken(getCookie(c, "companion_auth") ?? null);
+  return hasAuraToken(c);
 }
 
 /**
@@ -114,36 +110,24 @@ function defaultHasAuraToken(c: Context): boolean {
  * allowed; anything else → refused.
  */
 export function loginOriginAllowed(origin: string | undefined, requestUrl: string, allowed?: ReadonlySet<string>): boolean {
-  if (origin === undefined) return true;
-  if (origin === "null") return false;
-  let own: string | null = null;
-  try {
-    own = new URL(requestUrl).origin;
-  } catch {
-    own = null;
-  }
-  if (own !== null && origin === own) return true;
-  return isOriginAllowed({ origin, localhost: false, allowedOriginsOverride: allowed });
+  return credentialOriginAllowed(origin, requestUrl, allowed);
 }
 
-function isJsonContentType(value: string | undefined): boolean {
-  return (value ?? "").split(";")[0].trim().toLowerCase() === "application/json";
-}
 
 function loginGuard(deps: LoginRoutesDeps): MiddlewareHandler {
   const hasToken = deps.hasAuraToken ?? defaultHasAuraToken;
   return async (c, next) => {
     c.header("Cache-Control", "no-store");
     if (!hasToken(c)) {
-      logRoute("refused", { why: "token" });
+      logRoute(c, "refused", { why: "token" });
       return c.json({ error: "unauthorized" }, 401);
     }
     if (!loginOriginAllowed(c.req.header("Origin"), c.req.url, deps.allowedOrigins)) {
-      logRoute("refused", { why: "origin" });
+      logRoute(c, "refused", { why: "origin" });
       return c.json({ error: "origin_not_allowed" }, 403);
     }
     if (c.req.method === "POST" && !isJsonContentType(c.req.header("Content-Type"))) {
-      logRoute("refused", { why: "content_type" });
+      logRoute(c, "refused", { why: "content_type" });
       return c.json({ error: "json_required" }, 415);
     }
     await next();
@@ -152,9 +136,10 @@ function loginGuard(deps: LoginRoutesDeps): MiddlewareHandler {
 }
 
 /** Structured, secret-free (EC-23): provider, 8 chars of the id, state, reason. */
-function logRoute(action: string, fields: Record<string, string | number | undefined>): void {
+function logRoute(c: Context, action: string, fields: Record<string, string | number | undefined>): void {
   const event = `llm_auth.login.${action}`;
-  log.info("llm-login", event, { event, ...fields });
+  // Caller fields (hunt #6): a sign-in or a refusal can be tied to its source.
+  log.info("llm-login", event, { event, ...fields, ...callerFields(c) });
 }
 
 function attemptFields(a: LoginAttempt | null | undefined): Record<string, string | undefined> {
@@ -196,7 +181,7 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
     if (!isProviderId(provider)) return c.json({ error: "unknown provider" }, 400);
     await deps.ready?.();
     const result = await deps.attempts().start(provider);
-    logRoute("start", { ...attemptFields("attempt" in result ? result.attempt : null), provider, result: result.kind });
+    logRoute(c, "start", { ...attemptFields("attempt" in result ? result.attempt : null), provider, result: result.kind });
     switch (result.kind) {
       case "started":
         return c.json({ attempt: view(result.attempt), existing: false }, 201);
@@ -229,7 +214,7 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
     if (!ATTEMPT_ID_PATTERN.test(attemptId)) return c.json({ error: "invalid attempt id" }, 400);
     const current = deps.attempts().current(provider);
     if (!current || current.id !== attemptId) {
-      logRoute("stale_attempt", { provider, attempt: attemptId.slice(0, 8) });
+      logRoute(c, "stale_attempt", { provider, attempt: attemptId.slice(0, 8) });
       return c.json({ error: "attempt_mismatch", attempt: current ? view(current) : null }, 409);
     }
     return { provider, attemptId };
@@ -245,7 +230,7 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
       return c.json({ error: "code must be a non-empty string" }, 400);
     }
     const result = await deps.attempts().submitCode(t.provider, t.attemptId, code);
-    logRoute("code", { ...attemptFields("attempt" in result ? result.attempt : null), provider: t.provider, result: result.kind });
+    logRoute(c, "code", { ...attemptFields("attempt" in result ? result.attempt : null), provider: t.provider, result: result.kind });
     switch (result.kind) {
       case "submitted":
         return c.json({ attempt: view(result.attempt) });
@@ -271,7 +256,7 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
     const t = target(c);
     if (t instanceof Response) return t;
     const a = await deps.attempts().cancel(t.provider, t.attemptId);
-    logRoute("cancel", { ...attemptFields(a), provider: t.provider });
+    logRoute(c, "cancel", { ...attemptFields(a), provider: t.provider });
     return c.json({ attempt: a ? view(a) : null });
   });
 }
