@@ -161,6 +161,13 @@ switch (command) {
     }
     console.log("Tailing logs from ~/.companion/logs/");
     const tail = spawn("tail", ["-f", logFile, errFile], { stdio: "inherit" });
+    // No `tail` (Windows, minimal containers): say so instead of crashing on an unhandled error (ritchie A6).
+    tail.on("error", (err) => {
+      console.error(`Could not run \`tail\` (${(err as NodeJS.ErrnoException).code ?? err.message}). Read the logs directly:`);
+      console.error(`  ${logFile}`);
+      console.error(`  ${errFile}`);
+      process.exit(1);
+    });
     tail.on("exit", () => process.exit(0));
     break;
   }

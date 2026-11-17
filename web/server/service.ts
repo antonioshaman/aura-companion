@@ -1,10 +1,10 @@
 import {
   mkdirSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
   readFileSync,
 } from "node:fs";
+import { writeAtomicText } from "./atomic-write.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -92,6 +92,11 @@ interface PlistOptions {
   path?: string;
 }
 
+/** Paths go into plist XML: `&` or `<` in one would make the plist invalid (ritchie B6). */
+function xmlEscape(value: string): string {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 export function generatePlist(opts: PlistOptions): string {
   const port = opts.port ?? DEFAULT_PORT_PROD;
   const home = homedir();
@@ -105,13 +110,13 @@ export function generatePlist(opts: PlistOptions): string {
 
     <key>ProgramArguments</key>
     <array>
-        <string>${opts.binPath}</string>
+        <string>${xmlEscape(opts.binPath)}</string>
         <string>start</string>
         <string>--foreground</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${home}</string>
+    <string>${xmlEscape(home)}</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -123,10 +128,10 @@ export function generatePlist(opts: PlistOptions): string {
     </dict>
 
     <key>StandardOutPath</key>
-    <string>${STDOUT_LOG}</string>
+    <string>${xmlEscape(STDOUT_LOG)}</string>
 
     <key>StandardErrorPath</key>
-    <string>${STDERR_LOG}</string>
+    <string>${xmlEscape(STDERR_LOG)}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -135,9 +140,9 @@ export function generatePlist(opts: PlistOptions): string {
         <key>PORT</key>
         <string>${port}</string>
         <key>HOME</key>
-        <string>${home}</string>
+        <string>${xmlEscape(home)}</string>
         <key>PATH</key>
-        <string>${opts.path || getServicePath()}</string>
+        <string>${xmlEscape(opts.path || getServicePath())}</string>
     </dict>
 
     <key>ProcessType</key>
@@ -304,7 +309,7 @@ async function installDarwin(opts?: { port?: number }): Promise<void> {
   const path = getServicePath();
   const plist = generatePlist({ binPath, port, path });
   mkdirSync(PLIST_DIR, { recursive: true });
-  writeFileSync(PLIST_PATH, plist, "utf-8");
+  writeAtomicText(PLIST_PATH, plist);
 
   // Load the service
   try {
@@ -344,7 +349,7 @@ async function installLinux(opts?: { port?: number }): Promise<void> {
   const path = getServicePath();
   const unit = generateSystemdUnit({ binPath, port, path });
   mkdirSync(SYSTEMD_DIR, { recursive: true });
-  writeFileSync(UNIT_PATH, unit, "utf-8");
+  writeAtomicText(UNIT_PATH, unit);
 
   // Reload systemd and enable + start the service
   try {
@@ -668,7 +673,7 @@ export function refreshServiceDefinition(): void {
     const binPath = resolveBinPath();
     const path = getServicePath();
     const plist = generatePlist({ binPath, port, path });
-    writeFileSync(installedService.plistPath, plist, "utf-8");
+    writeAtomicText(installedService.plistPath, plist);
   } else if (isLinux()) {
     if (!isSystemdUnitInstalled()) return;
 
@@ -685,7 +690,7 @@ export function refreshServiceDefinition(): void {
     let current = "";
     try { current = readFileSync(UNIT_PATH, "utf-8"); } catch { /* rewrite */ }
     if (current === unit) return;
-    writeFileSync(UNIT_PATH, unit, "utf-8");
+    writeAtomicText(UNIT_PATH, unit);
 
     try {
       systemctlUser("daemon-reload");
