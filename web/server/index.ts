@@ -43,7 +43,7 @@ import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.
 import { authenticateManagedWebSocket, checkCliSocketUpgrade } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
-import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
+import { apiCors, isOriginAllowed, refusedOriginReport, startupOriginHint } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 import { MAX_REQUEST_BODY_BYTES, originalRequest, requestBodyLimit } from "./middleware/body-limit.js";
 
@@ -53,7 +53,7 @@ import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
-import { getToken, verifyToken, isDirectLocalRequest, describeTokenSource } from "./auth-manager.js";
+import { getToken, verifyToken, isDirectLocalRequest, describeTokenSource, getAllAddresses } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -565,6 +565,8 @@ const server = Bun.serve<SocketData>({
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
     if (browserMatch) {
       if (!originOk) {
+        const report = refusedOriginReport(reqOrigin);
+        if (report) appLog.warn("server", report, { event: "ws.origin_refused", origin: reqOrigin });
         return new Response("Forbidden — Origin not allowed", { status: 403 });
       }
       if (managedAuthEnabled) {
@@ -682,11 +684,19 @@ const server = Bun.serve<SocketData>({
 });
 
 // Resolve (and persist on first run) the token, but never print it: show
-// where it lives instead (`bun run generate-token` prints it on demand).
+// where it lives instead (`aura-companion token` prints it and the links on demand).
 getToken();
 console.log(`Server running on http://${host}:${server.port}`);
 console.log();
 console.log(`  Auth token: ${describeTokenSource()}`);
+console.log("  Print it with sign-in links: aura-companion token");
+{
+  const hint = startupOriginHint(host, server.port ?? 3456, process.env.COMPANION_ALLOWED_ORIGIN, getAllAddresses().filter((a) => a.ip !== "localhost").map((a) => a.ip));
+  if (hint) {
+    console.log();
+    console.log(hint);
+  }
+}
 console.log();
 console.log(`  CLI WebSocket:     ws://localhost:${server.port}/ws/cli/:sessionId`);
 console.log(`  Browser WebSocket: ws://localhost:${server.port}/ws/browser/:sessionId`);

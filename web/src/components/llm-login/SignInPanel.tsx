@@ -54,7 +54,7 @@ export function expiryText(expiresAt: number, now: number): string {
 function noticeText(n: LoginNotice): string {
   switch (n.kind) {
     case "unauthorized":
-      return "This browser has no Aura access token, so it cannot sign in. Open Aura with its token link (`aura-companion generate-token` as the service user) and try again.";
+      return "This browser has no Aura access token, so it cannot sign in. Open Aura with its token link (run `aura-companion token` on the server, as the user Aura runs as) and try again.";
     case "forbidden":
       return "This page's address is not allowed to sign in. Add it to COMPANION_ALLOWED_ORIGIN or open Aura at its usual address.";
     case "cooldown":

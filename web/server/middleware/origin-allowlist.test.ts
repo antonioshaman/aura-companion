@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { apiCors, isOriginAllowed } from "./origin-allowlist.js";
+import { _resetRefusedOriginReportsForTest, allowedOriginLine, apiCors, isOriginAllowed, refusedOriginReport, startupOriginHint } from "./origin-allowlist.js";
 
 describe("isOriginAllowed", () => {
   // ── Rule 1: localhost without Origin header (CLI/curl/test) ─────────────
@@ -199,5 +199,42 @@ describe("apiCors", () => {
     const indexSrc = readFileSync(join(here, "..", "index.ts"), "utf8");
     expect(indexSrc).toMatch(/app\.use\("\/api\/\*",\s*apiCors\(\)\)/);
     expect(indexSrc).not.toMatch(/\bcors\(\s*\)/);
+  });
+});
+
+// friedman P2-2: a remote browser refused for its origin only sees
+// "Connection timeout". The server's own output must name the exact fix.
+describe("origin discoverability (friedman P2-2)", () => {
+  it("allowedOriginLine appends the origin to the current list without duplicating it", () => {
+    expect(allowedOriginLine("http://10.0.0.5:3456", "")).toBe("COMPANION_ALLOWED_ORIGIN=http://10.0.0.5:3456");
+    expect(allowedOriginLine("http://10.0.0.5:3456", "https://a.example.test")).toBe("COMPANION_ALLOWED_ORIGIN=https://a.example.test,http://10.0.0.5:3456");
+    expect(allowedOriginLine("https://a.example.test", "https://a.example.test")).toBe("COMPANION_ALLOWED_ORIGIN=https://a.example.test");
+  });
+
+  it("startupOriginHint speaks only when bound beyond loopback with an empty allowlist", () => {
+    expect(startupOriginHint("127.0.0.1", 3456, "", ["10.0.0.5"])).toBeNull();
+    expect(startupOriginHint("localhost", 3456, undefined, [])).toBeNull();
+    expect(startupOriginHint("0.0.0.0", 3456, "https://a.example.test", ["10.0.0.5"])).toBeNull();
+    const hint = startupOriginHint("0.0.0.0", 3456, undefined, ["10.0.0.5", "100.64.0.9"])!;
+    expect(hint).toContain("COMPANION_ALLOWED_ORIGIN=http://10.0.0.5:3456,http://100.64.0.9:3456");
+    expect(hint).toContain("aura-companion token");
+    expect(startupOriginHint("0.0.0.0", 3456, "", [])).toContain("http://<this-server>:3456");
+  });
+
+  it("refusedOriginReport names the origin and the exact line, once per origin", () => {
+    _resetRefusedOriginReportsForTest();
+    const first = refusedOriginReport("http://10.0.0.5:3456");
+    expect(first).toContain("http://10.0.0.5:3456");
+    expect(first).toContain("COMPANION_ALLOWED_ORIGIN=");
+    expect(refusedOriginReport("http://10.0.0.5:3456")).toBeNull();
+    expect(refusedOriginReport(null)).toBeNull();
+    _resetRefusedOriginReportsForTest();
+  });
+
+  it("refusedOriginReport is bounded: a flood of distinct origins cannot grow the log without limit", () => {
+    _resetRefusedOriginReportsForTest();
+    const reported = Array.from({ length: 100 }, (_, i) => refusedOriginReport(`http://10.0.${i}.1:3456`)).filter(Boolean);
+    expect(reported.length).toBe(32);
+    _resetRefusedOriginReportsForTest();
   });
 });
