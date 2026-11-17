@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.12.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.11.0...aura-companion-v2.12.0) (2026-11-17)
+
+
+### Features
+
+* **cli:** aura-companion token prints the token + sign-in links; name the exact COMPANION_ALLOWED_ORIGIN line ([#473](https://github.com/antonioshaman/aura-companion/issues/473)) ([3dd1a38](https://github.com/antonioshaman/aura-companion/commit/3dd1a3885ac33e3afa4681f6355683f86c3dc3ea))
+
+
+### Bug Fixes
+
+* **a11y,llm-auth:** copy results spoken, new-tab link said, keyboard token toggle, Escape described; typed mid-turn phases (review P3) ([#485](https://github.com/antonioshaman/aura-companion/issues/485)) ([2aaf74a](https://github.com/antonioshaman/aura-companion/commit/2aaf74a94b225c66cd40b92293a820ed8bbcd7ad))
+* first-run review P2 batch 2 — sign-in/renewal correctness and screen-reader announcements ([#471](https://github.com/antonioshaman/aura-companion/issues/471)) ([4f4e7af](https://github.com/antonioshaman/aura-companion/commit/4f4e7afeab815c68aeb83b358040c0e7b6a45cd0))
+* **install:** `--port`/`--host` really work, readable install without systemd, honest VPS guide, leaner image build (review) ([#483](https://github.com/antonioshaman/aura-companion/issues/483)) ([69534e3](https://github.com/antonioshaman/aura-companion/commit/69534e32deb8365b38f46dfa5db490e1774aa296))
+* **llm-auth:** honest root refusal and a way out of "sessions use X instead of the sign-in" ([#475](https://github.com/antonioshaman/aura-companion/issues/475)) ([e33902f](https://github.com/antonioshaman/aura-companion/commit/e33902f834a6788fa119bc23fdc61fe8ad8005bc))
+* **llm-auth:** work on current CLI versions — tolerant sign-in transcript, provider check without a proven CLI, honest failure cards ([#480](https://github.com/antonioshaman/aura-companion/issues/480)) ([0888c9a](https://github.com/antonioshaman/aura-companion/commit/0888c9a1fe6e19a2c1e1a67033a1e982610823bf))
+* **protocol:** bounded NDJSON lines, guarded recheck routes, bounded sign-in start, one card per repeated failure ([#481](https://github.com/antonioshaman/aura-companion/issues/481)) ([c3818e6](https://github.com/antonioshaman/aura-companion/commit/c3818e6d3ee1e32ad2d606a54bd27307c6add9b8))
+* **security:** guard + audit the settings fields that swap session credentials; caller identity in sign-in logs ([#476](https://github.com/antonioshaman/aura-companion/issues/476)) ([46fc793](https://github.com/antonioshaman/aura-companion/commit/46fc7933fe9c03f92c2452c4e880fdd47e60c1cb))
+* **service:** durable service files, atomic auth relink, bounded epoch map, readable `logs` failure (review P3) ([#479](https://github.com/antonioshaman/aura-companion/issues/479)) ([e3f8f99](https://github.com/antonioshaman/aura-companion/commit/e3f8f99d2b61e3c866c99964833f24643246c472))
+* **ui:** copy works (or says so) on a plain-HTTP server, no stale fallback flag, failure cards off the token path (review P3) ([#482](https://github.com/antonioshaman/aura-companion/issues/482)) ([4078893](https://github.com/antonioshaman/aura-companion/commit/4078893a3e56a53c97b2ae3aa4cab751691c2556))
+* **ui:** first-run visual review — raised floating surfaces, calmer warnings, one button system, grouped provider column ([#477](https://github.com/antonioshaman/aura-companion/issues/477)) ([670a4b3](https://github.com/antonioshaman/aura-companion/commit/670a4b354ba488333f85acc63c0ca529e6f4abd9))
+* **ui:** sign-in window and failure-card polish (review P3 S-8..S-15) ([#484](https://github.com/antonioshaman/aura-companion/issues/484)) ([09f9c3d](https://github.com/antonioshaman/aura-companion/commit/09f9c3dd6a8859f7e9ababf3f4f170d8b7a8b94d))
+
 ## [2.11.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.10.0...aura-companion-v2.11.0) (2026-11-16)
 
 
