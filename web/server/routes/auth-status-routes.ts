@@ -129,6 +129,16 @@ export function projectBackendAuthState(status: ProviderAuthStatus | null | unde
   return authState ? { ...legacy, authState } : legacy;
 }
 
+/** The page's origin names this server's own Host (the UI the server served). */
+function sameHostOrigin(origin: string | undefined, host: string | undefined): boolean {
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 export function registerAuthStatusRoutes(api: Hono, deps: AuthStatusRoutesDeps): void {
   const home = () => deps.serviceHome ?? process.env.HOME ?? homedir();
 
@@ -147,7 +157,8 @@ export function registerAuthStatusRoutes(api: Hono, deps: AuthStatusRoutesDeps):
   // start provider probes with the service credentials. The recheck routes get
   // the sign-in routes' Origin + JSON-only rule (dahl #9).
   const recheckGuard: MiddlewareHandler = async (c, next) => {
-    if (!credentialOriginAllowed(c.req.header("Origin"), c.req.url)) return c.json({ error: "origin_not_allowed" }, 403);
+    const origin = c.req.header("Origin");
+    if (!credentialOriginAllowed(origin, c.req.url) && !sameHostOrigin(origin, c.req.header("Host"))) return c.json({ error: "origin_not_allowed" }, 403);
     if (!isJsonContentType(c.req.header("Content-Type"))) return c.json({ error: "json_required" }, 415);
     await next();
   };

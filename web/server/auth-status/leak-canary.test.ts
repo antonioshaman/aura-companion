@@ -221,7 +221,8 @@ describe.skipIf(process.platform === "darwin")("leak canary: synthetic credentia
       ["POST", "/llm-auth/doctor/recheck"],
       ["GET", "/llm-auth/doctor"],
     ] as const) {
-      const res = await app.request(path, { method });
+      // POSTs as the UI sends them (the recheck routes are JSON-only, dahl #9).
+      const res = await app.request(path, method === "POST" ? { method, headers: { "Content-Type": "application/json" }, body: "{}" } : { method });
       bodies.push(await res.text());
     }
     // The probes really ran on the synthetic files (otherwise the canary proves nothing).
