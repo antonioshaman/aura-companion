@@ -17,7 +17,7 @@ import {
 } from "../../../server/auth-status/auth-catalog.js";
 import { useLoginAttempt, type LoginAttemptView, type LoginNotice } from "./useLoginAttempt.js";
 import { notePromotedFromStatus } from "./sign-in-restored.js";
-import { linkButtonClass, primaryButtonClass, secondaryButtonClass } from "../ui/buttons.js";
+import { ghostButtonClass, linkButtonClass, mutedLinkButtonClass, primaryButtonClass, secondaryButtonClass } from "../ui/buttons.js";
 import { CopyButton } from "../ui/CopyButton.js";
 
 /**
@@ -139,7 +139,9 @@ function ReplyCodeForm({
             already ignores a submit while busy. */}
         <button
           type="submit"
-          className={primaryButtonClass}
+          // Neutral until there is a code: a disabled primary was the most
+          // coloured element of an empty form (saarinen S-14).
+          className={code.trim() === "" ? secondaryButtonClass : primaryButtonClass}
           disabled={code.trim() === "" || !onSubmitCode}
           aria-disabled={busy || undefined}
         >
@@ -388,11 +390,12 @@ export function SignInPanel({ provider, view, now, status = null, onSubmitCode, 
       data-state={a?.state ?? (view.loaded ? "none" : "loading")}
       className="w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-cc-border bg-cc-elevated p-4 shadow-lg space-y-3"
     >
-      <div className="flex items-start justify-between gap-3">
+      {/* Centred row and a ghost Close: the header is chrome, not an action (saarinen S-9). */}
+      <div className="flex items-center justify-between gap-3">
         <h2 id={headingId} ref={headingRef} tabIndex={-1} className="text-sm font-semibold text-cc-fg outline-none">
           Sign in to {providerLabel(provider)}
         </h2>
-        <button type="button" className={secondaryButtonClass} onClick={onClose} disabled={!onClose}>
+        <button type="button" className={ghostButtonClass} onClick={onClose} disabled={!onClose}>
           Close
         </button>
       </div>
@@ -432,7 +435,8 @@ export function SignInPanel({ provider, view, now, status = null, onSubmitCode, 
       )}
 
       <div className="flex justify-end gap-2 pt-1">
-        {cancellable && (
+        {/* One Cancel at a time: the "already in progress" box has its own (saarinen S-8). */}
+        {cancellable && !(view.existing && running && !ackElsewhere) && (
           <button type="button" className={secondaryButtonClass} onClick={onCancel} disabled={!onCancel || view.pending === "cancel"}>
             {view.pending === "cancel" ? "Cancelling…" : "Cancel sign-in"}
           </button>
@@ -483,7 +487,7 @@ export function SignInChip({
       </button>
       {running ? (
         attempt && (
-          <button type="button" className={linkButtonClass} onClick={onCancel}>
+          <button type="button" className={mutedLinkButtonClass} onClick={onCancel}>
             Cancel sign-in
           </button>
         )

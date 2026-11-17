@@ -191,6 +191,15 @@ describe("TurnFailureNotice (store-connected)", () => {
  */
 describe("sign-in recovery (phase 2c)", () => {
   const authFail: TurnFailure = { kind: "auth_rejected", provider: "claude", providerMessage: "401 Unauthorized" };
+
+  // saarinen S-12: a restored card keeps its history in "Failed earlier"; the
+  // raw provider text (a red-world artefact) is shown only on a live failure.
+  it("shows the raw provider text only while the failure is not recovered", () => {
+    const { rerender } = render(<TurnFailureCard failure={authFail} retry="ready" onRetry={() => {}} />);
+    expect(screen.getByTestId("turn-failure-provider-message")).toHaveTextContent("401 Unauthorized");
+    rerender(<TurnFailureCard failure={authFail} recovery="restored" retry="ready" onRetry={() => {}} />);
+    expect(screen.queryByTestId("turn-failure-provider-message")).toBeNull();
+  });
   const withUser = (fm: ChatMessage) => storeState.messages.set(SID, [{ id: "u1", role: "user", content: "do it", timestamp: 0 }, fm]);
 
   it("the sign_in action opens the sign-in window for that provider", () => {
@@ -268,7 +277,7 @@ describe("sign-in recovery (phase 2c)", () => {
     withUser(fm);
     storeState.sessions = new Map([[SID, { sessionGroupRole: "observer" }]]);
     render(<TurnFailureNotice sessionId={SID} message={fm} />);
-    expect(screen.getByText("observer")).toBeInTheDocument();
+    expect(screen.getByText("Observer")).toBeInTheDocument();
   });
 
   it("retry_needed variant (S3-AC3) and restored are axe-clean for both providers", async () => {

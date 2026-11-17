@@ -181,7 +181,7 @@ export function TurnFailureCard({
           {entry.title}
         </p>
         {observer && (
-          <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-cc-active text-cc-muted">observer</span>
+          <span className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium bg-cc-active text-cc-muted">Observer</span>
         )}
       </div>
       <p className="text-xs text-cc-fg">{entry.detail}</p>
@@ -195,7 +195,9 @@ export function TurnFailureCard({
           ))}
         </ul>
       )}
-      {failure.providerMessage && (
+      {/* A restored / retry card keeps its history in "Failed earlier"; the
+          raw provider text is a red-world artefact there (saarinen S-12). */}
+      {failure.providerMessage && recovery === "none" && (
         <p className="text-[11px] text-cc-muted font-mono-code whitespace-pre-wrap break-words" data-testid="turn-failure-provider-message">
           {failure.providerMessage}
         </p>
