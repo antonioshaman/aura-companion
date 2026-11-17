@@ -14,6 +14,16 @@
 //             codex:  success | no_network | wait | garbage | ignore_term | env | silent
 // The scenario is an argv flag (not env) because the runner passes an env
 // allowlist; tests wrap this file in a per-scenario shell script.
+//
+// Facts mirrored from the real CLIs (evidence in parentheses) — keep this list
+// in sync; anything not listed here is a guess (beck B-1):
+//   - argv is exactly `auth login` / `login --device-auth` (login-runner.ts);
+//   - codex 0.162.1 refuses a missing CODEX_HOME (prod 2026-11-15, #465);
+//   - both CLIs wipe their target credentials at start (PLAN phase 2 "Verified
+//     CLI behaviour 2026-11-14");
+//   - transcripts: fixtures/login-transcripts (captured with an isolated HOME).
+// The opt-in contract test `real-login-cli.e2e.test.ts` (AURA_REAL_CLI_LOGIN_E2E=1)
+// checks the real CLIs reach the same "ready" verdict through spawnLoginProcess.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -28,8 +38,10 @@ const scenario = flag("scenario") ?? "success";
 const FIXTURE_FLAGS = ["--scenario=", "--success-after-ms=", "--marker="];
 const rest = args.filter((a) => !FIXTURE_FLAGS.some((f) => a.startsWith(f)) && !["--grandchild", "--grandchild-inherit", "--echo-code"].includes(a));
 const marker = flag("marker") ?? "";
-const provider = rest[0] === "auth" && rest[1] === "login" ? "claude"
-  : rest[0] === "login" && rest[1] === "--device-auth" ? "codex"
+// EXACT argv only (beck B-1): an extra or misspelled flag must fail here the
+// way it would fail against the real CLI, not pass silently.
+const provider = rest.length === 2 && rest[0] === "auth" && rest[1] === "login" ? "claude"
+  : rest.length === 2 && rest[0] === "login" && rest[1] === "--device-auth" ? "codex"
   : null;
 if (!provider) {
   process.stderr.write(`fake-login-cli: unexpected argv ${JSON.stringify(rest)}\n`);

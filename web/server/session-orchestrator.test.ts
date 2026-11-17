@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // ── Module mocks ────────────────────────────────────────────────────────────
 // Must be declared before any imports that reference them.
@@ -58,6 +58,15 @@ vi.mock("./session-linear-issues.js", () => ({
   removeLinearIssue: vi.fn(),
   getAllLinearIssues: vi.fn(() => ({})),
 }));
+
+// beck B-2: the renewal's epoch read is the one seam the wiring test needs
+// (the real one reads ~/.companion/llm-auth). Default 0 = "never promoted",
+// what every other test in this file already sees.
+const mockCredentialEpoch = vi.hoisted(() => ({ claude: 0, codex: 0 }));
+vi.mock("./credential-renewal.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./credential-renewal.js")>();
+  return { ...actual, currentCredentialEpoch: (p: "claude" | "codex") => mockCredentialEpoch[p] };
+});
 
 vi.mock("./settings-manager.js", () => ({
   getSettings: vi.fn(() => ({
@@ -295,6 +304,50 @@ describe("SessionOrchestrator", () => {
     vi.mocked(containerManager.execInContainerAsync).mockResolvedValue({ exitCode: 0, output: "ok" });
     deps = createDeps();
     orchestrator = new SessionOrchestrator(deps);
+  });
+
+  // ── Credential renewal: production wiring (beck B-2) ───────────────────────
+  // Every renewal test builds fake deps and calls notePhase itself. Here the
+  // REAL orchestrator wires the REAL CredentialRenewal: the bridge's
+  // `session:phase-changed` bus event reaches notePhase, `isBusy` reads the
+  // bridge phase, and the relaunch goes through recovery → launcher.relaunch;
+  // the held input is released only after it.
+  describe("credential renewal wiring (beck B-2)", () => {
+    afterEach(() => {
+      mockCredentialEpoch.claude = 0;
+    });
+
+    it("a session busy at promotion is relaunched when the bridge reports its turn ended, then its held input is released", async () => {
+      const info = { sessionId: "renew-1", backendType: "claude", state: "connected", cwd: "/test", createdAt: 1, credentialEpochAtLaunch: 0 } as any;
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([info]);
+      vi.mocked(deps.launcher.getSession).mockImplementation((id: string) => (id === "renew-1" ? info : undefined));
+      let phase = "streaming";
+      const bridge = deps.wsBridge as any;
+      bridge.getSessionPhase = vi.fn(() => phase);
+      bridge.setCredentialGate = vi.fn();
+      bridge.publishCredentialRenewal = vi.fn();
+      bridge.hasPendingSignInRetry = vi.fn(() => false);
+      const order: string[] = [];
+      bridge.releaseHeldMessages = vi.fn((id: string) => order.push(`release:${id}`));
+      vi.mocked(deps.launcher.relaunch).mockImplementation(async (id: string) => {
+        order.push(`relaunch:${id}`);
+        return { ok: true } as any;
+      });
+      orchestrator.initialize();
+      expect(bridge.setCredentialGate).toHaveBeenCalledWith(orchestrator.getCredentialRenewal());
+
+      mockCredentialEpoch.claude = 1; // a sign-in was promoted
+      orchestrator.getCredentialRenewal().promotionSettled("claude", true, 5_000);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled(); // busy: wait for the turn
+      expect(orchestrator.getCredentialRenewal().isHolding("renew-1")).toBe(true);
+
+      phase = "ready";
+      companionBus.emit("session:phase-changed", { sessionId: "renew-1", from: "streaming", to: "ready", trigger: "turn_completed" } as any);
+      await vi.waitFor(() => expect(order).toContain("release:renew-1"));
+      expect(order.indexOf("relaunch:renew-1")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("relaunch:renew-1")).toBeLessThan(order.indexOf("release:renew-1"));
+    });
   });
 
   // ── Initialization / Event wiring ─────────────────────────────────────────

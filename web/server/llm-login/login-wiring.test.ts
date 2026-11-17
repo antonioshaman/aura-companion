@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { log } from "../logger.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -98,7 +99,12 @@ describe("noteCredentialsPromoted", () => {
 describe("servicePromotionDeps", () => {
   it("routes the barrier to the server's credential renewal (absent → no-op) and lets callers override", async () => {
     const before = servicePromotionDeps();
+    // fowler #4: absent is still a no-op (the promotion is not blocked), but
+    // never silent — a structured error says the barrier was skipped.
+    const errorSpy = vi.spyOn(log, "error").mockImplementation(() => {});
     await expect(before.beforePromote!("claude")).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith("llm-login", expect.any(String), expect.objectContaining({ event: "credential_renewal.not_wired", provider: "claude" }));
+    errorSpy.mockRestore();
     const renewal = { beforePromote: vi.fn(async () => {}) } as unknown as CredentialRenewal;
     setCredentialRenewal(renewal);
     await servicePromotionDeps().beforePromote!("claude");

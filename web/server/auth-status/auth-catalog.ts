@@ -451,6 +451,13 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
   }
 }
 
+/**
+ * How to sign in with another account when the plan does not match. One text
+ * for the sign-in window and the Diagnostics card (fowler #5: the two copies
+ * had already drifted).
+ */
+export const PLAN_MISMATCH_HINT = "Sign out at the provider first, or open the sign-in link in a private window.";
+
 /** `expected` is the owner's setting (null = not set); `actual` the plan the provider reported. */
 export function describePlanCheck(check: PlanCheck, provider: ProviderId, expected: string | null, actual: Known<string>): CatalogEntry {
   const name = providerLabel(provider);

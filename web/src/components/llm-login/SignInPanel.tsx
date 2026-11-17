@@ -13,6 +13,7 @@ import {
   formatKnown,
   providerLabel,
   verifiedByLabel,
+  PLAN_MISMATCH_HINT,
 } from "../../../server/auth-status/auth-catalog.js";
 import { useLoginAttempt, type LoginAttemptView, type LoginNotice } from "./useLoginAttempt.js";
 import { notePromotedFromStatus } from "./sign-in-restored.js";
@@ -285,7 +286,7 @@ function Succeeded({
               <button type="button" className={secondaryButtonClass} onClick={onStartAgain} disabled={!onStartAgain}>
                 Sign in with another account
               </button>
-              <p className="text-[11px] text-cc-muted">Sign out at the provider first, or open the link in a private window.</p>
+              <p className="text-[11px] text-cc-muted">{PLAN_MISMATCH_HINT}</p>
             </div>
           )}
         </div>

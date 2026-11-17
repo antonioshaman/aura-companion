@@ -260,6 +260,14 @@ describe.skipIf(!linux)("spawnLoginProcess against the fake CLI", () => {
     expect(sessionMembers(proc.pid)).toEqual([]);
   });
 
+  // beck B-1: the fake accepts EXACTLY the real argv. An extra flag must fail
+  // like it would against the real CLI, not pass silently.
+  it("the fake CLI refuses argv beyond the real one (strict like the real CLIs)", async () => {
+    const { proc } = await start({ provider: "codex", cliPath: fakeCli("success", ["--unexpected-flag"]) });
+    const exit = await proc.exited;
+    expect(exit.exitCode).toBe(2);
+  });
+
   it("a natural exit sweeps what the CLI left behind in its session", async () => {
     const { proc } = await start({ provider: "codex", cliPath: fakeCli("no_network", ["--grandchild"]) });
     const exit = await proc.exited;

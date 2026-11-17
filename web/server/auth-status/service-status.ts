@@ -1,6 +1,6 @@
 import { accessSync, constants, readdirSync, readFileSync } from "node:fs";
 import { latestCodexLoginEvidence, latestCodexProviderEvidence } from "./codex-provider-evidence.js";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { log } from "../logger.js";
 import { COMPANION_HOME } from "../paths.js";
@@ -11,7 +11,7 @@ import { requestClaudeUsage } from "./claude-usage-request.js";
 import { locateClaudeOAuth, locateCodexAuth, readClaudeOAuthSecret, statMeta } from "./credential-locator.js";
 import { runBoundedProbe } from "./probe-runner.js";
 import { probeClaudeAuth, probeCodexAuth, type CodexProviderEvidence, type ProbeEvent, type ProviderProbeDeps } from "./provider-probes.js";
-import { LAST_CHECK_FILE, StatusCore, resolveServiceIdentity, type CallerInfo } from "./status-core.js";
+import { LAST_CHECK_FILE, StatusCore, parseSystemdUnit, resolveServiceIdentity, type CallerInfo } from "./status-core.js";
 
 /**
  * Production wiring of the status core. Phase 1b's REST routes call
@@ -37,6 +37,37 @@ export function readUnitTexts(unitPath: string = DEFAULT_UNIT_PATH): string[] {
     }
   } catch { /* no drop-in dir */ }
   return texts;
+}
+
+/**
+ * The user unit `aura-companion install` writes (service.ts UNIT_PATH). It has
+ * no `User=` line: it runs as the user whose home it is in.
+ */
+export const USER_UNIT_PATH = join(homedir(), ".config", "systemd", "user", "aura-companion.service");
+
+/**
+ * The installed unit's texts — the system unit if present, else the user unit
+ * (council review 2026-11-15, fowler #2: only the system path was read, so a
+ * unit installed by `aura-companion install` was invisible and the service
+ * user silently fell back to "unknown", switching off the wrong-user check).
+ */
+export function readServiceUnit(paths: { system: string; user: string } = { system: DEFAULT_UNIT_PATH, user: USER_UNIT_PATH }): { texts: string[]; kind: "system" | "user" | null } {
+  const system = readUnitTexts(paths.system);
+  if (system.length > 0) return { texts: system, kind: "system" };
+  const user = readUnitTexts(paths.user);
+  if (user.length > 0) return { texts: user, kind: "user" };
+  return { texts: [], kind: null };
+}
+
+/** The user the installed service runs as; null when no unit is installed (dev) or a system unit names none. */
+export function serviceUnitUser(
+  paths?: { system: string; user: string },
+  owner: () => string = () => userInfo().username,
+): string | null {
+  const unit = readServiceUnit(paths);
+  const named = parseSystemdUnit(unit.texts).user;
+  if (named) return named;
+  return unit.kind === "user" ? owner() : null;
 }
 
 /** Resolve a binary strictly within `env.PATH` (the service's PATH, not ours). */
@@ -75,7 +106,7 @@ export function createAuthStatusCore(opts: CreateAuthStatusCoreOptions): StatusC
   const identity = resolveServiceIdentity({
     isServiceProcess: opts.mode === "service",
     caller,
-    unitTexts: opts.mode === "service" ? [] : opts.unitTexts ?? readUnitTexts(),
+    unitTexts: opts.mode === "service" ? [] : opts.unitTexts ?? readServiceUnit().texts,
   });
 
   const probeDeps = (env: NodeJS.ProcessEnv): ProviderProbeDeps => {

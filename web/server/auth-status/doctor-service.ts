@@ -7,7 +7,7 @@ import { resolveBinary } from "../path-resolver.js";
 import type { DoctorReport } from "./auth-types.js";
 import { doctorExitCode, runDoctorChecks, type DoctorDeps, type DoctorServiceUser, type DoctorStat } from "./doctor-checks.js";
 import { runBoundedProbe } from "./probe-runner.js";
-import { readUnitTexts, resolveInPath } from "./service-status.js";
+import { readServiceUnit, resolveInPath } from "./service-status.js";
 import { RECHECK_MIN_INTERVAL_MS, resolveServiceIdentity } from "./status-core.js";
 
 /**
@@ -89,7 +89,7 @@ export function createDoctorDeps(opts: CreateDoctorDepsOptions): DoctorDeps {
     const identity = resolveServiceIdentity({
       isServiceProcess: false,
       caller: { uid: callerUid, username: me.username, env: process.env },
-      unitTexts: opts.unitTexts ?? readUnitTexts(),
+      unitTexts: opts.unitTexts ?? readServiceUnit().texts,
     });
     const entry = identity.user ? passwd.find((e) => e.name === identity.user) : undefined;
     const name = identity.user ?? me.username;
