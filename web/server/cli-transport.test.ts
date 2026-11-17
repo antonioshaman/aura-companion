@@ -230,3 +230,25 @@ describe("pumpStdoutLines", () => {
     expect(out.join("")).toBe('{"t":"привет"}\n');
   });
 });
+
+// dahl #10: an unterminated line was unbounded and re-scanned on every chunk.
+describe("createLineAccumulator bounds (dahl #10)", () => {
+  it("a long line split over many chunks is emitted once, intact", () => {
+    const out: string[] = [];
+    const acc = createLineAccumulator((c) => out.push(c));
+    const frame = JSON.stringify({ type: "tool_result", data: "x".repeat(50_000) });
+    for (let i = 0; i < frame.length; i += 1000) acc.push(frame.slice(i, i + 1000));
+    acc.push("\n{\"next\":1}\n");
+    expect(out).toEqual([`${frame}\n{"next":1}\n`]);
+  });
+
+  it("drops an unterminated line over the cap (reported) and keeps working afterwards", () => {
+    const out: string[] = [];
+    const oversized: number[] = [];
+    const acc = createLineAccumulator((c) => out.push(c), { maxLineChars: 100, onOversized: (n) => oversized.push(n) });
+    for (let i = 0; i < 5; i++) acc.push("y".repeat(30));
+    expect(oversized).toHaveLength(1);
+    acc.push("ok\n");
+    expect(out).toEqual(["y".repeat(30) + "ok\n"]);
+  });
+});

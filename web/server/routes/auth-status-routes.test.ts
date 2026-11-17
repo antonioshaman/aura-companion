@@ -160,7 +160,7 @@ describe("POST /llm-auth/recheck", () => {
   it("rechecks and returns the fresh snapshot", async () => {
     const { root, core } = app();
     core.recheck.mockResolvedValue({ kind: "ok", snapshot: snapshot() });
-    const res = await root.request("/api/llm-auth/recheck", { method: "POST" });
+    const res = await root.request("/api/llm-auth/recheck", { method: "POST", headers: { "Content-Type": "application/json" } });
     expect(res.status).toBe(200);
     expect((await res.json()).status.providers.codex.state).toBe("working");
   });
@@ -168,7 +168,7 @@ describe("POST /llm-auth/recheck", () => {
   it("is rate-limited: 429 + Retry-After + the cached snapshot", async () => {
     const { root, core } = app();
     core.recheck.mockResolvedValue({ kind: "too_soon", retryAfterMs: 12_300, snapshot: snapshot() });
-    const res = await root.request("/api/llm-auth/recheck", { method: "POST" });
+    const res = await root.request("/api/llm-auth/recheck", { method: "POST", headers: { "Content-Type": "application/json" } });
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("13");
     const body = await res.json();
@@ -189,12 +189,24 @@ describe("doctor routes", () => {
     expect(doctor.recheck).not.toHaveBeenCalled();
   });
 
+  // dahl #9: a cross-site page could start provider probes with a simple
+  // no-cors POST. The recheck routes are JSON-only and refuse a foreign Origin.
+  it("recheck routes refuse a foreign Origin and a non-JSON (simple) POST", async () => {
+    const { root, doctor } = app();
+    for (const path of ["/api/llm-auth/recheck", "/api/llm-auth/doctor/recheck"]) {
+      expect((await root.request(path, { method: "POST" })).status, path).toBe(415);
+      expect((await root.request(path, { method: "POST", headers: { "Content-Type": "text/plain" } })).status, path).toBe(415);
+      expect((await root.request(path, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://evil.example.test" } })).status, path).toBe(403);
+    }
+    expect(doctor.recheck).not.toHaveBeenCalled();
+  });
+
   it("POST recheck runs it (rate-limited like the status recheck)", async () => {
     const { root, doctor } = app();
     doctor.recheck.mockResolvedValueOnce({ kind: "ok", report: doctorReport });
-    expect((await root.request("/api/llm-auth/doctor/recheck", { method: "POST" })).status).toBe(200);
+    expect((await root.request("/api/llm-auth/doctor/recheck", { method: "POST", headers: { "Content-Type": "application/json" } })).status).toBe(200);
     doctor.recheck.mockResolvedValueOnce({ kind: "too_soon", retryAfterMs: 1000, report: doctorReport });
-    const limited = await root.request("/api/llm-auth/doctor/recheck", { method: "POST" });
+    const limited = await root.request("/api/llm-auth/doctor/recheck", { method: "POST", headers: { "Content-Type": "application/json" } });
     expect(limited.status).toBe(429);
     expect(await limited.text()).not.toContain("absPath");
   });
