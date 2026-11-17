@@ -355,23 +355,7 @@ export class WsBridge {
     // idle-kill clock. See `noteCliActivity` JSDoc for the rationale.
   }
 
-  /**
-   * Register a callback that fires whenever ANY browser tab sends a
-   * `user_message` frame to ANY session — caller filters by sessionId.
-   *
-   * The bridge's `routeBrowserMessage` is the single dispatch point for
-   * browser frames, so the callback fires once per frame regardless of
-   * tab count. Production caller is `SessionOrchestrator.initialize`
-   * wiring `IdleTimerManager.noteUserMessage(sid)`, which advances the
-   * per-session turn-token (cancels any pending auto-proceed fire — see
-   * `feedback_call_site_presence_not_just_symbol_export`: the manager's
-   * `noteUserMessage` method was tested standalone in Task 11.1 but had
-   * no production caller until this wiring landed in Task 11.6).
-   *
-   * Returns an unsubscribe function for symmetry with `companionBus.on`;
-   * the orchestrator never calls it (DI lifetime = process lifetime), but
-   * tests use it to keep their mock observers isolated.
-   */
+  /** LLM auth task 13: the renewal answers the bridge's delivery questions (null in tests). */
   setCredentialGate(gate: CredentialDeliveryGate | null): void {
     this.credentialGate = gate;
   }
@@ -444,10 +428,27 @@ export class WsBridge {
   }
 
   /** Bridge phase of a session (mid-turn check for the renewal). */
-  getSessionPhase(sessionId: string): string | undefined {
+  getSessionPhase(sessionId: string): import("./session-state-machine.js").SessionPhase | undefined {
     return this.sessions.get(sessionId)?.stateMachine.phase;
   }
 
+  /**
+   * Register a callback that fires whenever ANY browser tab sends a
+   * `user_message` frame to ANY session — caller filters by sessionId.
+   *
+   * The bridge's `routeBrowserMessage` is the single dispatch point for
+   * browser frames, so the callback fires once per frame regardless of
+   * tab count. Production caller is `SessionOrchestrator.initialize`
+   * wiring `IdleTimerManager.noteUserMessage(sid)`, which advances the
+   * per-session turn-token (cancels any pending auto-proceed fire — see
+   * `feedback_call_site_presence_not_just_symbol_export`: the manager's
+   * `noteUserMessage` method was tested standalone in Task 11.1 but had
+   * no production caller until this wiring landed in Task 11.6).
+   *
+   * Returns an unsubscribe function for symmetry with `companionBus.on`;
+   * the orchestrator never calls it (DI lifetime = process lifetime), but
+   * tests use it to keep their mock observers isolated.
+   */
   onUserFrameObserved(callback: (sessionId: string) => void): () => void {
     this.userFrameObservers.push(callback);
     return () => {

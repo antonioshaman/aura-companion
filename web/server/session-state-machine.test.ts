@@ -609,3 +609,13 @@ describe("SessionStateMachine", () => {
     });
   });
 });
+
+// fowler #6: the mid-turn rule is decided for every phase in one typed table.
+describe("isMidTurnPhase", () => {
+  it("is true exactly for streaming, awaiting_permission and compacting", async () => {
+    const { isMidTurnPhase } = await import("./session-state-machine.js");
+    const all = ["starting", "initializing", "ready", "streaming", "awaiting_permission", "compacting", "reconnecting", "terminated"] as const;
+    expect(all.filter((p) => isMidTurnPhase(p))).toEqual(["streaming", "awaiting_permission", "compacting"]);
+    expect(isMidTurnPhase(undefined)).toBe(false);
+  });
+});

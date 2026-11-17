@@ -207,6 +207,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={STEP_HEADING_ID}
+        aria-describedby="onboarding-escape-hint"
         className="w-full max-w-[520px] mx-6"
         style={{
           transform: entered ? "translateY(0)" : "translateY(12px)",
@@ -216,6 +217,8 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
             : "transform 250ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease-out",
         }}
       >
+        {/* Escape is "set up later" here, not just close (watson P3-1). */}
+        <p id="onboarding-escape-hint" className="sr-only">Press Escape to skip setup for now; you can sign in later from Diagnostics.</p>
         {/* Step indicator */}
         {step !== "done" && (
           <div

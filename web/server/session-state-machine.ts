@@ -26,6 +26,27 @@ export type SessionPhase =
   | "reconnecting"
   | "terminated";
 
+/**
+ * Mid-turn phases, decided for EVERY phase (fowler #6): adding a phase without
+ * classifying it here fails to compile instead of silently counting as idle
+ * (which would let a credential renewal relaunch a session mid-turn).
+ */
+const MID_TURN: Record<SessionPhase, boolean> = {
+  starting: false,
+  initializing: false,
+  ready: false,
+  streaming: true,
+  awaiting_permission: true,
+  compacting: true,
+  reconnecting: false,
+  terminated: false,
+};
+
+/** A turn is running in this phase. */
+export function isMidTurnPhase(phase: SessionPhase | undefined): boolean {
+  return phase !== undefined && MID_TURN[phase];
+}
+
 /** Payload emitted on every successful state transition. */
 export interface SessionTransitionEvent {
   sessionId: string;

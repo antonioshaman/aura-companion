@@ -181,6 +181,18 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByText("Hide"));
     expect(input).toHaveAttribute("type", "password");
   });
+
+  // watson P3-4: keyboard users can reveal a pasted token to check it.
+  it("the Show/Hide toggle is keyboard-reachable and reports its state", () => {
+    render(<LoginPage />);
+    const toggle = screen.getByRole("button", { name: "Show" });
+    expect(toggle).not.toHaveAttribute("tabindex", "-1");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Hide" })).toHaveAttribute("aria-pressed", "true");
+  });
 });
 
 describe("LoginPage localhost auto-auth", () => {
