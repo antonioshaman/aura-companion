@@ -32,6 +32,7 @@ import type { TurnFailure } from "./auth-status/auth-types.js";
 import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
 import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
 import type { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
+import { MAX_NDJSON_LINE_CHARS } from "./cli-transport.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -274,8 +275,15 @@ export class StdioTransport implements ICodexTransport {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        this.buffer += decoder.decode(value, { stream: true });
-        this.processBuffer();
+        const text = decoder.decode(value, { stream: true });
+        this.buffer += text;
+        // Split only when a line can have ended (no O(n²) re-split of a long
+        // line on every chunk) and bound an unterminated line (dahl #10).
+        if (text.includes("\n")) this.processBuffer();
+        else if (this.buffer.length > MAX_NDJSON_LINE_CHARS) {
+          log.warn("codex-adapter", "dropped an oversized stdout line (no newline within the cap)", { event: "ndjson.line_oversized", sessionId: this.sessionId, chars: this.buffer.length });
+          this.buffer = "";
+        }
       }
     } catch (err) {
       log.error("codex-adapter", "stdout reader error", {
@@ -2353,7 +2361,7 @@ export class CodexAdapter implements IBackendAdapter {
 
     // Through the logger, not raw console: provider text can echo a token
     // and only the logger masks secrets (LLM auth leak canary, task 15).
-    log.error("codex-adapter", "Codex error notification", { message });
+    log.error("codex-adapter", "Codex error notification", { event: "codex.error_notification", sessionId: this.sessionId, willRetry, message });
     this.emitErrorWithFailure(message, {
       source: "error_notification",
       message: baseMessage,

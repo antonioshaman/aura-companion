@@ -41,6 +41,8 @@ export interface LoginRoutesDeps {
   attempts: () => LoginRegistry;
   /** Startup recovery (promotion journal → orphan sweep) must finish before a start. */
   ready?: () => Promise<void>;
+  /** Bound on waiting for `ready()` (startup recovery); default 15 s. */
+  readyTimeoutMs?: number;
   /** Override for tests; production checks the Bearer header or the `companion_auth` cookie. */
   hasAuraToken?: (c: Context) => boolean;
   /** Override for tests; production reads `COMPANION_ALLOWED_ORIGIN`. */
@@ -155,6 +157,22 @@ async function readJson(c: Context): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** Route-local cap for the reply-code body (the code itself is ≤ MAX_REPLY_CODE_LENGTH). */
+const MAX_CODE_BODY_BYTES = 8 * 1024;
+
+async function readyWithin(deps: LoginRoutesDeps): Promise<boolean> {
+  if (!deps.ready) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), deps.readyTimeoutMs ?? 15_000);
+  });
+  try {
+    return await Promise.race([deps.ready().then(() => true as const), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmissions: number): void {
   const now = deps.now ?? Date.now;
   const view = (a: LoginAttempt): RestLoginAttempt => {
@@ -179,7 +197,11 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
   api.post("/llm-auth/login/:provider", async (c) => {
     const provider = c.req.param("provider");
     if (!isProviderId(provider)) return c.json({ error: "unknown provider" }, 400);
-    await deps.ready?.();
+    // Bounded (dahl #8): a hung startup recovery answers a typed 503, not a socket timeout.
+    if (!(await readyWithin(deps))) {
+      logRoute(c, "refused", { why: "recovery_pending", provider });
+      return c.json({ error: "recovery_pending" }, 503);
+    }
     const result = await deps.attempts().start(provider);
     logRoute(c, "start", { ...attemptFields("attempt" in result ? result.attempt : null), provider, result: result.kind });
     switch (result.kind) {
@@ -224,6 +246,8 @@ export function registerLoginRoutes(api: Hono, deps: LoginRoutesDeps, maxSubmiss
     const t = target(c);
     if (t instanceof Response) return t;
     if (!signInSteps(t.provider).replyCode) return c.json({ error: "no_code_step" }, 400);
+    // A reply code is a few hundred bytes: refuse a big body before parsing it (dahl #8).
+    if (Number(c.req.header("Content-Length") ?? 0) > MAX_CODE_BODY_BYTES) return c.json({ error: "body_too_large" }, 413);
     const body = await readJson(c);
     const code = body?.code;
     if (typeof code !== "string" || code.length === 0 || code.length > MAX_REPLY_CODE_LENGTH) {

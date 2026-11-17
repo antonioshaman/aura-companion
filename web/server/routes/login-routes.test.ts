@@ -247,6 +247,26 @@ describe("routes", () => {
     expect(order).toEqual(["ready", "start"]);
   });
 
+  // dahl #8: a hung startup recovery must not hang every start request.
+  it("start answers a typed 503 recovery_pending when the startup recovery does not finish in time", async () => {
+    const reg = fakeRegistry();
+    const root = app(reg, { ready: () => new Promise<void>(() => {}), readyTimeoutMs: 30 });
+    const res = await root.request("http://localhost:3456/api/llm-auth/login/claude", { method: "POST", headers: json, body: "{}" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "recovery_pending" });
+    expect(reg.start).not.toHaveBeenCalled();
+  });
+
+  it("a reply-code body far bigger than any code is refused before it is parsed", async () => {
+    const reg = fakeRegistry();
+    const big = JSON.stringify({ code: "x".repeat(20_000) });
+    const res = await app(reg).request(`http://localhost:3456/api/llm-auth/login/claude/${ID}/code`, {
+      method: "POST", headers: { ...json, "Content-Length": String(big.length) }, body: big,
+    });
+    expect(res.status).toBe(413);
+    expect(reg.submitCode).not.toHaveBeenCalled();
+  });
+
   it("a preflight refusal is 200 + state failed, never 401/403", async () => {
     const reg = fakeRegistry({ start: vi.fn(async () => ({ kind: "refused" as const, attempt: attempt({ state: "failed", failure: "wrong_service_user", prompt: null }) })) });
     const res = await app(reg).request("http://localhost:3456/api/llm-auth/login/codex", { method: "POST", headers: json, body: "{}" });

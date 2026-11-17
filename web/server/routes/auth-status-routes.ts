@@ -1,4 +1,4 @@
-import type { Hono } from "hono";
+import type { Hono, MiddlewareHandler } from "hono";
 import { homedir } from "node:os";
 import { basename, relative, sep } from "node:path";
 import { PROVIDER_IDS, type EffectiveAuthMethod, type ProviderAuthStatus, type ProviderId } from "../auth-status/auth-types.js";
@@ -12,6 +12,7 @@ import { LLM_AUTH_STATE_DIR } from "../llm-login/login-wiring.js";
 import { planCheck } from "../llm-login/plan-check.js";
 import { effectiveSessionAuthMethod } from "../provider-auth-env.js";
 import { getSettings } from "../settings-manager.js";
+import { credentialOriginAllowed, isJsonContentType } from "./credential-guard.js";
 
 /**
  * LLM-auth status + doctor REST (plan task 8). Registered AFTER the shared
@@ -128,6 +129,16 @@ export function projectBackendAuthState(status: ProviderAuthStatus | null | unde
   return authState ? { ...legacy, authState } : legacy;
 }
 
+/** The page's origin names this server's own Host (the UI the server served). */
+function sameHostOrigin(origin: string | undefined, host: string | undefined): boolean {
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 export function registerAuthStatusRoutes(api: Hono, deps: AuthStatusRoutesDeps): void {
   const home = () => deps.serviceHome ?? process.env.HOME ?? homedir();
 
@@ -141,6 +152,18 @@ export function registerAuthStatusRoutes(api: Hono, deps: AuthStatusRoutesDeps):
     const snapshot = deps.statusCore().peek();
     return c.json({ status: snapshot ? toRestProviderStatus(snapshot.providers[provider], home(), deps.signInFacts) : null });
   });
+
+  // A cross-site page in a local browser could send a simple no-cors POST and
+  // start provider probes with the service credentials. The recheck routes get
+  // the sign-in routes' Origin + JSON-only rule (dahl #9).
+  const recheckGuard: MiddlewareHandler = async (c, next) => {
+    const origin = c.req.header("Origin");
+    if (!credentialOriginAllowed(origin, c.req.url) && !sameHostOrigin(origin, c.req.header("Host"))) return c.json({ error: "origin_not_allowed" }, 403);
+    if (!isJsonContentType(c.req.header("Content-Type"))) return c.json({ error: "json_required" }, 415);
+    await next();
+  };
+  api.use("/llm-auth/recheck", recheckGuard);
+  api.use("/llm-auth/doctor/recheck", recheckGuard);
 
   api.post("/llm-auth/recheck", async (c) => {
     const outcome = await deps.statusCore().recheck();

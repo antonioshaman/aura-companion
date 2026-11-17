@@ -241,8 +241,11 @@ export function defaultCliAuthDeps(port: number): CliAuthDeps {
   let passwd: Map<string, string> | null = null;
   return {
     fetchJson: async (path, init) => {
+      const method = init?.method ?? "GET";
       const res = await fetch(`http://localhost:${port}${path}`, {
-        method: init?.method ?? "GET",
+        method,
+        // POSTs are JSON-only server-side (cross-site simple POSTs are refused, dahl #9).
+        ...(method === "POST" ? { headers: { "Content-Type": "application/json" }, body: "{}" } : {}),
         signal: AbortSignal.timeout(30_000),
       });
       return { status: res.status, body: await res.json().catch(() => null) };

@@ -340,3 +340,21 @@ describe("credential gate — every flush path while holding (beck B-3)", () => 
     expect(sentLines()).toHaveLength(1);
   });
 });
+
+// dahl #11: Codex can answer each init RPC with the same id-less 401; every
+// classified failure is history-backed, so a reload showed N identical cards.
+describe("turn-failure history de-duplication (dahl #11)", () => {
+  it("collapses consecutive identical failures; a user message in between or another kind keeps both", () => {
+    const s = attach("dd1");
+    const f = { kind: "network", provider: "codex", providerMessage: "x" } as const;
+    const cards = () => s.session.messageHistory.filter((m: any) => m.type === "error" && m.turnFailure).length;
+    s.emit({ type: "error", message: "x", turnFailure: f });
+    s.emit({ type: "error", message: "x", turnFailure: f });
+    expect(cards()).toBe(1);
+    s.emit({ type: "error", message: "x", turnFailure: { ...f, kind: "limit_window" } });
+    expect(cards()).toBe(2);
+    bridge.handleBrowserMessage(s.browser, JSON.stringify({ type: "user_message", content: "again" }));
+    s.emit({ type: "error", message: "x", turnFailure: { ...f, kind: "limit_window" } });
+    expect(cards()).toBe(3);
+  });
+});

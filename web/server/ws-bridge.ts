@@ -84,6 +84,16 @@ import { autoResumeStaleAction } from "./auto-resume-visibility.js";
 import type { TurnFailure } from "./auth-status/auth-types.js";
 import { describeTurnFailure } from "./auth-status/auth-catalog.js";
 
+/** The newest history-backed turn failure has the same kind + provider and no user message came after it. */
+export function repeatsLastTurnFailure(history: readonly BrowserIncomingMessage[], failure: TurnFailure): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m.type === "user_message") return false;
+    if (m.type === "error" && m.turnFailure) return m.turnFailure.kind === failure.kind && m.turnFailure.provider === failure.provider;
+  }
+  return false;
+}
+
 /**
  * The `message` fallback of a turn-failure `error` frame (old browsers,
  * exports, Markdown copies). Built in ONE place from the final kind, after
@@ -1508,8 +1518,12 @@ export class WsBridge {
         if (msg.timestamp === undefined) msg.timestamp = Date.now();
         if (this.credentialGate) msg.turnFailure = this.credentialGate.adjustTurnFailure(sessionId, msg.turnFailure);
         msg.message = turnFailureMessage(msg.turnFailure);
-        this.appendHistory(session, msg);
-        this.persistSession(session);
+        // Codex can answer every init RPC with the same id-less 401: one card
+        // in the history, not N identical ones on every reload (dahl #11).
+        if (!repeatsLastTurnFailure(session.messageHistory, msg.turnFailure)) {
+          this.appendHistory(session, msg);
+          this.persistSession(session);
+        }
       }
 
       // -- guard_denied: guards-pack hook denial (Claude-only) — history-backed

@@ -20,6 +20,7 @@
 
 import type { ServerWebSocket } from "bun";
 import type { SocketData } from "./ws-bridge-types.js";
+import { log } from "./logger.js";
 
 /**
  * Minimal write-side contract the adapter needs from a CLI control channel.
@@ -151,27 +152,48 @@ export class StdioCliTransport implements CliTransport {
  * (`JSON.parse` throws, the line is discarded). Buffering the tail is what
  * makes the two transports equivalent to everything upstream.
  */
+/**
+ * Cap on one unterminated line. A CLI that never sends a newline would grow
+ * the tail until the server runs out of memory; dropping one oversized frame
+ * (loudly) is the lesser harm (dahl #10).
+ */
+export const MAX_NDJSON_LINE_CHARS = 64 * 1024 * 1024;
+
 export function createLineAccumulator(
   onLines: (chunk: string) => void,
+  opts: { maxLineChars?: number; onOversized?: (chars: number) => void } = {},
 ): { push(chunk: string): void; flush(): void } {
-  let tail = "";
+  const max = opts.maxLineChars ?? MAX_NDJSON_LINE_CHARS;
+  // The tail is kept as parts and the newline is searched in the NEW chunk
+  // only: `tail + chunk` + lastIndexOf on every chunk was O(n²) on a
+  // multi-MB single-line frame (dahl #10).
+  let tail: string[] = [];
+  let tailChars = 0;
   return {
     push(chunk: string): void {
-      const combined = tail + chunk;
-      const lastBreak = combined.lastIndexOf("\n");
+      const lastBreak = chunk.lastIndexOf("\n");
       if (lastBreak < 0) {
-        // No complete line yet — keep accumulating.
-        tail = combined;
+        // No complete line yet — keep accumulating (bounded).
+        tail.push(chunk);
+        tailChars += chunk.length;
+        if (tailChars > max) {
+          opts.onOversized?.(tailChars);
+          tail = [];
+          tailChars = 0;
+        }
         return;
       }
-      tail = combined.slice(lastBreak + 1);
-      const complete = combined.slice(0, lastBreak + 1);
+      const complete = tail.join("") + chunk.slice(0, lastBreak + 1);
+      const rest = chunk.slice(lastBreak + 1);
+      tail = rest ? [rest] : [];
+      tailChars = rest.length;
       if (complete.trim()) onLines(complete);
     },
     /** Emit a trailing line that never got its newline (child exited mid-write). */
     flush(): void {
-      const rest = tail;
-      tail = "";
+      const rest = tail.join("");
+      tail = [];
+      tailChars = 0;
       if (rest.trim()) onLines(rest);
     },
   };
@@ -189,7 +211,9 @@ export async function pumpStdoutLines(
   onError?: (err: unknown) => void,
 ): Promise<void> {
   const decoder = new TextDecoder();
-  const acc = createLineAccumulator(onLines);
+  const acc = createLineAccumulator(onLines, {
+    onOversized: (chars) => log.warn("cli-transport", "dropped an oversized stdout line (no newline within the cap)", { event: "ndjson.line_oversized", chars }),
+  });
   const reader = stream.getReader();
   try {
     for (;;) {
