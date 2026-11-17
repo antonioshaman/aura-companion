@@ -1,6 +1,5 @@
 import type { ProviderId, TurnFailure } from "./auth-status/auth-types.js";
 import { maskSecrets } from "./logger.js";
-import { REQUIRED_CLI_VERSIONS } from "./auth-status/doctor-checks.js";
 import {
   claudeLimitWindow,
   codexWindowByDuration,
@@ -106,7 +105,9 @@ export function classifyClaudeTurnFailure(sig: ClaudeTurnSignal, now: number): T
       kind: "cli_outdated",
       provider: "claude",
       providerMessage,
-      requiredVersion: versionMatch?.[1] ?? REQUIRED_CLI_VERSIONS.claude,
+      // Only a version the frame names: a frozen floor could tell a user on a
+      // NEWER CLI to "update to" an older one (willison #6).
+      requiredVersion: versionMatch?.[1] ?? null,
     });
   }
 

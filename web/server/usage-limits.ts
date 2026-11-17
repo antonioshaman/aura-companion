@@ -1,4 +1,5 @@
 import { classifyFetchError, usageLimitsUpstream } from "./diagnostics/upstream-status.js";
+import { log } from "./logger.js";
 import { readClaudeOAuthSecret } from "./auth-status/credential-locator.js";
 import { requestClaudeUsage, CLAUDE_USAGE_TIMEOUT_MS } from "./auth-status/claude-usage-request.js";
 import type { UsageLimitsReason } from "./auth-status/auth-types.js";
@@ -48,21 +49,57 @@ export function getCredentials(): string | null {
   return readClaudeOAuthSecret()?.accessToken ?? null;
 }
 
+let reportedShapeMismatch = false;
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/**
+ * The provider-internal usage endpoint is reshaped from time to time; a cast
+ * passed a string or a 0–1 fraction straight to the gauge (willison #7).
+ * null = not understood (the panel then says so instead of a wrong number).
+ */
+export function parseUsageBody(body: unknown): Omit<UsageLimits, "reason"> | null {
+  if (!body || typeof body !== "object") return null;
+  const data = body as Record<string, unknown>;
+  const window = (v: unknown): UsageLimits["five_hour"] | undefined => {
+    if (v === null || v === undefined) return null;
+    if (typeof v !== "object") return undefined;
+    const w = v as Record<string, unknown>;
+    if (!finite(w.utilization) || w.utilization < 0) return undefined;
+    if (w.resets_at !== null && w.resets_at !== undefined && typeof w.resets_at !== "string") return undefined;
+    return { utilization: w.utilization, resets_at: typeof w.resets_at === "string" ? w.resets_at : null };
+  };
+  const five = window(data.five_hour);
+  const seven = window(data.seven_day);
+  if (five === undefined || seven === undefined) return null;
+  let extra: UsageLimits["extra_usage"] = null;
+  if (data.extra_usage !== null && data.extra_usage !== undefined) {
+    const e = data.extra_usage as Record<string, unknown>;
+    if (typeof e !== "object" || typeof e.is_enabled !== "boolean") return null;
+    if (e.monthly_limit !== null && e.monthly_limit !== undefined && !finite(e.monthly_limit)) return null;
+    if (e.used_credits !== null && e.used_credits !== undefined && !finite(e.used_credits)) return null;
+    if (e.utilization !== null && e.utilization !== undefined && !finite(e.utilization)) return null;
+    extra = e as unknown as UsageLimits["extra_usage"];
+  }
+  return { five_hour: five, seven_day: seven, extra_usage: extra };
+}
+
 type UsageFetchResult = { limits: UsageLimits } | { reason: UsageLimitsReason };
 
 async function fetchUsage(token: string): Promise<UsageFetchResult> {
   const outcome = await requestClaudeUsage(token);
   switch (outcome.kind) {
     case "ok": {
-      const data = outcome.body as Record<string, unknown>;
       usageLimitsUpstream.recordOk();
-      return {
-        limits: {
-          five_hour: (data.five_hour as UsageLimits["five_hour"]) || null,
-          seven_day: (data.seven_day as UsageLimits["seven_day"]) || null,
-          extra_usage: (data.extra_usage as UsageLimits["extra_usage"]) || null,
-        },
-      };
+      const limits = parseUsageBody(outcome.body);
+      if (!limits) {
+        if (!reportedShapeMismatch) {
+          reportedShapeMismatch = true;
+          log.warn("usage-limits", "usage body not understood — showing no gauge instead of a wrong one", { event: "usage_limits.shape_mismatch" });
+        }
+        return { reason: "unknown" };
+      }
+      return { limits };
     }
     case "rejected":
       usageLimitsUpstream.recordFailure(outcome.status === 401 ? "oauth-expired" : "http", outcome.status);

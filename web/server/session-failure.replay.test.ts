@@ -128,6 +128,25 @@ describe("Claude replay → turnFailure", () => {
     expect(failures(messages)).toEqual([]);
   });
 
+  // willison #2: a status-less api_retry that RECOVERED (a real answer came
+  // after it) must not turn a later, unrelated failure into "No connection".
+  it("a recovered retry earlier in the turn does not make error_max_turns a network card", () => {
+    adapter.handleRawMessage([
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: null, error: "unknown", uuid: "r1", session_id: "c1" }),
+      JSON.stringify({ type: "assistant", message: { id: "m9", type: "message", role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: "Working on it." }], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, uuid: "u9", session_id: "c1" }),
+      JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, terminal_reason: "max_turns", result: "", duration_ms: 10, uuid: "u10", session_id: "c1" }),
+    ].join("\n"));
+    expect(failures(messages).map((f) => f.kind)).not.toContain("network");
+  });
+
+  it("a non-success subtype right after a status-less retry is still not guessed as network", () => {
+    adapter.handleRawMessage([
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: null, error: "unknown", uuid: "r2", session_id: "c1" }),
+      JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true, terminal_reason: "max_budget", result: "", duration_ms: 10, uuid: "u11", session_id: "c1" }),
+    ].join("\n"));
+    expect(failures(messages).map((f) => f.kind)).not.toContain("network");
+  });
+
   it("'version X or newer is required' → cli_outdated", () => {
     adapter.handleRawMessage(JSON.stringify({
       type: "result", subtype: "success", is_error: true, api_error_status: 400, terminal_reason: "api_error",

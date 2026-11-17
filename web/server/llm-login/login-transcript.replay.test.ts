@@ -126,11 +126,23 @@ describe("login transcript — fail-closed negatives", () => {
     expect(parseLoginOutput("codex", honest).kind).toBe("ready");
   });
 
-  it("trailing junk after the link, a missing state, or an unknown line → unrecognised", () => {
+  it("trailing junk after the link, a missing state, or an unknown line that could carry a link/code → unrecognised", () => {
     expect(parseLoginOutput("claude", claudeText.replace(/(state=\S+)\n/, "$1 trailing-junk\n")).kind).toBe("unrecognised");
     expect(parseLoginOutput("claude", claudeText.replace(/&state=\S+/, "")).kind).toBe("unrecognised");
-    expect(parseLoginOutput("claude", `Something new\n${claudeText}`).kind).toBe("unrecognised");
-    expect(parseLoginOutput("codex", codexText.replace("Follow these steps", "Follow these new steps")).kind).toBe("unrecognised");
+    // A second link, a code-shaped token or a long opaque token is never ignored.
+    expect(parseLoginOutput("claude", `Or visit https://claude.example.test/x\n${claudeText}`).kind).toBe("unrecognised");
+    expect(parseLoginOutput("codex", `Your code: ABCD-12345\n${codexText}`).kind).toBe("unrecognised");
+    expect(parseLoginOutput("claude", `token ${"a".repeat(30)}\n${claudeText}`).kind).toBe("unrecognised");
+  });
+
+  // willison #4: CLIs reword banners between minor releases; failing on every
+  // new sentence broke UI sign-in for every current install. A harmless new
+  // line is ignored (counted), the strict link/state/code checks still apply.
+  it("a new harmless banner line (new CLI wording) still reaches ready, counted as ignored", () => {
+    const claude = parseLoginOutput("claude", `Something new\n${claudeText}`);
+    expect(claude).toMatchObject({ kind: "ready", ignoredLines: 1 });
+    const codex = parseLoginOutput("codex", codexText.replace("Follow these steps", "Follow these new steps"));
+    expect(codex).toMatchObject({ kind: "ready", ignoredLines: 1 });
   });
 
   it("codex device code outside the closed template → unrecognised", () => {

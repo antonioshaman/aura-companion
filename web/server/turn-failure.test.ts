@@ -54,6 +54,13 @@ describe("classifyClaudeTurnFailure", () => {
     const r = classifyClaudeTurnFailure(claude({ apiErrorStatus: 400, resultText: "API Error: 400 claude-code 2.1.278 does not support this model; version 2.1.280 or newer is required" }), NOW);
     expect(r).toEqual({ kind: "classified", failure: expect.objectContaining({ kind: "cli_outdated", requiredVersion: "2.1.280" }) });
   });
+  // willison #6: without a number in the frame there is no required version —
+  // a frozen floor (2.1.280) told users on 2.1.283 to "update to" an older one.
+  it("'please update Claude Code' without a version → cli_outdated with no required version", () => {
+    const r = classifyClaudeTurnFailure(claude({ apiErrorStatus: 400, resultText: "API Error: please update Claude Code to use this model" }), NOW);
+    expect(r).toEqual({ kind: "classified", failure: expect.objectContaining({ kind: "cli_outdated", requiredVersion: null }) });
+  });
+
 
   it("network: no status + connection error text → network, checked before auth", () => {
     const r = classifyClaudeTurnFailure(claude({ resultText: "API Error: Connection error.", assistantError: "unknown" }), NOW);

@@ -147,7 +147,8 @@ describe("auth catalog", () => {
       "Required CLI version: 2.1.280 or newer",
     ]);
     expect(turnFailureFacts({ kind: "cli_outdated", provider: "claude", providerMessage: "x", requiredVersion: null }, at)).toEqual([
-      "Required CLI version: unknown",
+      // willison #6: no number in the frame → no frozen floor, just "newer".
+      "Required CLI version: a newer version than the one installed",
     ]);
     // Network / compared auth failures carry no extra facts.
     expect(turnFailureFacts({ kind: "network", provider: "codex", providerMessage: "x" }, at)).toEqual([]);
