@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomicJson } from "../atomic-write.js";
 import {
@@ -483,6 +483,9 @@ function writeSentinelExclusive(dir: string, sentinel: AttemptSentinel): void {
   const fd = openSync(join(dir, ATTEMPT_SENTINEL_FILE), "wx", 0o600);
   try {
     writeSync(fd, JSON.stringify(sentinel));
+    // Durable before any process starts: after a power loss an empty sentinel
+    // reads as "no attempt" and its dir is swept without a kill (ritchie B5).
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }

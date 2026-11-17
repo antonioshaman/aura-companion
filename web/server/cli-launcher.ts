@@ -9,6 +9,7 @@ import {
   lstatSync,
   symlinkSync,
   unlinkSync,
+  renameSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -504,7 +505,9 @@ export class CliLauncher {
    * no stamp (never renewed by a host sign-in).
    */
   private stampCredentialEpoch(info: SdkSessionInfo, options: LaunchOptions): void {
-    this.credentialEpochBeforeSpawn.set(info.sessionId, info.credentialEpochAtLaunch);
+    // Only `prepareCodexHome` reads (and removes) it: remembering it for Claude
+    // spawns grew the map forever (ritchie A7).
+    if (info.backendType === "codex") this.credentialEpochBeforeSpawn.set(info.sessionId, info.credentialEpochAtLaunch);
     if (options.containerId) {
       delete info.credentialEpochAtLaunch;
       return;
@@ -2573,8 +2576,7 @@ export class CliLauncher {
             // A regular file: either a pre-symlink copy, or a symlink that a
             // prior in-session refresh replaced via atomic rename.
             if (copyPredatesSignIn) {
-              unlinkSync(dest);
-              symlinkSync(resolve(src), dest);
+              replaceWithSymlink(resolve(src), dest);
               log.info("cli-launcher", "session auth.json copy reset to the new sign-in", {
                 event: "codex_home.auth_reset_by_epoch",
               });
@@ -2583,8 +2585,7 @@ export class CliLauncher {
               // rewrote legacy). Drop the stale copy and re-share the legacy
               // file so this home benefits from live legacy reads again. Safe:
               // no legacy write, and the dropped copy held an older token.
-              unlinkSync(dest);
-              symlinkSync(resolve(src), dest);
+              replaceWithSymlink(resolve(src), dest);
               console.log(`[cli-launcher] Reconverged auth.json to legacy symlink (legacy copy is same-or-newer)`);
             } else {
               // dest is strictly newer → it holds a token this session rotated
@@ -3510,5 +3511,21 @@ export class CliLauncher {
     if (stderr && typeof stderr !== "number") {
       this.pipeStream(sessionId, stderr, "stderr");
     }
+  }
+}
+
+/**
+ * Point `dest` at `target` in one step: a symlink made under a temp name, then
+ * rename(2) over `dest`. unlink-then-symlink left no auth.json if the process
+ * died between the two (ritchie B7).
+ */
+export function replaceWithSymlink(target: string, dest: string): void {
+  const tmp = `${dest}.${process.pid}.${Date.now().toString(36)}.link`;
+  symlinkSync(target, tmp);
+  try {
+    renameSync(tmp, dest);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw err;
   }
 }

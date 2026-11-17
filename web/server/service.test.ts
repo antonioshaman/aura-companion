@@ -118,6 +118,14 @@ function logDir(): string {
 // generatePlist
 // ===========================================================================
 describe("generatePlist", () => {
+  // ritchie B6: paths go into plist XML unescaped; `&` or `<` made it invalid.
+  it("escapes XML special characters in paths inserted into the plist", () => {
+    const plist = service.generatePlist({ binPath: "/opt/R&D/<bin>/aura-companion", path: "/a&b:/usr/bin" });
+    expect(plist).toContain("<string>/opt/R&amp;D/&lt;bin&gt;/aura-companion</string>");
+    expect(plist).toContain("/a&amp;b:/usr/bin");
+    expect(plist).not.toMatch(/R&D|<bin>/);
+  });
+
   it("generates valid XML with the correct label", () => {
     const plist = service.generatePlist({ binPath: "/usr/local/bin/aura-companion" });
     expect(plist).toContain('<?xml version="1.0"');
