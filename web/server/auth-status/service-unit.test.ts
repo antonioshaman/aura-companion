@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readServiceUnit, serviceUnitUser } from "./service-status.js";
+import { userInfo } from "node:os";
+import { getServiceAuthStatusCore, readServiceUnit, serviceUnitUser } from "./service-status.js";
 
 /**
  * fowler #2 (council review 2026-11-15): the sign-in's "who is the service
@@ -46,5 +47,17 @@ describe("service unit discovery", () => {
     mkdirSync(`${paths.user}.d`);
     writeFileSync(join(`${paths.user}.d`, "override.conf"), "[Service]\nEnvironment=COMPANION_ALLOWED_ORIGIN=https://a.example.test\n");
     expect(readServiceUnit(paths).texts).toHaveLength(2);
+  });
+
+  it("by default the owner of a user unit is the user running this process", () => {
+    writeFileSync(paths.user, "[Service]\nExecStart=/x\n");
+    expect(serviceUnitUser(paths)).toBe(userInfo().username);
+  });
+});
+
+describe("getServiceAuthStatusCore", () => {
+  it("is one lazily created core for the server (same instance on every call)", () => {
+    const a = getServiceAuthStatusCore();
+    expect(a).toBe(getServiceAuthStatusCore());
   });
 });
