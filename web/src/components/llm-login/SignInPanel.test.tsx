@@ -71,7 +71,8 @@ describe("SignInPanel (presentational)", () => {
 
   it("S1-AC1 Claude: link in a new tab without opener, reply-code field, expiry; no device code", () => {
     render(<SignInPanel provider="claude" view={loginView(loginAttempt("claude", "awaiting_user"))} now={LOGIN_NOW} />);
-    const link = screen.getByRole("link", { name: "Open the sign-in page" });
+    // watson P3-3: the name also says it opens a new tab.
+    const link = screen.getByRole("link", { name: /^Open the sign-in page\s*\(opens in a new tab\)$/ });
     expect(link).toHaveAttribute("href", FAKE_CLAUDE_URL);
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
@@ -456,7 +457,8 @@ describe("SignInHost (store + REST)", () => {
     });
     // The failed poll is a notice, not a result: the attempt stays on screen.
     expect(screen.getByText(FAKE_DEVICE_CODE)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(/No connection to Aura/);
+    // Copy buttons have their own (empty) status regions since watson P3-2.
+    expect(screen.getAllByRole("status").some((el) => /No connection to Aura/.test(el.textContent ?? ""))).toBe(true);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(LOGIN_POLL_MS);
     });

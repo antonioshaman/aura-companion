@@ -181,6 +181,8 @@ function AwaitingUser({
         <div className="flex flex-wrap gap-2">
           <a href={prompt.url} target="_blank" rel="noopener noreferrer" className={primaryButtonClass}>
             Open the sign-in page
+            {/* G201: say that it opens a new tab (watson P3-3). */}
+            <span className="sr-only"> (opens in a new tab)</span>
           </a>
           <CopyButton value={prompt.url} label="Copy link" />
         </div>

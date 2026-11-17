@@ -32,6 +32,8 @@ describe("CopyButton", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
     expect(writeText).toHaveBeenCalledWith("the-value");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+    // watson P3-2: also said in a status region (a focused button's new name is rarely re-read).
+    expect(screen.getByRole("status")).toHaveTextContent("Copied");
   });
 
   it("no clipboard (plain-HTTP remote server) → tells the user to select it by hand, no throw", () => {

@@ -23,8 +23,13 @@ export function CopyButton({ value, label, ariaLabel, className }: { value: stri
   };
   const text = state === "copied" ? "Copied" : state === "failed" ? "Copy failed — select it by hand" : label;
   return (
-    <button type="button" className={className ?? secondaryButtonClass} onClick={onClick} aria-label={state === "idle" ? ariaLabel : undefined}>
-      {text}
-    </button>
+    <>
+      <button type="button" className={className ?? secondaryButtonClass} onClick={onClick} aria-label={state === "idle" ? ariaLabel : undefined}>
+        {text}
+      </button>
+      {/* A focused button's changed name is rarely re-announced: say the
+          result in a status region mounted with the button (watson P3-2). */}
+      <span role="status" className="sr-only">{state === "copied" ? "Copied" : state === "failed" ? "Copy failed — select it by hand" : ""}</span>
+    </>
   );
 }

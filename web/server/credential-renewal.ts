@@ -1,4 +1,5 @@
 import { PROVIDER_IDS, type ProviderId, type TurnFailure } from "./auth-status/auth-types.js";
+import { isMidTurnPhase, type SessionPhase } from "./session-state-machine.js";
 import { readEpoch, type ProviderEpoch } from "./llm-login/credential-promotion.js";
 import { LLM_AUTH_STATE_DIR } from "./llm-login/state-dir.js";
 import { log } from "./logger.js";
@@ -138,11 +139,11 @@ export interface CredentialRenewalDeps {
   clearTimer?: (handle: unknown) => void;
 }
 
-const BUSY_PHASES = new Set(["streaming", "awaiting_permission", "compacting"]);
+// The mid-turn rule lives with the phases (session-state-machine.ts).
 
 /** Bridge phase → mid-turn. */
 export function isBusyPhase(phase: string | undefined): boolean {
-  return phase !== undefined && BUSY_PHASES.has(phase);
+  return isMidTurnPhase(phase as SessionPhase | undefined);
 }
 
 function errorName(err: unknown): string {
