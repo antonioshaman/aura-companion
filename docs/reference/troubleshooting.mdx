@@ -39,8 +39,10 @@ aura-companion --port 8080
 **Fix**: Regenerate the token:
 
 ```bash
-cd web && bun run generate-token --force
+aura-companion token --regenerate
 ```
+
+(From a source checkout: `cd web && bun run generate-token --force`.)
 
 Or set explicitly:
 

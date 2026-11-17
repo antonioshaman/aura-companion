@@ -27,6 +27,8 @@ Server commands:
   uninstall   Remove the background service
   status      Show service status (or use 'companion status' when server is running)
   logs        Tail service log files
+  token       Print the access token and ready-to-open links (run as the user Aura runs as;
+              --regenerate replaces it)
   auth status Claude / Codex sign-in status (server result, or computed locally)
   auth login <claude|codex>
               Sign in through the running server (as the service user; exit 0 ok, 1 failed, 130 Ctrl-C)
@@ -180,6 +182,11 @@ switch (command) {
     const deps = defaultCliAuthDeps(cliPort(args));
     const code = command === "auth" ? await runAuthStatusCommand(args.slice(1), deps) : await runDoctorCommand(args, deps);
     process.exit(code);
+  }
+
+  case "token": {
+    const { runTokenCommand } = await import("./cli-token.js");
+    process.exit(await runTokenCommand(process.argv.slice(3)));
   }
 
   case undefined: {

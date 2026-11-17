@@ -108,13 +108,17 @@ Origins are matched exactly — scheme + host + port, no trailing slash. `http:/
 
 The server auto-generates an auth token on first start, stored at `~/.companion/auth.json`.
 
-```bash
-# Show the current token
-cd web && bun run generate-token
+Run these on the machine running Aura, as the user it runs as (on a server: over SSH):
 
-# Force-regenerate
-cd web && bun run generate-token --force
+```bash
+# Show the token and links that sign a browser in (localhost, LAN, Tailscale)
+aura-companion token
+
+# Replace it (every browser signed in with the old token must open a new link)
+aura-companion token --regenerate
 ```
+
+From a source checkout, `cd web && bun run generate-token [--force]` does the same.
 
 Override via env var:
 

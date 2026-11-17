@@ -57,6 +57,15 @@ describe("CI workflow hardening (P7/CI-HARDEN)", () => {
 
   // `bun run test -- --coverage || true` made the coverage gate green even
   // when the test run itself failed. No step in the gate may mask an exit code.
+  // hashimoto H-4: a missing summary means coverage was never measured — the
+  // gate must fail, not warn and pass.
+  it("coverage-gate fails closed when a coverage summary is missing", () => {
+    const run = loadWorkflow("coverage-gate.yml").jobs[Object.keys(loadWorkflow("coverage-gate.yml").jobs)[0]].steps.map((st) => st.run ?? "").join("\n");
+    const missing = run.slice(run.indexOf('if [ ! -f "$SUMMARY" ]'), run.indexOf("return", run.indexOf('if [ ! -f "$SUMMARY" ]')));
+    expect(missing).toContain("FAIL=1");
+    expect(missing).toContain("::error::");
+  });
+
   it("coverage-gate does not mask test failures with `|| true`", () => {
     const wf = loadWorkflow("coverage-gate.yml");
     const testSteps = wf.jobs.coverage.steps.filter((s) => s.run?.includes("--coverage"));
@@ -217,9 +226,37 @@ describe("artifact gates (uiux Task 9)", () => {
   });
 
   it("the package job pins bun to an exact version", () => {
+    // Since hashimoto H-5 the exact version lives in ONE file, .bun-version.
     const steps = loadWorkflow("ci.yml").jobs.package.steps as (Step & { uses?: string; with?: Record<string, string> })[];
     const bun = steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
-    expect(bun?.with?.["bun-version"]).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(bun?.with?.["bun-version-file"]).toBe(".bun-version");
+    expect(readFileSync(join(repoRoot, ".bun-version"), "utf-8").trim()).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  // hashimoto H-5: a floating `latest` lets a Bun release turn main red (or
+  // hide a regression) with no commit. Every job reads .bun-version, and the
+  // image ships the same Bun the jobs tested.
+  it("every workflow takes bun from .bun-version, and the Dockerfile's bun image matches it", () => {
+    const pinned = readFileSync(join(repoRoot, ".bun-version"), "utf-8").trim();
+    for (const name of ["ci.yml", "a11y.yml", "coverage-gate.yml"]) {
+      const wf = loadWorkflow(name);
+      for (const [jobName, job] of Object.entries(wf.jobs)) {
+        for (const step of job.steps as (Step & { uses?: string; with?: Record<string, string> })[]) {
+          if (!step.uses?.startsWith("oven-sh/setup-bun@")) continue;
+          expect({ wf: name, job: jobName, file: step.with?.["bun-version-file"], version: step.with?.["bun-version"] }).toEqual({ wf: name, job: jobName, file: ".bun-version", version: undefined });
+        }
+      }
+    }
+    const df = readFileSync(join(repoRoot, "Dockerfile"), "utf-8");
+    expect(df).toMatch(new RegExp(`^ARG BUN_IMAGE=oven/bun:${pinned.replace(/\./g, "\\.")}-`, "m"));
+  });
+
+  // hashimoto H-6: bun as PID 1 neither reaps orphaned tool subprocesses nor
+  // is an init; tini forwards SIGTERM and reaps.
+  it("the image runs under tini as PID 1", () => {
+    const df = readFileSync(join(repoRoot, "Dockerfile"), "utf-8");
+    expect(df).toMatch(/apt-get install[^\n]*\btini\b/);
+    expect(df).toMatch(/^ENTRYPOINT \["\/usr\/bin\/tini", "--"\]$/m);
   });
 
   it("the Dockerfile pins base images by digest and the CLIs by exact version", () => {

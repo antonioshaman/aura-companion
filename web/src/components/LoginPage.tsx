@@ -113,8 +113,8 @@ export function LoginPage() {
         </form>
 
         <p className="mt-6 text-[11px] text-cc-muted text-center leading-relaxed">
-          Scan the QR code in Settings with your phone camera to authenticate,
-          or find your token in the server console.
+          On the machine running Aura, as the user it runs as, run{" "}
+          <code className="font-mono-code text-cc-fg">aura-companion token</code>: it prints the token and a link that signs this browser in.
         </p>
       </div>
     </div>

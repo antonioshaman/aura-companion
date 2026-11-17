@@ -18,7 +18,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - name: Install web dependencies
         working-directory: web
@@ -48,7 +48,10 @@ jobs:
             local SUMMARY="$PROJECT/coverage/coverage-summary.json"
 
             if [ ! -f "$SUMMARY" ]; then
-              echo "::warning::$PROJECT coverage-summary.json not found — skipping (test runner may have failed)."
+              # Fail closed: a missing summary means coverage was not measured,
+              # not that it passed (council review 2026-11-15, hashimoto H-4).
+              echo "::error::$PROJECT coverage-summary.json not found — coverage was not measured."
+              FAIL=1
               return
             fi
 
