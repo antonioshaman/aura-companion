@@ -210,9 +210,34 @@ export function TurnFailureCard({
  * failed turn is still the latest one (no user message after the card) and
  * the CLI is connected; after one click the button is gone.
  */
+function indexOfId(list: readonly ChatMessage[], id: string): number {
+  for (let i = list.length - 1; i >= 0; i--) if (list[i].id === id) return i;
+  return -1;
+}
+
+/** Id of the newest user message before the card (or in the whole list if the card is not in it). */
+function lastUserIdBefore(list: readonly ChatMessage[] | undefined, cardId: string): string | null {
+  if (!list) return null;
+  const at = indexOfId(list, cardId);
+  for (let i = (at >= 0 ? at : list.length) - 1; i >= 0; i--) if (list[i].role === "user") return list[i].id;
+  return null;
+}
+
+/** A user message came after the card (the turn was already repeated or replaced). */
+function userMessageAfter(list: readonly ChatMessage[] | undefined, cardId: string): boolean {
+  if (!list) return false;
+  const at = indexOfId(list, cardId);
+  if (at < 0) return false;
+  for (let i = at + 1; i < list.length; i++) if (list[i].role === "user") return true;
+  return false;
+}
+
 export function TurnFailureNotice({ sessionId, message }: { sessionId: string; message: ChatMessage }) {
   const failure = message.turnFailure;
-  const messages = useStore((s) => s.messages.get(sessionId));
+  // Narrow selectors returning primitives (abramov A3): subscribing to the
+  // whole message array re-rendered every failure card on every streamed token.
+  const lastUserId = useStore((s) => lastUserIdBefore(s.messages.get(sessionId), message.id));
+  const superseded = useStore((s) => userMessageAfter(s.messages.get(sessionId), message.id));
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
   const observer = useStore((s) => s.sessions.get(sessionId)?.sessionGroupRole) === "observer";
   const promotedAt = useStore((s) => s.llmAuthPromotedAt);
@@ -231,14 +256,10 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
     };
   }, []);
 
-  const list = messages ?? [];
-  const at = list.findIndex((m) => m.id === message.id);
-  const before = at >= 0 ? list.slice(0, at) : list;
-  const lastUser = [...before].reverse().find((m) => m.role === "user") ?? null;
-  const superseded = at >= 0 && list.slice(at + 1).some((m) => m.role === "user");
-
   const onRetry = useCallback(() => {
-    if (retried || !lastUser) return;
+    if (retried || !lastUserId) return;
+    const lastUser = useStore.getState().messages.get(sessionId)?.find((m) => m.id === lastUserId);
+    if (!lastUser) return;
     setRetried(true);
     const clientMsgId = createClientMessageId();
     sendToSession(sessionId, {
@@ -255,7 +276,7 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
       images: lastUser.images,
       timestamp: Date.now(),
     });
-  }, [retried, lastUser, sessionId]);
+  }, [retried, lastUserId, sessionId]);
 
   const onRestart = useCallback(() => {
     setRestart({ tag: "pending" });
@@ -270,7 +291,7 @@ export function TurnFailureNotice({ sessionId, message }: { sessionId: string; m
   }, [sessionId]);
 
   if (!failure) return null;
-  const retry: RetryState = retried ? "sent" : !lastUser || superseded || !cliConnected ? "unavailable" : "ready";
+  const retry: RetryState = retried ? "sent" : !lastUserId || superseded || !cliConnected ? "unavailable" : "ready";
   const recovery: FailureRecovery = turnFailureRecovery(failure, message.timestamp, promotedAt);
   return (
     <TurnFailureCard

@@ -18,6 +18,7 @@ import {
 import { useLoginAttempt, type LoginAttemptView, type LoginNotice } from "./useLoginAttempt.js";
 import { notePromotedFromStatus } from "./sign-in-restored.js";
 import { linkButtonClass, primaryButtonClass, secondaryButtonClass } from "../ui/buttons.js";
+import { CopyButton } from "../ui/CopyButton.js";
 
 /**
  * The sign-in window (LLM auth phase 2c, task 11; spec story 1). ONE window
@@ -67,25 +68,6 @@ function noticeText(n: LoginNotice): string {
   }
 }
 
-function CopyButton({ value, label }: { value: string; label: string }) {
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  const onClick = () => {
-    const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
-    if (!clip) {
-      setState("failed");
-      return;
-    }
-    clip.writeText(value).then(
-      () => setState("copied"),
-      () => setState("failed"),
-    );
-  };
-  return (
-    <button type="button" className={secondaryButtonClass} onClick={onClick}>
-      {state === "copied" ? "Copied" : state === "failed" ? "Copy failed — select it by hand" : label}
-    </button>
-  );
-}
 
 /** The one recovery action of a finished attempt. `sign_in` is a button; the rest are instructions. */
 function RecoveryAction({ action, onStartAgain }: { action: AuthAction; onStartAgain?: () => void }) {

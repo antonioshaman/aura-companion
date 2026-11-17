@@ -862,6 +862,9 @@ function handleParsedMessage(
       // (relaunch landed); clear any prior terminal-failure
       // banner state so the Composer re-enables atomically.
       store.clearCliFailure(sessionId);
+      // A new process: a classified failure of the old one (no `result`
+      // ever came) must not suppress the next turn's model fallback (abramov A6).
+      store.clearTurnFailure(sessionId);
       // PLAN T12 (Phase G) - if the user clicked
       // "Start new session with this draft" on a dead session,
       // route the stashed draft into THIS session as a pickup
@@ -2162,6 +2165,8 @@ export function waitForConnection(sessionId: string): Promise<void> {
 
 export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   const ws = sockets.get(sessionId);
+  // A new turn starts: the previous turn's classified-failure flag is spent (abramov A6).
+  if (msg.type === "user_message") useStore.getState().clearTurnFailure(sessionId);
   let outgoing: BrowserOutgoingMessage = msg;
   const isIdempotent = IDEMPOTENT_OUTGOING_TYPES.has(msg.type);
   if (isIdempotent) {

@@ -109,7 +109,6 @@ export interface ModelAvailabilityAnnouncement {
  */
 export interface TurnFailureNotice {
   failure: TurnFailure;
-  firedAt: number;
 }
 
 export interface CliStatusSlice {
@@ -154,7 +153,7 @@ export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice
   setTurnFailure: (sessionId, failure) =>
     set((s) => {
       const turnFailures = new Map(s.turnFailures);
-      turnFailures.set(sessionId, { failure, firedAt: Date.now() });
+      turnFailures.set(sessionId, { failure });
       return { turnFailures };
     }),
 

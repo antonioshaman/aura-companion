@@ -1357,6 +1357,28 @@ describe("handleMessage: result", () => {
     expect(state.turnFailures.has("s1")).toBe(false);
   });
 
+  // abramov A6: the "classified failure arrived" flag was cleared only by the
+  // next `result`. A process that died after the error frame (relaunch,
+  // drift kill, renewal) left it set, and the NEXT turn's unrelated error
+  // skipped the model-fallback logic.
+  it("the per-turn failure flag is dropped by a new process (session_init) and by a new user message", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    const turnFailure = { kind: "network", provider: "claude", providerMessage: "x" };
+    fireMessage({ type: "error", message: "x", turnFailure });
+    expect(useStore.getState().turnFailures.has("s1")).toBe(true);
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    expect(useStore.getState().turnFailures.has("s1")).toBe(false);
+
+    fireMessage({ type: "error", message: "x", turnFailure });
+    expect(useStore.getState().turnFailures.has("s1")).toBe(true);
+    wsModule.sendToSession("s1", { type: "user_message", content: "next turn" } as never);
+    expect(useStore.getState().turnFailures.has("s1")).toBe(false);
+  });
+
   // Phase 2c: the live card keeps the server's timestamp (the same one the
   // history replay uses), so "sign-in restored" compares server clock with
   // server clock; a frame without one falls back to the browser clock.
