@@ -268,6 +268,13 @@ describe("sign-in catalog", () => {
     // The status page (not-verified reason) gives the same install action.
     expect(describeNotVerified("cli_missing", "claude").action.kind).toBe("install_cli");
     expect(describeLoginFailure("wrong_service_user", "claude").action.kind).toBe("run_as_service_user");
+    // friedman P2-5: root says WHY (never as root) and both ways forward — a
+    // normal user, or the manual sign-in in the SSH session.
+    const root = describeLoginFailure("running_as_root", "codex");
+    expect(root.title).toContain("never run as root");
+    expect(root.detail).toContain("normal user");
+    expect(root.detail).toContain("codex login --device-auth");
+    expect(root.detail).not.toContain("service user, so");
     // macOS (D6): the UI cannot sign Claude in — the manual Terminal command is the way out.
     const mac = describeLoginFailure("unsupported_platform", "claude");
     expect(mac.action.kind).toBe("none");

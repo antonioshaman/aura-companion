@@ -326,6 +326,12 @@ export type LoginFailureReason =
   | "cli_missing"
   /** The server is not running as the service user. */
   | "wrong_service_user"
+  /**
+   * The server runs as root (e.g. `bunx aura-companion` in a root SSH shell on
+   * a fresh VPS): sign-in is never run as root, whatever the service user is
+   * (friedman P2-5 — "not the service user" was a false explanation there).
+   */
+  | "running_as_root"
   /** In-UI sign-in is not supported here (Claude on macOS, D6). */
   | "unsupported_platform"
   /** The CLI succeeded but the new credentials could not be checked or moved in place. */
@@ -341,7 +347,7 @@ export type LoginFailureReason =
 
 export const LOGIN_FAILURE_REASONS: readonly LoginFailureReason[] = [
   "code_rejected", "code_format", "attempt_mismatch", "expired", "network", "cli_output_unrecognised",
-  "cli_missing", "wrong_service_user", "unsupported_platform", "promotion_failed",
+  "cli_missing", "wrong_service_user", "running_as_root", "unsupported_platform", "promotion_failed",
   "storage_split", "promotion_incomplete",
 ];
 

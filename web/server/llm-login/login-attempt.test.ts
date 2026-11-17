@@ -314,7 +314,7 @@ describe.skipIf(!linux)("LoginAttempts", () => {
   it("preflight refusal: nothing spawned, no staging dir, the attempt is failed with the reason", async () => {
     const r = registry({ claude: "success" }, { callerUser: "root", callerUid: 0, serviceUser: null });
     const res = await r.start("claude");
-    expect(res).toMatchObject({ kind: "refused", attempt: { state: "failed", failure: "wrong_service_user" } });
+    expect(res).toMatchObject({ kind: "refused", attempt: { state: "failed", failure: "running_as_root" } });
     expect(attemptDirs()).toEqual([]);
     const mac = registry({ claude: "success" }, { platform: "darwin" });
     expect((await mac.start("claude")).attempt!.failure).toBe("unsupported_platform");

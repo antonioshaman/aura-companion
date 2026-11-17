@@ -1129,6 +1129,38 @@ describe("SettingsPage", () => {
     expect(screen.getByText("OpenAI key not configured")).toBeInTheDocument();
   });
 
+  // friedman P2-7: a saved token/key overrides the in-browser sign-in and the
+  // sign-in card said so with no way out. "Remove saved …" clears it (""),
+  // after a confirm, and says running sessions keep it until relaunched.
+  it("'Remove saved token' clears the Claude token after a confirm and explains running sessions", async () => {
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true, anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true, openaiApiKeyConfigured: false, updateChannel: "stable", publicUrl: "",
+    });
+    mockApi.updateSettings.mockResolvedValueOnce({ claudeCodeOAuthTokenConfigured: false, openaiApiKeyConfigured: false });
+    const confirm = vi.spyOn(window, "confirm");
+    try {
+      render(<SettingsPage />);
+      await screen.findByText("Claude Code token configured");
+      // No remove button for the unset OpenAI key.
+      expect(screen.queryByRole("button", { name: /Remove saved key/ })).toBeNull();
+      confirm.mockReturnValueOnce(false);
+      fireEvent.click(screen.getByRole("button", { name: /Remove saved token/ }));
+      expect(mockApi.updateSettings).not.toHaveBeenCalled();
+      confirm.mockReturnValueOnce(true);
+      fireEvent.click(screen.getByRole("button", { name: /Remove saved token/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ claudeCodeOAuthToken: "" }));
+      await screen.findByText("Claude Code token not configured");
+      expect(screen.getByText(/running ones keep the old credential until they are relaunched/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Remove saved token/ })).toBeNull();
+      const { axe } = await import("vitest-axe");
+      const providers = screen.getByRole("heading", { name: "Providers" }).closest("section") ?? document.body;
+      expect(await axe(providers as HTMLElement)).toHaveNoViolations();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   // When the Claude Code token is configured, the input value stays empty (draft state)
   // and the configured-hint is shown as a placeholder. Typing replaces immediately —
   // no focus-flip race possible because the value is never tied to focus state.

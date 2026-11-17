@@ -41,6 +41,8 @@ function formatCacheTs(value: number | string | null): string {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
 }
 
+const removeSavedClass = "text-xs font-medium link-primary-aa underline underline-offset-2 cursor-pointer min-h-[24px] disabled:opacity-50 disabled:cursor-default";
+
 export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
   const [anthropicModel, setAnthropicModel] = useState("claude-sonnet-4-6");
@@ -122,6 +124,35 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [providerRelaunchNotice, setProviderRelaunchNotice] = useState("");
   const [providerError, setProviderError] = useState("");
   const [providerRelaunching, setProviderRelaunching] = useState<null | "claude" | "codex">(null);
+
+  // A saved token / API key takes priority over the in-browser sign-in, and the
+  // sign-in card says so (friedman P2-7). This is the way out: clear it (the
+  // settings route treats "" as "not set"). Running sessions keep the removed
+  // credential until relaunched — said, not done silently.
+  const removeSavedCredential = async (provider: "claude" | "codex") => {
+    const what = provider === "claude" ? "the saved Claude Code token" : "the saved OpenAI API key";
+    if (!window.confirm(`Remove ${what}? New sessions will use the sign-in instead.`)) return;
+    setProviderSaving(true);
+    setProviderError("");
+    setProviderSaved(false);
+    setProviderRelaunchNotice("");
+    try {
+      const res = await api.updateSettings(provider === "claude" ? { claudeCodeOAuthToken: "" } : { openaiApiKey: "" });
+      setClaudeCodeTokenConfigured(res.claudeCodeOAuthTokenConfigured);
+      setOpenaiApiKeyConfigured(res.openaiApiKeyConfigured);
+      if (typeof setProviderConfiguredSlice === "function") {
+        setProviderConfiguredSlice({
+          claudeCodeOAuthTokenConfigured: res.claudeCodeOAuthTokenConfigured,
+          openaiApiKeyConfigured: res.openaiApiKeyConfigured,
+        });
+      }
+      setProviderRelaunchNotice(`Removed. New ${provider === "claude" ? "Claude Code" : "Codex"} sessions use the sign-in; running ones keep the old credential until they are relaunched.`);
+    } catch (e) {
+      setProviderError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProviderSaving(false);
+    }
+  };
 
   // Auth section state
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -909,6 +940,11 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <p id="claude-code-token-status" className="text-xs text-cc-muted">
                     {claudeCodeTokenConfigured ? "Claude Code token configured" : "Claude Code token not configured"}
                   </p>
+                  {claudeCodeTokenConfigured && (
+                    <button type="button" className={removeSavedClass} disabled={providerSaving} onClick={() => void removeSavedCredential("claude")}>
+                      Remove saved token (use the sign-in)
+                    </button>
+                  )}
                 </div>
 
                 {/* OpenAI API Key (Codex) */}
@@ -931,6 +967,11 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <p id="openai-api-key-status" className="text-xs text-cc-muted">
                     {openaiApiKeyConfigured ? "OpenAI key configured" : "OpenAI key not configured"}
                   </p>
+                  {openaiApiKeyConfigured && (
+                    <button type="button" className={removeSavedClass} disabled={providerSaving} onClick={() => void removeSavedCredential("codex")}>
+                      Remove saved key (use the sign-in)
+                    </button>
+                  )}
                 </div>
 
                 {/* Live regions persist in the DOM so async status changes are
