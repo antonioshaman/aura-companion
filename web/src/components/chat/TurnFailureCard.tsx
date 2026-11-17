@@ -13,6 +13,7 @@ import { api } from "../../api.js";
 import { createClientMessageId, sendToSession } from "../../ws.js";
 import { SignInButton } from "../llm-login/SignInButton.js";
 import { ensurePromotedAtLoaded, turnFailureRecovery } from "../llm-login/sign-in-restored.js";
+import { secondaryButtonClass } from "../ui/buttons.js";
 
 /**
  * Turn-failure card (LLM auth phase 1, task 14; spec story 3). The server
@@ -46,8 +47,6 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-const buttonClass =
-  "px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium bg-cc-active text-cc-fg hover:bg-cc-hover cursor-pointer disabled:opacity-50 disabled:cursor-default";
 
 function ActionRow({
   action,
@@ -66,7 +65,7 @@ function ActionRow({
     case "retry":
       if (retry === "sent") return <Outcome text="Sent again." />;
       return (
-        <button type="button" className={buttonClass} onClick={onRetry} disabled={retry === "unavailable" || !onRetry}>
+        <button type="button" className={secondaryButtonClass} onClick={onRetry} disabled={retry === "unavailable" || !onRetry}>
           {formatAction(action)}
         </button>
       );
@@ -77,7 +76,7 @@ function ActionRow({
           {/* aria-disabled while pending: `disabled` on the focused button drops focus to <body> (watson P2-4). */}
           <button
             type="button"
-            className={buttonClass}
+            className={secondaryButtonClass}
             onClick={restart.tag === "pending" ? undefined : onRestart}
             disabled={!onRestart}
             aria-disabled={restart.tag === "pending" || undefined}
@@ -94,7 +93,7 @@ function ActionRow({
         </a>
       );
     case "sign_in":
-      return <SignInButton provider={action.provider} mode="sign_in_again" className={buttonClass} />;
+      return <SignInButton provider={action.provider} mode="sign_in_again" className={secondaryButtonClass} />;
     case "update_cli":
     case "install_cli":
     case "run_as_root":

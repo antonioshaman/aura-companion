@@ -16,6 +16,7 @@ import {
 } from "../../../server/auth-status/auth-catalog.js";
 import { useLoginAttempt, type LoginAttemptView, type LoginNotice } from "./useLoginAttempt.js";
 import { notePromotedFromStatus } from "./sign-in-restored.js";
+import { linkButtonClass, primaryButtonClass, secondaryButtonClass } from "../ui/buttons.js";
 
 /**
  * The sign-in window (LLM auth phase 2c, task 11; spec story 1). ONE window
@@ -31,11 +32,6 @@ import { notePromotedFromStatus } from "./sign-in-restored.js";
  * shared catalog (the same words `aura-companion auth login` prints).
  */
 
-const buttonClass =
-  "px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium bg-cc-active text-cc-fg hover:bg-cc-hover cursor-pointer disabled:opacity-50 disabled:cursor-default";
-const primaryClass =
-  "inline-flex items-center px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium btn-primary-aa text-white cursor-pointer disabled:opacity-50 disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default";
-const linkButtonClass = "text-xs font-medium link-primary-aa underline underline-offset-2 cursor-pointer";
 
 /** After this long in `starting`, say so (the CLI is slow, not stuck). */
 export const SLOW_START_MS = 10_000;
@@ -84,7 +80,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
     );
   };
   return (
-    <button type="button" className={buttonClass} onClick={onClick}>
+    <button type="button" className={secondaryButtonClass} onClick={onClick}>
       {state === "copied" ? "Copied" : state === "failed" ? "Copy failed — select it by hand" : label}
     </button>
   );
@@ -95,7 +91,7 @@ function RecoveryAction({ action, onStartAgain }: { action: AuthAction; onStartA
   switch (action.kind) {
     case "sign_in":
       return (
-        <button type="button" className={primaryClass} onClick={onStartAgain} disabled={!onStartAgain}>
+        <button type="button" className={primaryButtonClass} onClick={onStartAgain} disabled={!onStartAgain}>
           Start again
         </button>
       );
@@ -160,7 +156,7 @@ function ReplyCodeForm({
             already ignores a submit while busy. */}
         <button
           type="submit"
-          className={primaryClass}
+          className={primaryButtonClass}
           disabled={code.trim() === "" || !onSubmitCode}
           aria-disabled={busy || undefined}
         >
@@ -200,7 +196,7 @@ function AwaitingUser({
     <div className="space-y-3">
       {prompt && (
         <div className="flex flex-wrap gap-2">
-          <a href={prompt.url} target="_blank" rel="noopener noreferrer" className={primaryClass}>
+          <a href={prompt.url} target="_blank" rel="noopener noreferrer" className={primaryButtonClass}>
             Open the sign-in page
           </a>
           <CopyButton value={prompt.url} label="Copy link" />
@@ -283,10 +279,10 @@ function Succeeded({
           className={`text-xs ${status?.planCheck === "mismatch" ? "text-cc-warning" : "text-cc-muted"}`}
         >
           <p className="font-medium">{plan.title}</p>
-          <p>{plan.detail}</p>
+          <p className="text-cc-muted">{plan.detail}</p>
           {status?.planCheck === "mismatch" && (
             <div className="mt-1.5 space-y-1">
-              <button type="button" className={buttonClass} onClick={onStartAgain} disabled={!onStartAgain}>
+              <button type="button" className={secondaryButtonClass} onClick={onStartAgain} disabled={!onStartAgain}>
                 Sign in with another account
               </button>
               <p className="text-[11px] text-cc-muted">Sign out at the provider first, or open the link in a private window.</p>
@@ -298,7 +294,7 @@ function Succeeded({
       {method && methodNote && (
         <div data-testid="sign-in-effective-method" className={`text-xs ${methodWarn ? "text-cc-warning" : "text-cc-muted"}`}>
           <p className="font-medium">{method.title}</p>
-          <p>{method.detail}</p>
+          <p className="text-cc-muted">{method.detail}</p>
         </div>
       )}
     </div>
@@ -324,7 +320,7 @@ function StateBody({
     return (
       <div className="space-y-2">
         <p className="text-xs text-cc-muted">No sign-in is running.</p>
-        <button type="button" className={primaryClass} onClick={onStartAgain} disabled={!onStartAgain}>
+        <button type="button" className={primaryButtonClass} onClick={onStartAgain} disabled={!onStartAgain}>
           Start sign-in
         </button>
       </div>
@@ -407,13 +403,13 @@ export function SignInPanel({ provider, view, now, status = null, onSubmitCode, 
       data-testid="sign-in-panel"
       data-provider={provider}
       data-state={a?.state ?? (view.loaded ? "none" : "loading")}
-      className="w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-cc-border bg-cc-card p-4 shadow-lg space-y-3"
+      className="w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-cc-border bg-cc-elevated p-4 shadow-lg space-y-3"
     >
       <div className="flex items-start justify-between gap-3">
         <h2 id={headingId} ref={headingRef} tabIndex={-1} className="text-sm font-semibold text-cc-fg outline-none">
           Sign in to {providerLabel(provider)}
         </h2>
-        <button type="button" className={buttonClass} onClick={onClose} disabled={!onClose}>
+        <button type="button" className={secondaryButtonClass} onClick={onClose} disabled={!onClose}>
           Close
         </button>
       </div>
@@ -423,10 +419,10 @@ export function SignInPanel({ provider, view, now, status = null, onSubmitCode, 
           <p className="text-xs font-medium text-cc-fg">{describeLoginInProgressElsewhere(provider).title}</p>
           <p className="text-[11px] text-cc-muted">{describeLoginInProgressElsewhere(provider).detail}</p>
           <div className="flex gap-2">
-            <button type="button" className={buttonClass} onClick={() => setAckElsewhere(true)}>
+            <button type="button" className={secondaryButtonClass} onClick={() => setAckElsewhere(true)}>
               Continue here
             </button>
-            <button type="button" className={buttonClass} onClick={onCancel} disabled={!onCancel || view.pending === "cancel"}>
+            <button type="button" className={secondaryButtonClass} onClick={onCancel} disabled={!onCancel || view.pending === "cancel"}>
               Cancel sign-in
             </button>
           </div>
@@ -454,12 +450,12 @@ export function SignInPanel({ provider, view, now, status = null, onSubmitCode, 
 
       <div className="flex justify-end gap-2 pt-1">
         {cancellable && (
-          <button type="button" className={buttonClass} onClick={onCancel} disabled={!onCancel || view.pending === "cancel"}>
+          <button type="button" className={secondaryButtonClass} onClick={onCancel} disabled={!onCancel || view.pending === "cancel"}>
             {view.pending === "cancel" ? "Cancelling…" : "Cancel sign-in"}
           </button>
         )}
         {a?.state === "succeeded" && (
-          <button type="button" className={buttonClass} onClick={onClose} disabled={!onClose}>
+          <button type="button" className={secondaryButtonClass} onClick={onClose} disabled={!onClose}>
             Done
           </button>
         )}
@@ -494,7 +490,7 @@ export function SignInChip({
       role="region"
       aria-label={`${providerLabel(provider)} sign-in`}
       data-testid="sign-in-chip"
-      className="flex flex-wrap items-center gap-2 rounded-full border border-cc-border bg-cc-card px-3 py-1.5 shadow-lg text-xs text-cc-fg"
+      className="flex flex-wrap items-center gap-2 rounded-full border border-cc-border bg-cc-elevated px-3 py-1.5 shadow-lg text-xs text-cc-fg"
     >
       {/* A status region mounted with the chip: once the window is closed to
           the chip, "Signed in" / "Sign-in failed" is spoken (watson P2-2). */}
