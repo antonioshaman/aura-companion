@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import type { ProviderAuthStatus, ProviderId } from "../../server/auth-status/auth-types.js";
 import { describeAuthState } from "../../server/auth-status/auth-catalog.js";
 import { EmbeddedSignIn } from "./llm-login/SignInPanel.js";
+import { CopyButton } from "./ui/CopyButton.js";
 
 type Step = "welcome" | "claude" | "codex" | "done";
 
@@ -604,7 +605,7 @@ function CommandBlock({ command }: { command: string }) {
   return (
     <div className="flex items-center justify-between gap-2 rounded-md border border-cc-border px-3 py-1" style={{ background: "var(--color-cc-code-bg)" }}>
       <code className="text-[12px] font-mono-code text-cc-fg select-all break-all">{command}</code>
-      <CopyButton text={command} />
+      <CopyButton value={command} label="Copy" ariaLabel="Copy command" />
     </div>
   );
 }
@@ -688,40 +689,3 @@ function DoneStep({
   );
 }
 
-/* ── Copy Button ──────────────────────────────────────────────────────────── */
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
-  }, [text]);
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="text-[10px] text-cc-muted hover:text-cc-fg transition-colors flex items-center gap-1 min-h-[44px] min-w-[44px] justify-end"
-      aria-label="Copy command"
-    >
-      {copied ? (
-        <>
-          <svg className="w-3 h-3 text-cc-success" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-          Copied!
-        </>
-      ) : (
-        <>
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2" />
-            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-          </svg>
-          Copy
-        </>
-      )}
-    </button>
-  );
-}
