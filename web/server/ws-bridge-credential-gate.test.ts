@@ -240,3 +240,103 @@ describe("WsBridge credential gate", () => {
     expect(frames.some((f: any) => f.type === "session_update" && f.session.credential_renewal?.state === "reconnecting")).toBe(true);
   });
 });
+
+/**
+ * beck B-3 (council review 2026-11-15): the contract "nothing reaches the old
+ * process, the new process gets it once" was proven for one flush path and
+ * one adapter object. Here: every flush trigger while holding (table), an
+ * adapter swap, a release that arrives before the new adapter is connected,
+ * and the Claude path (`handleCLIOpen`).
+ */
+function codexAdapter(connected = true) {
+  let emit: ((msg: any) => void) | undefined;
+  let meta: ((m: any) => void) | undefined;
+  const state = { connected };
+  const send = vi.fn(() => true);
+  const adapter = {
+    isConnected: () => state.connected,
+    send,
+    disconnect: async () => {},
+    onBrowserMessage: (cb: (msg: any) => void) => { emit = cb; },
+    onSessionMeta: (cb: (m: any) => void) => { meta = cb; },
+    onDisconnect: () => {},
+    onInitError: () => {},
+    sendUserFrameFromServer: vi.fn(() => ({ kind: "sent" as const })),
+  };
+  return { adapter, send, state, emit: (m: any) => emit?.(m), meta: (m: any) => meta?.(m) };
+}
+
+describe("credential gate — every flush path while holding (beck B-3)", () => {
+  const triggers: Array<{ name: string; fire: (id: string, a: ReturnType<typeof codexAdapter>) => void }> = [
+    { name: "backend_session_meta", fire: (_id, a) => a.meta({ cliSessionId: "thr-1", model: "gpt-x", cwd: "/test" }) },
+    { name: "backend_session_update", fire: (_id, a) => a.emit({ type: "session_update", session: { model: "gpt-y" } }) },
+    { name: "turn_completed_flush", fire: (_id, a) => a.emit({ type: "result", data: { type: "result", subtype: "success", is_error: false, result: "ok", duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0, stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, uuid: "u", session_id: "c" } }) },
+    { name: "adapter_attach (a second adapter attached while holding)", fire: (id) => bridge.attachBackendAdapter(id, codexAdapter().adapter as any, "codex") },
+    { name: "backend_connected_send (another browser frame arrives)", fire: (id) => bridge.handleBrowserMessage(bridge.getSession(id)!.browserSockets.values().next().value!, JSON.stringify({ type: "mcp_get_status" })) },
+  ];
+
+  for (const t of triggers) {
+    it(`${t.name}: the held user_message is not sent to the running process`, () => {
+      const id = `fp-${t.name.split(" ")[0]}`;
+      const browser = socket({ kind: "browser", sessionId: id });
+      bridge.handleBrowserOpen(browser, id);
+      const a = codexAdapter();
+      bridge.attachBackendAdapter(id, a.adapter as any, "codex");
+      holding.add(id);
+      bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "held" }));
+      a.send.mockClear();
+      t.fire(id, a);
+      expect(userTypes(a.send).filter((x) => x === "user_message")).toEqual([]);
+      expect(bridge.getSession(id)!.pendingMessages.some((raw) => JSON.parse(raw).type === "user_message")).toBe(true);
+    });
+  }
+
+  it("adapter swap: the old adapter never gets the held message, the new one gets it exactly once", () => {
+    const id = "swap-1";
+    const browser = socket({ kind: "browser", sessionId: id });
+    bridge.handleBrowserOpen(browser, id);
+    const oldA = codexAdapter();
+    bridge.attachBackendAdapter(id, oldA.adapter as any, "codex");
+    holding.add(id);
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "held" }));
+    const newA = codexAdapter();
+    bridge.attachBackendAdapter(id, newA.adapter as any, "codex"); // relaunch while still holding
+    holding.delete(id);
+    bridge.releaseHeldMessages(id);
+    bridge.releaseHeldMessages(id);
+    expect(userTypes(oldA.send).filter((x) => x === "user_message")).toEqual([]);
+    expect(userTypes(newA.send).filter((x) => x === "user_message")).toEqual(["user_message"]);
+  });
+
+  it("a release that arrives before the new adapter is connected is delivered once it connects", () => {
+    const id = "swap-2";
+    const browser = socket({ kind: "browser", sessionId: id });
+    bridge.handleBrowserOpen(browser, id);
+    holding.add(id);
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "held" }));
+    const newA = codexAdapter(false);
+    bridge.attachBackendAdapter(id, newA.adapter as any, "codex");
+    holding.delete(id);
+    bridge.releaseHeldMessages(id); // not connected yet → stays queued
+    expect(newA.send).not.toHaveBeenCalled();
+    newA.state.connected = true;
+    newA.meta({ cliSessionId: "thr-2", model: "gpt-x", cwd: "/test" }); // first frame of the new process
+    expect(userTypes(newA.send).filter((x) => x === "user_message")).toEqual(["user_message"]);
+  });
+
+  it("Claude: handleCLIOpen does not flush held input to the old CLI; release delivers it once", () => {
+    const id = "claude-1";
+    const browser = socket({ kind: "browser", sessionId: id });
+    bridge.handleBrowserOpen(browser, id);
+    holding.add(id);
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "held-claude" }));
+    const cli = socket({ kind: "cli", sessionId: id });
+    bridge.handleCLIOpen(cli, id);
+    const sentLines = () => cli.send.mock.calls.map(([raw]: any[]) => String(raw)).filter((l: string) => l.includes("held-claude"));
+    expect(sentLines()).toEqual([]);
+    holding.delete(id);
+    bridge.releaseHeldMessages(id);
+    bridge.releaseHeldMessages(id);
+    expect(sentLines()).toHaveLength(1);
+  });
+});
