@@ -194,20 +194,13 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{
-        background: "linear-gradient(145deg, var(--color-cc-bg) 0%, color-mix(in srgb, var(--color-cc-bg) 94%, var(--color-cc-primary) 6%) 100%)",
+        // Plain page ground, short fade: the first screen speaks the same calm
+        // language as the sign-in window and Diagnostics (saarinen S-6).
+        background: "var(--color-cc-bg)",
         opacity: entered ? 1 : 0,
-        transition: skipMotion ? "none" : "opacity 400ms cubic-bezier(0.16, 1, 0.3, 1)",
+        transition: skipMotion ? "none" : "opacity 200ms ease-out",
       }}
     >
-      {/* Decorative accent line */}
-      <div
-        className="absolute top-0 left-0 right-0 h-[2px]"
-        style={{
-          background: "linear-gradient(90deg, transparent 0%, var(--color-cc-primary) 30%, var(--color-cc-primary) 70%, transparent 100%)",
-          opacity: 0.6,
-        }}
-      />
-
       <div
         ref={dialogRef}
         role="dialog"
@@ -219,7 +212,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           opacity: entered ? 1 : 0,
           transition: skipMotion
             ? "none"
-            : "transform 500ms cubic-bezier(0.16, 1, 0.3, 1) 100ms, opacity 400ms cubic-bezier(0.16, 1, 0.3, 1) 100ms",
+            : "transform 250ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease-out",
         }}
       >
         {/* Step indicator */}
@@ -250,11 +243,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
 
         {/* Content card */}
         <div
-          className="bg-cc-card border border-cc-border overflow-hidden"
-          style={{
-            borderRadius: 16,
-            boxShadow: "0 1px 3px var(--color-cc-border), 0 8px 32px var(--color-cc-border)",
-          }}
+          className="bg-cc-elevated border border-cc-border overflow-hidden rounded-xl shadow-lg"
         >
           {step === "welcome" && (
             <WelcomeStep
@@ -268,7 +257,6 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           {step === "claude" && (
             <ProviderSetupStep
               provider="claude"
-              stepLabel="Step 1 of 2"
               status={statuses.claude ?? null}
               statusLoaded={statusLoaded}
               advancedValue={claudeToken}
@@ -285,7 +273,6 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           {step === "codex" && (
             <ProviderSetupStep
               provider="codex"
-              stepLabel="Step 2 of 2"
               status={statuses.codex ?? null}
               statusLoaded={statusLoaded}
               advancedValue={openaiKey}
@@ -442,7 +429,6 @@ const PROVIDER_PITCH: Record<ProviderId, string> = {
 
 function ProviderSetupStep({
   provider,
-  stepLabel,
   status,
   statusLoaded,
   advancedValue,
@@ -457,7 +443,6 @@ function ProviderSetupStep({
   error,
 }: {
   provider: ProviderId;
-  stepLabel: string;
   status: ProviderAuthStatus | null;
   statusLoaded: boolean;
   advancedValue: string;
@@ -484,7 +469,6 @@ function ProviderSetupStep({
   return (
     <div className="p-7 pb-6" data-testid={`onboarding-step-${provider}`}>
       <div className="mb-5">
-        <div className="text-[10px] uppercase tracking-[0.12em] text-cc-muted font-medium mb-2">{stepLabel}</div>
         <h2 id={STEP_HEADING_ID} tabIndex={-1} className="text-xl font-semibold text-cc-fg leading-tight outline-none">Set up {name}</h2>
         <p className="text-sm text-cc-muted mt-1.5 leading-relaxed">{PROVIDER_PITCH[provider]}</p>
       </div>
@@ -654,7 +638,7 @@ function DoneStep({
         transform: visible ? "translateY(0)" : "translateY(8px)",
         transition: skipMotion
           ? "none"
-          : "opacity 400ms cubic-bezier(0.16, 1, 0.3, 1), transform 400ms cubic-bezier(0.16, 1, 0.3, 1)",
+          : "opacity 200ms ease-out, transform 250ms cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
       {/* Success icon */}
@@ -697,7 +681,6 @@ function DoneStep({
       <button
         onClick={onDone}
         className="btn-primary-aa w-full px-4 py-2.5 min-h-[44px] rounded-lg text-sm font-medium text-white transition-[background] duration-150"
-        style={{ boxShadow: "0 1px 3px var(--color-cc-primary-btn)" }}
       >
         Get Started
       </button>

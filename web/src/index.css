@@ -21,6 +21,9 @@
   --color-cc-bg: #faf9f6;
   --color-cc-fg: #141413;
   --color-cc-card: #ffffff;
+  /* Floating surfaces (dialogs, popovers, chips): raised ABOVE the page in
+     both themes — in dark, lighter than cc-bg, never darker (saarinen S-1). */
+  --color-cc-elevated: #ffffff;
   --color-cc-primary: #d97757;
   --color-cc-focus: #ad5535;
   --color-cc-primary-hover: #e08b6b;
@@ -195,6 +198,7 @@
   --color-cc-bg: #262624;
   --color-cc-fg: #faf9f5;
   --color-cc-card: #141413;
+  --color-cc-elevated: #30302e;
   --color-cc-primary: #d97757;
   --color-cc-focus: #d97757;
   --color-cc-primary-hover: #e08b6b;
@@ -209,7 +213,9 @@
   --color-cc-active: rgba(222,220,209,0.10);
   --color-cc-success: #48bb78;
   --color-cc-error: #fc8181;
-  --color-cc-warning: #f6e05e;
+  /* Desaturated amber (was #f6e05e lemon, the brightest pixel on the page,
+     saarinen S-2); ~8:1 on cc-bg, ~10:1 on cc-card. */
+  --color-cc-warning: #e0b45a;
   --color-cc-sidebar-footer: #141413;
   --color-cc-separator: rgba(222,220,209,0.08);
   --color-cc-info: #63b3ed;
@@ -323,15 +329,13 @@
 /* ─── Onboarding provider cards ─────────────────────────────────────────── */
 .provider-card--claude:hover,
 .provider-card--claude:focus-visible {
+  /* Border only: no lift or coloured glow (saarinen S-6). */
   border-color: var(--color-cc-primary);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-cc-primary) 12%, transparent);
 }
 .provider-card--codex:hover,
 .provider-card--codex:focus-visible {
+  /* Border only: no lift or coloured glow (saarinen S-6). */
   border-color: var(--color-cc-codex);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-cc-codex) 12%, transparent);
 }
 
 /* WCAG AA button backgrounds — darker shades for white text contrast */

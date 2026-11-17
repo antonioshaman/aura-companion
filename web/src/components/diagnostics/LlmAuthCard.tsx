@@ -30,6 +30,7 @@ import {
 import { ago, dateTime } from "./format.js";
 import { SignInButton, type SignInButtonMode } from "../llm-login/SignInButton.js";
 import { notePromotedFromStatus } from "../llm-login/sign-in-restored.js";
+import { primaryButtonClass, secondaryButtonClass } from "../ui/buttons.js";
 
 /**
  * "LLM sign-in" card on the Diagnostics page (LLM auth phase 1, task 14;
@@ -55,8 +56,6 @@ export type LlmAuthLoad<T> = { tag: "loading" } | { tag: "ready"; data: T | null
 type Busy = "none" | "status" | "doctor";
 
 const errText = (e: unknown) => (e instanceof Error && e.message ? e.message : String(e));
-const buttonClass =
-  "shrink-0 px-3 py-2 min-h-[36px] rounded-lg text-xs font-medium bg-cc-active text-cc-fg hover:bg-cc-hover cursor-pointer disabled:opacity-50 disabled:cursor-default";
 
 function placeText(p: DoctorPlace): string {
   const path = p.homeUser ? `~${p.homeUser}/${p.relPath}` : p.relPath;
@@ -130,12 +129,12 @@ function PlanControls({
           className={`text-xs ${check === "mismatch" ? "text-cc-warning" : "text-cc-muted"}`}
         >
           <p className="font-medium">{plan.title}</p>
-          <p>{plan.detail}</p>
+          <p className="text-cc-muted">{plan.detail}</p>
           {check === "mismatch" && (
             <div className="mt-1.5 space-y-1">
               <div className="flex flex-wrap gap-2">
-                <SignInButton provider={s.provider} mode="another_account" className={buttonClass} />
-                <button type="button" className={buttonClass} disabled={busy || !onExpectedPlan} onClick={() => onExpectedPlan?.(s.provider, null)}>
+                <SignInButton provider={s.provider} mode="another_account" className={secondaryButtonClass} />
+                <button type="button" className={secondaryButtonClass} disabled={busy || !onExpectedPlan} onClick={() => onExpectedPlan?.(s.provider, null)}>
                   Remove the expectation
                 </button>
               </div>
@@ -156,7 +155,7 @@ function EffectiveMethodNote({ s }: { s: ProviderAuthStatus }) {
   return (
     <div data-testid={`llm-auth-method-${s.provider}`} className={`text-xs ${warn ? "text-cc-warning" : "text-cc-muted"}`}>
       <p className="font-medium">{e.title}</p>
-      <p>{e.detail}</p>
+      <p className="text-cc-muted">{e.detail}</p>
     </div>
   );
 }
@@ -179,7 +178,10 @@ function ProviderStatus({
   const action = entry.action.kind === "retry" || entry.action.kind === "sign_in" ? "" : formatAction(entry.action);
   const bad = s.state === "invalid" || s.state === "not_signed_in";
   return (
-    <div className="space-y-1" data-testid={`llm-auth-status-${s.provider}`} data-state={s.state}>
+    // Three groups — facts / notes / actions — 12px apart, 4px inside, so the
+    // eye can tell where the facts end and the decisions begin (saarinen S-4).
+    <div className="space-y-3" data-testid={`llm-auth-status-${s.provider}`} data-state={s.state}>
+      <div className="space-y-1">
       <p className={`text-[13px] font-medium ${bad ? "text-cc-error" : s.state === "working" ? "text-cc-success" : "text-cc-warning"}`}>
         {entry.title}
       </p>
@@ -187,27 +189,35 @@ function ProviderStatus({
       {action && <p className="text-xs text-cc-fg break-words">{action}</p>}
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
         <dt className="text-cc-muted">Account</dt>
-        <dd className="text-cc-fg break-all">{formatKnown(s.account)}</dd>
+        <dd className="min-w-0 text-cc-fg [overflow-wrap:anywhere]">{formatKnown(s.account)}</dd>
         <dt className="text-cc-muted">Plan</dt>
         <dd className="text-cc-fg">{formatKnown(s.plan)}</dd>
         <dt className="text-cc-muted">Sign-in</dt>
         <dd className="text-cc-fg">{formatKnown(s.method)}</dd>
         <dt className="text-cc-muted">Token expires</dt>
         <dd className="text-cc-fg tabular-nums">{formatKnown(s.tokenExpiresAt, dateTime)}</dd>
-        <dt className="text-cc-muted">Last successful check</dt>
+        <dt className="text-cc-muted">Last OK check</dt>
         <dd className="text-cc-fg tabular-nums">{s.lastSuccessAt === null ? "never" : `${dateTime(s.lastSuccessAt)} (${ago(now, s.lastSuccessAt)})`}</dd>
         <dt className="text-cc-muted">Checked</dt>
         <dd className="text-cc-fg tabular-nums">
           {dateTime(s.checkedAt)} ({verifiedByLabel(s.verifiedBy)})
         </dd>
+        {/* Path and version on their own rows: `break-all` split "0.162.1"
+            mid-number (saarinen S-5); paths break at any point only when they must. */}
         <dt className="text-cc-muted">CLI</dt>
-        <dd className="text-cc-fg font-mono-code break-all">
-          {formatKnown(s.cli.path)} {formatKnown(s.cli.version)}
-        </dd>
+        <dd className="min-w-0 text-cc-fg font-mono-code [overflow-wrap:anywhere]">{formatKnown(s.cli.path)}</dd>
+        <dt className="text-cc-muted">Version</dt>
+        <dd className="text-cc-fg font-mono-code whitespace-nowrap">{formatKnown(s.cli.version)}</dd>
       </dl>
-      <EffectiveMethodNote s={s} />
-      <PlanControls s={s} busy={planBusy} onExpectedPlan={onExpectedPlan} />
-      <SignInButton provider={s.provider} mode={signInMode(s, attempt)} className={buttonClass} />
+      </div>
+      <div className="space-y-2 empty:hidden">
+        <EffectiveMethodNote s={s} />
+        <PlanControls s={s} busy={planBusy} onExpectedPlan={onExpectedPlan} />
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {/* When sign-in is broken, signing in is THE action: primary weight. */}
+        <SignInButton provider={s.provider} mode={signInMode(s, attempt)} className={bad ? primaryButtonClass : secondaryButtonClass} />
+      </div>
     </div>
   );
 }
@@ -227,7 +237,7 @@ function ProviderDoctor({ r }: { r: ProviderDoctorResult }) {
             <li key={`f${i}`} className="text-xs">
               <p className="text-cc-warning font-medium">{e.title}</p>
               <p className="text-cc-muted">{e.detail}</p>
-              <p className="text-cc-fg font-mono-code break-all">{findingFact(f)}</p>
+              <p className="min-w-0 text-cc-fg font-mono-code [overflow-wrap:anywhere]">{findingFact(f)}</p>
               {action && <p className="text-cc-fg break-words">{action}</p>}
             </li>
           );
@@ -295,10 +305,10 @@ export function LlmAuthView({
           <p className="text-[11px] text-cc-muted">Claude and Codex as the service user. Checks run only when you press a button.</p>
         </div>
         <div className="flex gap-2">
-          <button type="button" className={buttonClass} onClick={onCheck} disabled={busy !== "none" || !onCheck}>
+          <button type="button" className={secondaryButtonClass} onClick={onCheck} disabled={busy !== "none" || !onCheck}>
             {busy === "status" ? "Checking…" : "Check"}
           </button>
-          <button type="button" className={buttonClass} onClick={onDoctor} disabled={busy !== "none" || !onDoctor}>
+          <button type="button" className={secondaryButtonClass} onClick={onDoctor} disabled={busy !== "none" || !onDoctor}>
             {busy === "doctor" ? "Running…" : "Run doctor"}
           </button>
         </div>
@@ -317,7 +327,7 @@ export function LlmAuthView({
                 key={id}
                 provider={id}
                 mode={attempts[id] && !isTerminalLoginState(attempts[id]!.state) ? "continue" : "sign_in"}
-                className={buttonClass}
+                className={secondaryButtonClass}
               />
             ))}
           </div>

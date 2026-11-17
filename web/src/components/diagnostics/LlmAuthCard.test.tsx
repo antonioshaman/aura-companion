@@ -211,6 +211,24 @@ describe("LlmAuthView — sign-in, plan and method (phase 2c)", () => {
     expect(useStore.getState().loginDialog).toEqual({ provider: "codex", intent: "resume", collapsed: false });
   });
 
+  // saarinen S-4: when sign-in is broken, signing in is THE action (primary
+  // weight); on a working provider it stays secondary.
+  it("the sign-in button is primary only when the provider is not working", () => {
+    view({ state: "not_signed_in" }, { state: "working" });
+    expect(screen.getByRole("button", { name: "Sign in to Claude" }).className).toContain("btn-primary-aa");
+    const codexButton = within(screen.getByTestId("llm-auth-status-codex")).getByRole("button");
+    expect(codexButton.className).not.toContain("btn-primary-aa");
+  });
+
+  // saarinen S-5: the version has its own row and never breaks mid-number.
+  it("shows the CLI path and version on separate rows; the version does not wrap", () => {
+    view();
+    const claude = screen.getByTestId("llm-auth-status-claude");
+    const version = within(claude).getByText("Version").nextElementSibling as HTMLElement;
+    expect(version.className).toContain("whitespace-nowrap");
+    expect(version.className).not.toContain("break-all");
+  });
+
   it("a finished attempt does not turn the button into Continue", () => {
     view({}, {}, { attempts: { claude: loginAttempt("claude", "succeeded") } });
     expect(screen.getByRole("button", { name: "Sign in to Claude again" })).toBeInTheDocument();
