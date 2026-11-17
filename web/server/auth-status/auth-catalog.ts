@@ -306,7 +306,7 @@ export function turnFailureFacts(failure: TurnFailure, formatTime: (ms: number) 
   if (failure.likelyCause === "model_outside_plan") facts.push("Likely cause: the selected model is not included in the plan.");
   if (failure.credentialsCompared === false) facts.push("Could not compare this session's credentials with the main sign-in.");
   if (failure.kind === "cli_outdated") {
-    facts.push(`Required CLI version: ${failure.requiredVersion ? `${failure.requiredVersion} or newer` : "unknown"}`);
+    facts.push(`Required CLI version: ${failure.requiredVersion ? `${failure.requiredVersion} or newer` : "a newer version than the one installed"}`);
   }
   return facts;
 }
@@ -405,8 +405,10 @@ export function describeLoginFailure(reason: LoginFailureReason, provider: Provi
     case "cli_output_unrecognised":
       return {
         title: `${name}: sign-in output not recognised`,
-        detail: `The ${name} CLI printed something this version of Aura does not understand, so the sign-in was stopped. ${unchanged}`,
-        action: reloginAction(provider),
+        // Retrying the same flow loops into the same failure (willison #4):
+        // the way out that always works is the manual sign-in.
+        detail: `The ${name} CLI printed something this version of Aura does not understand, so the sign-in was stopped. ${unchanged} ${manualSignInLine(provider)}`,
+        action: { kind: "none" },
       };
     case "cli_missing":
       return { title: `${name}: CLI not found`, detail: `The ${name} CLI was not found on the service PATH.`, action: installCliAction(provider) };

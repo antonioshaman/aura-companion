@@ -564,3 +564,27 @@ describe("expired token (no refresh)", () => {
     expect(url).toContain("oauth/usage");
   });
 });
+
+// willison #7 (council review 2026-11-15): the usage endpoint is provider-
+// internal and gets reshaped; a cast showed a string or a 0–1 fraction as a
+// gauge. parseUsageBody accepts the known shape and returns null otherwise.
+describe("parseUsageBody", () => {
+  it("accepts the known shape (windows may be null, resets_at may be absent)", async () => {
+    const { parseUsageBody } = await import("./usage-limits.js");
+    expect(parseUsageBody({ five_hour: { utilization: 40, resets_at: "2026-11-17T12:00:00Z" }, seven_day: null })).toEqual({
+      five_hour: { utilization: 40, resets_at: "2026-11-17T12:00:00Z" },
+      seven_day: null,
+      extra_usage: null,
+    });
+    expect(parseUsageBody({ five_hour: { utilization: 0 }, seven_day: { utilization: 3, resets_at: null } })?.five_hour).toEqual({ utilization: 0, resets_at: null });
+  });
+
+  it("rejects a reshaped body: string or NaN utilization, non-string reset, malformed extra usage, non-object", async () => {
+    const { parseUsageBody } = await import("./usage-limits.js");
+    expect(parseUsageBody({ five_hour: { utilization: "40%" }, seven_day: null })).toBeNull();
+    expect(parseUsageBody({ five_hour: { utilization: Number.NaN }, seven_day: null })).toBeNull();
+    expect(parseUsageBody({ five_hour: { utilization: 4, resets_at: 1700000000 }, seven_day: null })).toBeNull();
+    expect(parseUsageBody({ five_hour: null, seven_day: null, extra_usage: { is_enabled: "yes" } })).toBeNull();
+    expect(parseUsageBody("not an object")).toBeNull();
+  });
+});

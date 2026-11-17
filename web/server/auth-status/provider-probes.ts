@@ -263,14 +263,21 @@ export async function probeClaudeAuth(deps: ProviderProbeDeps): Promise<Provider
   if (locallyExpired(loc.expiresAt, deps.now())) return skip(seed, "token_expired_locally", deps);
 
   const gate = await gateCli(seed, deps);
-  if (!gate.ok) return skip(seed, gate.reason, deps);
+  // Only the `auth status` SPAWN (account/plan enrichment) needs a proven CLI
+  // version — it is what could rotate the refresh token. The provider check
+  // below is a direct HTTPS call, no CLI involved: an unproven version (every
+  // fresh install after an auto-update) still gets it, with account/plan from
+  // the credential file only (council review 2026-11-15, willison #3).
+  if (!gate.ok && gate.reason !== "cli_version_unproven") return skip(seed, gate.reason, deps);
 
-  const status = await runGuardedStatus(seed, gate.path, loc.meta.path, deps);
-  if (!status.ok) return skip(seed, status.reason, deps);
-  const fields = status.exitCode === 0 ? parseClaudeAuthStatus(status.stdout) : null;
-  if (!fields || !fields.loggedIn) return skip(seed, "probe_inconclusive", deps);
-  if (fields.email) seed.account = knownField(fields.email);
-  if (fields.subscriptionType) seed.plan = knownField(fields.subscriptionType);
+  if (gate.ok) {
+    const status = await runGuardedStatus(seed, gate.path, loc.meta.path, deps);
+    if (!status.ok) return skip(seed, status.reason, deps);
+    const fields = status.exitCode === 0 ? parseClaudeAuthStatus(status.stdout) : null;
+    if (!fields || !fields.loggedIn) return skip(seed, "probe_inconclusive", deps);
+    if (fields.email) seed.account = knownField(fields.email);
+    if (fields.subscriptionType) seed.plan = knownField(fields.subscriptionType);
+  }
 
   // Provider check: the token-free usage request with the non-expired token.
   const secret = deps.readClaudeSecret(deps.env);

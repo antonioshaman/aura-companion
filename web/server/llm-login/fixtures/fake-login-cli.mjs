@@ -87,7 +87,8 @@ if (provider === "claude") {
   const state = b64url(32);
   const challenge = b64url(32);
   if (scenario === "garbage") {
-    process.stdout.write("Something new happened in this CLI version\n");
+    // Not understood AND unsafe (a second link): still fail-closed (willison #4).
+    process.stdout.write("Something new: sign in at https://claude.example.test/other\n");
   } else {
     process.stdout.write(
       "Opening browser to sign in…\n" +
@@ -150,7 +151,7 @@ if (provider === "claude") {
     process.exit(1);
   }
   if (scenario === "garbage") {
-    process.stdout.write("Unexpected banner from a future Codex\n");
+    process.stdout.write("Unexpected banner from a future Codex: https://auth.example.test/device\n");
   } else {
     const alnum = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
     const pick = (n) => Array.from(randomBytes(n), (b) => alnum[b % alnum.length]).join("");

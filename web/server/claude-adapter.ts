@@ -1435,6 +1435,9 @@ export class ClaudeAdapter implements IBackendAdapter {
   private handleAssistantMessage(msg: CLIAssistantMessage): void {
     // Closed-enum `error` tag on the CLI's synthetic error frame (task 10).
     if (typeof msg.error === "string" && msg.error) this.turnAssistantError = msg.error;
+    // A real (non-synthetic) answer after an api_retry means that retry
+    // recovered: it says nothing about a later failure (willison #2).
+    else if ((msg.message as { model?: unknown } | undefined)?.model !== "<synthetic>") this.turnLastRetry = null;
     // Rate-limit-class classification. The Claude CLI fabricates a
     // synthetic assistant message (`model: "<synthetic>"`) containing
     // the human-readable error string ("You've hit your session limit
@@ -1580,7 +1583,9 @@ export class ClaudeAdapter implements IBackendAdapter {
       errors: Array.isArray(msg.errors) ? msg.errors.filter((e): e is string => typeof e === "string") : [],
       assistantError: this.turnAssistantError,
       rateLimit: this.turnRateLimit,
-      lastRetry: this.turnLastRetry,
+      // error_max_turns / error_max_budget_usd / error_during_execution are
+      // not connection failures, whatever retried earlier (willison #2).
+      lastRetry: msg.subtype === "success" ? this.turnLastRetry : null,
     };
     this.turnRateLimit = null;
     this.turnAssistantError = null;

@@ -143,13 +143,17 @@ describe("probeClaudeAuth", () => {
     expect(s.lastSuccessAt).toBeNull();
   });
 
-  it("S1-AC4: unproven CLI version → not_verified, status command never spawned, no provider call", async () => {
+  // S1-AC4 (kept): an unproven CLI version never gets the `auth status` spawn
+  // (the one call that could rotate the token). Changed by willison #3 (council
+  // review 2026-11-15): the token-free provider check still runs — before,
+  // every fresh install after a CLI auto-update was stuck at "not verified".
+  it("S1-AC4 + willison #3: unproven CLI version → status command never spawned, provider check still says working", async () => {
     const runProbe = vi.fn(async (): Promise<BoundedProbeResult> => exited("2.1.999 (Claude Code)"));
     const { deps, requestClaudeUsage } = makeDeps({ runProbe });
     const s = await probeClaudeAuth(deps);
-    expect(s).toMatchObject({ state: "not_verified", reason: "cli_version_unproven", cli: { version: { known: true, value: "2.1.999" } } });
+    expect(s).toMatchObject({ state: "working", verifiedBy: "provider", cli: { version: { known: true, value: "2.1.999" } } });
     expect(statusCalls(runProbe)).toHaveLength(0);
-    expect(requestClaudeUsage).not.toHaveBeenCalled();
+    expect(requestClaudeUsage).toHaveBeenCalledTimes(1);
   });
 
   it.each([

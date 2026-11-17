@@ -1,4 +1,5 @@
 import type { LoginFailureReason, ProviderId } from "../auth-status/auth-types.js";
+import { log } from "../logger.js";
 
 /**
  * Strict parsers for the output of the official sign-in CLIs
@@ -48,7 +49,7 @@ export type TranscriptVerdict =
   /** Not everything needed is printed yet. */
   | { kind: "pending" }
   /** Link (+ code / prompt) complete: the attempt can go to `awaiting_user`. */
-  | { kind: "ready"; prompt: LoginPrompt }
+  | { kind: "ready"; prompt: LoginPrompt; ignoredLines?: number }
   /** The CLI printed a known failure line. */
   | { kind: "failed"; reason: Extract<LoginFailureReason, "code_rejected" | "network" | "cli_output_unrecognised"> }
   /** Output not understood — stop the attempt (fail-closed). */
@@ -102,11 +103,27 @@ function strictLink(raw: string, expected: { host: string; path: string }): URL 
   return url;
 }
 
+/**
+ * An unknown line before the prompt is ignored (not fatal) when it cannot carry
+ * a second link or a code: CLIs reword banners and warnings between minor
+ * releases, and failing on every new sentence broke UI sign-in for every
+ * current install (council review 2026-11-15, willison #4). The link, the
+ * Claude `state` and the Codex code stay strictly validated; anything that
+ * looks like a URL or a code-shaped token is still refused.
+ */
+export function isIgnorableLine(t: string): boolean {
+  if (/https?:|:\/\/|\bwww\./i.test(t)) return false;
+  if (/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/.test(t)) return false;
+  if (/[A-Za-z0-9_-]{24,}/.test(t)) return false;
+  return t.length <= 300;
+}
+
 // ─── Claude ───────────────────────────────────────────────────────────────────
 
 function parseClaude(lines: string[], partials: string[], targets: string[]): TranscriptVerdict {
   let link: { url: string; state: string } | null = null;
   let prompted = false;
+  let ignored = 0;
   for (const line of lines) {
     const t = line.trim();
     if (t === "") continue;
@@ -131,13 +148,17 @@ function parseClaude(lines: string[], partials: string[], targets: string[]): Tr
     if (failure) return failure;
     // After the prompt the exit status decides; unknown lines are not a verdict.
     if (prompted) continue;
+    if (isIgnorableLine(t)) {
+      ignored++;
+      continue;
+    }
     return { kind: "unrecognised", why: "unexpected claude sign-in output" };
   }
   // An incomplete line is never judged as a failure — only recognised as the prompt.
   if (partials.some((p) => p.trim() === CLAUDE_PROMPT)) prompted = true;
   if (!link || !prompted) return { kind: "pending" };
   if (!targetsMatch(targets, link.url)) return { kind: "unrecognised", why: "hyperlink target differs from the sign-in link" };
-  return { kind: "ready", prompt: { provider: "claude", url: link.url, state: link.state } };
+  return { kind: "ready", prompt: { provider: "claude", url: link.url, state: link.state }, ...(ignored ? { ignoredLines: ignored } : {}) };
 }
 
 /** Lines after the prompt: known failures map to a reason; anything else is left to the exit status. */
@@ -162,6 +183,7 @@ const CODEX_FIXED_LINES = new Set([
 ]);
 
 function parseCodex(lines: string[], targets: string[]): TranscriptVerdict {
+  let ignored = 0;
   let url: string | null = null;
   let userCode: string | null = null;
   let expiresInMinutes: number | null = null;
@@ -198,11 +220,15 @@ function parseCodex(lines: string[], targets: string[]): TranscriptVerdict {
     }
     // Lines after a complete prompt (e.g. a success message) are not parsed: the exit status decides.
     if (url && userCode && expiresInMinutes !== null) continue;
+    if (isIgnorableLine(t)) {
+      ignored++;
+      continue;
+    }
     return { kind: "unrecognised", why: "unexpected codex sign-in output" };
   }
   if (!url || !userCode || expiresInMinutes === null) return { kind: "pending" };
   if (!targetsMatch(targets, url)) return { kind: "unrecognised", why: "hyperlink target differs from the sign-in link" };
-  return { kind: "ready", prompt: { provider: "codex", url, userCode, expiresInMinutes } };
+  return { kind: "ready", prompt: { provider: "codex", url, userCode, expiresInMinutes }, ...(ignored ? { ignoredLines: ignored } : {}) };
 }
 
 function targetsMatch(targets: string[], url: string): boolean {
@@ -236,6 +262,7 @@ export class LoginTranscript {
   private readonly lines: string[] = [];
   private size = 0;
   private settled: TranscriptVerdict | null = null;
+  private reportedIgnored = 0;
 
   constructor(readonly provider: ProviderId) {}
 
@@ -256,6 +283,11 @@ export class LoginTranscript {
     if (this.settled) return this.settled;
     const v = parseLines(this.provider, this.lines, [this.partial.stdout, this.partial.stderr]);
     if (v.kind === "failed" || v.kind === "unrecognised") this.settled = v;
+    // Counted, never the text (EC-23): new CLI wording shows up in the logs.
+    if (v.kind === "ready" && (v.ignoredLines ?? 0) > this.reportedIgnored) {
+      this.reportedIgnored = v.ignoredLines ?? 0;
+      log.info("llm-login", "login.transcript_unknown_line", { event: "login.transcript_unknown_line", provider: this.provider, count: this.reportedIgnored });
+    }
     return v;
   }
 }
