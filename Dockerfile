@@ -28,10 +28,12 @@ ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015
 
 # ── 1. Build the npm tarball (runs prepack → stages packs/skills) ───────────
 FROM ${BUN_IMAGE} AS pack
-COPY . /src
+# Dependencies first: a doc or test edit no longer invalidates the install layer (hashimoto H-10).
+COPY web/package.json web/bun.lock /src/web/
 WORKDIR /src/web
-RUN bun install --frozen-lockfile \
- && bun run build \
+RUN bun install --frozen-lockfile
+COPY . /src
+RUN bun run build \
  && mkdir /out \
  && bun pm pack --destination /out \
  && cp bun.lock /out/bun.lock
@@ -42,6 +44,10 @@ FROM ${BUN_IMAGE} AS bun
 FROM ${NODE_IMAGE}
 ARG CLAUDE_CODE_VERSION=2.1.283
 ARG CODEX_VERSION=0.162.1
+# The CLIs are pinned and root-owned here: the node user cannot self-update
+# them, so the auto-updater would only add noise. A newer CLI = a newer image
+# (rebuild with --build-arg CLAUDE_CODE_VERSION=…), see docs (hashimoto H-13).
+ENV DISABLE_AUTOUPDATER=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python-is-python3 git ca-certificates tini \

@@ -1472,3 +1472,28 @@ describe("platform check", () => {
     expect(existsSync(unitPath())).toBe(true);
   });
 });
+
+// hashimoto H-14: `install` without a systemd user manager (WSL without
+// systemd=true, containers, SSH without linger) dumped raw systemctl stderr.
+describe("describeNoUserSystemd", () => {
+  it("WSL: tells how to enable systemd, and the foreground fallback", () => {
+    const lines = service.describeNoUserSystemd("Failed to connect to bus: No medium found", { wsl: true });
+    expect(lines.join("\n")).toContain("systemd=true");
+    expect(lines.join("\n")).toContain("wsl --shutdown");
+    expect(lines.at(-1)).toContain("aura-companion");
+  });
+
+  it("no systemd at all (container) vs. an SSH session without linger", () => {
+    expect(service.describeNoUserSystemd("/bin/sh: 1: systemctl: not found", { wsl: false })[0]).toContain("has no systemd");
+    const ssh = service.describeNoUserSystemd("Failed to connect to bus: No such file or directory", { wsl: false });
+    expect(ssh[0]).toContain("not reachable");
+    expect(ssh.join("\n")).toContain("enable-linger");
+    expect(ssh.join("\n")).not.toContain("systemd=true");
+  });
+
+  it("an unreachable user manager on a server suggests enable-linger", () => {
+    const lines = service.describeNoUserSystemd("Failed to connect to bus: Permission denied", { wsl: false });
+    expect(lines.join("\n")).toContain("enable-linger");
+  });
+});
+

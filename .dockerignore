@@ -1,16 +1,17 @@
-# Build context for the server image (Dockerfile). The pack stage needs web/,
-# packs/skills (the full tree: the vendored-skills gate re-hashes every pinned
-# file) and LICENSE; everything else is left out.
-.git
+# Build context for the server image (Dockerfile) — an ALLOWLIST (hashimoto
+# H-11): everything is excluded, then only what the pack stage needs comes
+# back: web/ (the package), packs/skills (the vendored-skills gate re-hashes
+# every pinned file) and LICENSE. A local .env or key file can never reach the
+# builder or its cache.
+*
+!web
+!packs/skills
+!LICENSE
 **/node_modules
 web/dist
 web/packs
 web/coverage
-landing
-landing-legacy
-platform
-docs
-relay
-stats
-deploy
-.council
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

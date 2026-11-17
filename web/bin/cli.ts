@@ -6,7 +6,23 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 process.env.__COMPANION_PACKAGE_ROOT = resolve(__dirname, "..");
 
-const command = process.argv[2];
+// `aura-companion --port 4000` = the default (serve) with options.
+const first = process.argv[2];
+const command = first?.startsWith("-") && first !== "--help" && first !== "-h" ? undefined : first;
+const serveArgv = process.argv.slice(command === undefined ? 2 : 3);
+
+async function startForegroundServer(): Promise<void> {
+  const { parseServeOptions } = await import("./serve-options.js");
+  const parsed = parseServeOptions(serveArgv);
+  if ("error" in parsed) {
+    console.error(parsed.error);
+    console.error("Usage: aura-companion [serve] [--port <n>] [--host <address>]");
+    process.exit(1);
+  }
+  Object.assign(process.env, parsed.env);
+  process.env.NODE_ENV = process.env.NODE_ENV || "production";
+  await import("../server/index.ts");
+}
 
 // Management subcommands that delegate to ctl.ts
 const CTL_COMMANDS = new Set([
@@ -44,7 +60,8 @@ Management commands (requires running server):
   assistant   Manage the Companion Assistant (status, launch, stop, config)
 
 Options:
-  --port <n>  Override the default port (default: 3456)
+  --port <n>  Port (default: 3456) — serve, install, auth
+  --host <a>  Address to listen on (default: 0.0.0.0; 127.0.0.1 = this machine only) — serve
   --offline   (auth status, doctor) Do not ask the server; compute locally
   --json      (auth status, auth login, doctor) Machine-readable output
 `);
@@ -67,8 +84,7 @@ switch (command) {
     break;
 
   case "serve": {
-    process.env.NODE_ENV = process.env.NODE_ENV || "production";
-    await import("../server/index.ts");
+    await startForegroundServer();
     break;
   }
 
@@ -198,8 +214,7 @@ switch (command) {
 
   case undefined: {
     // Default: start server in foreground
-    process.env.NODE_ENV = process.env.NODE_ENV || "production";
-    await import("../server/index.ts");
+    await startForegroundServer();
     break;
   }
 

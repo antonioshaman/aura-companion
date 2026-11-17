@@ -12,7 +12,7 @@ This guide covers the simplest production setup: one Linux VPS, public IP, syste
 - Aura Companion running as a non-root systemd service
 - Auto-restart on crash and on reboot
 - Logs in the system journal (`journalctl -u aura-companion`)
-- Restarts that don't kill long-lived agent subprocesses (they reconnect)
+- Restarts that keep solo agent sessions alive (they reconnect); Council pairs are closed on shutdown and resumed at the next boot
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ sudo mkdir -p /srv/aura-companion
 sudo chown auracomp:auracomp /srv/aura-companion
 sudo -u auracomp git clone https://github.com/antonioshaman/aura-companion.git /srv/aura-companion
 cd /srv/aura-companion/web
-sudo -u auracomp bash -lc 'bun install && bun run build'
+sudo -u auracomp bash -lc 'bun install --frozen-lockfile && bun run build'
 ```
 
 ## 3. Write the systemd unit
@@ -51,19 +51,27 @@ Create `/etc/systemd/system/aura-companion.service`:
 [Unit]
 Description=Aura Companion
 After=network.target
+# Give up after 5 failed starts in a minute instead of restarting forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=auracomp
 Group=auracomp
 WorkingDirectory=/srv/aura-companion/web
-Environment="PATH=/home/auracomp/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+# ~/.local/bin is where the native `claude` installer puts the CLI — without it
+# sessions start an older system-wide `claude`, if any.
+Environment="PATH=/home/auracomp/.local/bin:/home/auracomp/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="NODE_ENV=production"
 Environment="HOME=/home/auracomp"
 ExecStart=/home/auracomp/.bun/bin/bun server/index.ts
 Restart=always
 RestartSec=5
 KillMode=process
+TimeoutStopSec=30
+# Files the server creates (tokens, session state) are readable by its user only.
+UMask=0077
 StandardOutput=journal
 StandardError=journal
 
@@ -71,7 +79,7 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
-`KillMode=process` is important: on restart, only the bun parent receives `SIGTERM`. The long-lived `claude` / `codex` child subprocesses survive and reconnect to the new bun over the local WebSocket — no work lost.
+`KillMode=process` is important: on restart, only the bun parent receives `SIGTERM`. Solo `claude` / `codex` sessions survive and reconnect to the new bun over the local WebSocket. Council pairs are different: the graceful shutdown closes them, and they are resumed at the next boot — a turn that was running in a pair is not continued.
 
 ## 4. Configure the Origin allowlist
 
@@ -152,7 +160,7 @@ The value must exactly match the `scheme://host:port` your browser shows in the 
 cd /srv/aura-companion
 sudo -u auracomp git pull
 cd web
-sudo -u auracomp bash -lc 'bun install && bun run build'
+sudo -u auracomp bash -lc 'bun install --frozen-lockfile && bun run build'
 sudo systemctl restart aura-companion
 ```
 

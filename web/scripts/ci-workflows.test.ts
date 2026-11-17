@@ -253,6 +253,21 @@ describe("artifact gates (uiux Task 9)", () => {
 
   // hashimoto H-6: bun as PID 1 neither reaps orphaned tool subprocesses nor
   // is an init; tini forwards SIGTERM and reaps.
+  // hashimoto H-10/H-11/H-13: deps layer before the source; an allowlist
+  // build context (no local .env / keys in the builder); no CLI self-update
+  // noise in an image whose CLIs are pinned and root-owned.
+  it("the image installs dependencies before copying the source, uses an allowlist context and disables the CLI auto-updater", () => {
+    const df = readFileSync(join(repoRoot, "Dockerfile"), "utf-8");
+    const deps = df.indexOf("COPY web/package.json web/bun.lock /src/web/");
+    const src = df.indexOf("COPY . /src");
+    expect(deps).toBeGreaterThan(-1);
+    expect(src).toBeGreaterThan(deps);
+    expect(df).toMatch(/^ENV DISABLE_AUTOUPDATER=1$/m);
+    const ignore = readFileSync(join(repoRoot, ".dockerignore"), "utf-8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    expect(ignore[0]).toBe("*");
+    expect(ignore).toEqual(expect.arrayContaining(["!web", "!packs/skills", "!LICENSE", "**/.env", "**/*.pem"]));
+  });
+
   it("the image runs under tini as PID 1", () => {
     const df = readFileSync(join(repoRoot, "Dockerfile"), "utf-8");
     expect(df).toMatch(/apt-get install[^\n]*\btini\b/);
