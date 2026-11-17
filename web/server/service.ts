@@ -279,6 +279,37 @@ function systemctlUser(cmd: string): string {
   });
 }
 
+/**
+ * What to tell a user whose machine has no usable systemd *user* manager —
+ * WSL without `systemd=true`, containers, or an SSH session without linger.
+ * `install` used to dump raw systemctl stderr there (hashimoto H-14).
+ */
+export function describeNoUserSystemd(errorText: string, opts: { wsl: boolean }): string[] {
+  const missing = /systemctl: not found|command not found|spawn systemctl ENOENT|systemctl.*ENOENT/i.test(errorText);
+  const lines = [
+    missing
+      ? "This system has no systemd, so Aura cannot be installed as a background service here."
+      : "The systemd user manager is not reachable, so Aura cannot be installed as a background service yet.",
+  ];
+  if (opts.wsl) {
+    lines.push("WSL: enable systemd — add these lines to /etc/wsl.conf, then run `wsl --shutdown` in Windows and reopen Ubuntu:");
+    lines.push("  [boot]");
+    lines.push("  systemd=true");
+  } else if (!missing) {
+    lines.push("On a server over SSH: `sudo loginctl enable-linger $USER`, then log out and back in.");
+  }
+  lines.push("Or just run Aura in the foreground (keep the terminal open, or use tmux): aura-companion");
+  return lines;
+}
+
+function isWsl(): boolean {
+  try {
+    return /microsoft/i.test(readFileSync("/proc/version", "utf-8"));
+  } catch {
+    return false;
+  }
+}
+
 // ─── Install ────────────────────────────────────────────────────────────────────
 
 export async function install(opts?: { port?: number }): Promise<void> {
@@ -336,6 +367,15 @@ async function installLinux(opts?: { port?: number }): Promise<void> {
   if (isSystemdUnitInstalled()) {
     console.error("Aura Companion is already installed as a service.");
     console.error("Run 'aura-companion uninstall' first to reinstall.");
+    process.exit(1);
+  }
+
+  // Preflight: a reachable user manager, before anything is written.
+  try {
+    systemctlUser("show-environment");
+  } catch (err: unknown) {
+    const text = err instanceof Error ? `${err.message} ${(err as { stderr?: unknown }).stderr ?? ""}` : String(err);
+    for (const line of describeNoUserSystemd(text, { wsl: isWsl() })) console.error(line);
     process.exit(1);
   }
 
