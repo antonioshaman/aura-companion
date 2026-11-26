@@ -1,3 +1,6 @@
+import { registerRadarRoutes } from "./routes/radar-routes.js";
+import type { RadarRunner } from "./radar/radar-runner.js";
+import type { RadarStore } from "./radar/radar-store.js";
 import { registerPortableHistoryRoutes } from "./routes/portable-history-routes.js";
 import { Hono } from "hono";
 import { parseIsolationMode } from "./worktree-isolation.js";
@@ -287,6 +290,7 @@ export function createRoutes(
   port?: number,
   diagnostics?: import("./routes/diagnostics-routes.js").DiagnosticsRoutesDeps,
   portableSessionStore?: import("./session-store.js").SessionStore,
+  radar?: { runner: RadarRunner; store: RadarStore },
 ) {
   const api = new Hono();
 
@@ -2587,6 +2591,7 @@ export function createRoutes(
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api);
+  if (radar) registerRadarRoutes(api, radar.runner, radar.store);
 
   // ─── Tailscale ──────────────────────────────────────────────────────
 

@@ -47,6 +47,8 @@ vi.mock("node:fs", async (orig) => {
   };
 });
 
+vi.mock("../model-freshness.js", async (orig) => ({ ...(await orig() as object), installedCliVersion: () => "test-cli 1.0" }));
+
 import { registerSettingsRoutes } from "./settings-routes.js";
 
 let app: Hono;
@@ -75,7 +77,7 @@ describe("POST /api/settings/models/refresh", () => {
 
     const res = await app.request("/api/settings/models/refresh", { method: "POST" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ claude: "ok", codex: "ok" });
+    expect(await res.json()).toEqual({ claude: "ok", codex: "local-cache" });
 
     // The refresh MUST bypass the fresh-memory cache — verified via the flag.
     expect(mockGetAnthropicModels).toHaveBeenCalledTimes(1);
@@ -181,5 +183,23 @@ describe("GET /api/settings/diagnostics", () => {
     const res = await app.request("/api/settings/diagnostics");
     const json = (await res.json()) as { anthropic: { keyConfigured: boolean } };
     expect(json.anthropic.keyConfigured).toBe(false);
+  });
+});
+
+// Presence of an old cache must not become a successful refresh or account claim.
+describe("model freshness metadata", () => {
+  it("reports stale Codex and leaves model selection untouched", async () => {
+    codexCacheExists = true;
+    codexCacheContent = JSON.stringify({ fetched_at: "2020-01-01T00:00:00Z", client_version: "old", models: [{ slug: "known-model", visibility: "list" }] });
+    const res = await app.request("/api/settings/models/freshness");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.codex).toMatchObject({ status: "stale", catalogClientVersion: "old", installedCliVersion: "test-cli 1.0", refresh: "local-only", scope: "installation" });
+    expect(data.codex).not.toHaveProperty("models");
+  });
+  it("treats malformed and missing catalogs differently", async () => {
+    expect((await (await app.request("/api/settings/models/freshness")).json()).codex.status).toBe("missing");
+    codexCacheExists = true; codexCacheContent = "null";
+    expect((await (await app.request("/api/settings/models/freshness")).json()).codex.status).toBe("malformed");
   });
 });
