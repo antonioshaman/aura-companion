@@ -742,7 +742,8 @@ describe("HomePage", () => {
     fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "unfinished task" } });
     const file = new File(["image"], "draft.png", { type: "image/png" });
     await act(async () => { fireEvent.change(first.container.querySelector('input[type="file"]')!, { target: { files: [file] } }); });
-    await screen.findByRole("button", { name: "Remove draft.png" });
+    // FileReader completion may exceed the default 1s under full-suite coverage load.
+    await screen.findByRole("button", { name: "Remove draft.png" }, { timeout: 5000 });
     first.unmount();
     render(<HomePage />);
     expect(screen.getByRole("button", { name: "Remove draft.png" })).toBeInTheDocument();
@@ -2305,7 +2306,8 @@ describe("HomePage accessible names", () => {
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
     await act(async () => { fireEvent.change(input, { target: { files: [file] } }); });
-    const remove = await screen.findByRole("button", { name: "Remove shot.png" });
+    // Wait for real jsdom FileReader I/O; coverage load must not weaken the attachment assertion.
+    const remove = await screen.findByRole("button", { name: "Remove shot.png" }, { timeout: 5000 });
     fireEvent.click(remove);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull());
   });

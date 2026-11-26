@@ -88,3 +88,7 @@
 | WILLISON-2 | Не сообщать успех при HTTP200 unavailable/absent; не перезагружать selector при неуспехе | semantic failure: red → green |
 
 **Diff matches recommendation: yes** — guards проверяют фактический тип, error-body закрывается до throw, partial cap сохраняет начало списка, архив не зависит от replaceable scan, старый polling не применяет state, фокус переносится только при успехе, semantic failure не объявляется успешным обновлением. Новая optional decisionIdeas совместима с version1 без этого поля; общий лимит записи512KB сохранён. При заполненных100 предложениях restore архивной записи отклоняется без потери решения и просит сначала разобрать список.
+
+
+### Детерминированная проверка после исправлений
+Первый полный coverage-прогон:12147 passed,2 failed,8 skipped. Два прежних теста вложений HomePage не дождались реального FileReader в стандартный1s под нагрузкой; отдельно весь HomePage88/88 и повтор обоих сценариев2/2 прошли. **Deterministic #13:** ожидание findByRole только в этих двух сценариях увеличено до5s, проверки наличия/удаления/сохранения вложения сохранены. Diff matches recommendation: yes — изменён срок завершения I/O, не ожидаемое поведение. Предсуществующий hook не executable и Git его игнорирует; typecheck, coverage, observer drift выполнены явно. Dedicated axe119 passed, rendered axe6 states passed, сборка/deadcode/DRY/drift passed. Фокус после restore повторно проверен в реальном компонентном браузере: SUMMARY и1 предложение/4 уже в Aura.
