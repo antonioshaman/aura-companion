@@ -7086,3 +7086,23 @@ describe("Diagnostics routes — auth", () => {
     expect((await protectedApp.request("/api/diagnostics/kb-analysis/latest")).status).toBe(200);
   });
 });
+
+// Radar must remain below the same production auth/Origin guard as other mutations.
+describe("Radar production authorization", () => {
+  it("blocks unauthenticated remote reads and foreign-Origin local mutations", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    const { RadarStore } = await import("./radar/radar-store.js");
+    const { RadarRunner } = await import("./radar/radar-runner.js");
+    const store = new RadarStore("/unused-radar-auth-test/state.json");
+    const runner = new RadarRunner(store, async () => []);
+    const radarApp = new Hono();
+    radarApp.route("/api", createRoutes(orchestrator, launcher, bridge, terminalManager as any, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { runner, store }));
+    const read = vi.spyOn(runner, "view");
+    vi.mocked(verifyToken).mockReturnValue(false);
+    try {
+      expect((await radarApp.request("/api/radar", {}, { requestIP: () => ({ address: "203.0.113.7" }) })).status).toBe(401);
+      expect((await radarApp.request("/api/radar/run", { method: "POST", headers: { Origin: "https://evil.example", Host: "localhost:3456" } }, { requestIP: () => ({ address: "127.0.0.1" }) })).status).toBe(403);
+      expect(read).not.toHaveBeenCalled();
+    } finally { vi.mocked(verifyToken).mockReturnValue(true); runner.dispose(); }
+  });
+});

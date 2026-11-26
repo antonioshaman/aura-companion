@@ -1277,7 +1277,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
 
                 {refreshResult && (
                   <div className="mb-3 px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
-                    Refreshed — Claude: {refreshResult.claude}, Codex: {refreshResult.codex}.
+                    Claude: {refreshResult.claude}. Codex: {refreshResult.codex === "local-cache" ? "local cache read; refresh it using the Codex CLI" : refreshResult.codex}.
                   </div>
                 )}
 

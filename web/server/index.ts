@@ -1,3 +1,5 @@
+import { RadarRunner } from "./radar/radar-runner.js";
+import { RadarStore } from "./radar/radar-store.js";
 process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 
 // Enrich process PATH at startup so binary resolution and `which` calls can find
@@ -439,7 +441,10 @@ const diagnosticsService = createDiagnosticsService({
   version: readPackageVersion(),
 });
 
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port, diagnosticsService.routes, sessionStore));
+const radarStore = new RadarStore(join(COMPANION_HOME, "radar", "state.json"));
+const radarRunner = new RadarRunner(radarStore);
+radarRunner.start();
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port, diagnosticsService.routes, sessionStore, { runner: radarRunner, store: radarStore }));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -1093,6 +1098,7 @@ async function gracefulShutdown() {
   // callback cannot race the teardown below (it reads wsBridge state that
   // shutdown is actively dismantling).
   clearInterval(diagnosticsTimer);
+  radarRunner.dispose();
   sessionBrowserCleanup.dispose();
   // Abort a running KB analysis (no report, lastRun unchanged) and stop its hourly check.
   await diagnosticsService.dispose().catch(() => {});

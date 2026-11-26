@@ -1,3 +1,5 @@
+import type { RadarView, RadarConfig } from "../server/radar/radar-types.js";
+import type { ModelFreshness } from "../server/model-freshness.js";
 import type { PortableArchive, PortableSource, ContinuationDraft } from "../server/portable-history-types.js";
 import type { PortableArchiveSummary } from "../server/portable-history-store.js";
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
@@ -1412,9 +1414,14 @@ export const api = {
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
   refreshModels: () =>
-    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "ok" | "absent" }>(
+    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "local-cache" | "absent" }>(
       "/settings/models/refresh",
     ),
+  radar: () => get<RadarView>("/radar"),
+  runRadar: () => post<RadarView>("/radar/run"),
+  configureRadar: (config: RadarConfig) => put<RadarView>("/radar/config", config),
+  decideRadar: (id: string, decision: "dismissed" | "implemented" | "restore") => post<RadarView>("/radar/decisions", { id, decision }),
+  modelFreshness: () => get<Record<"claude" | "codex", ModelFreshness>>("/settings/models/freshness"),
   getModelDiagnostics: () => get<ModelDiagnostics>("/settings/diagnostics"),
   getDeliveryMetrics: () => get<DeliveryMetricsSnapshot>("/metrics/delivery"),
 

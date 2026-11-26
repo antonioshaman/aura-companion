@@ -1,3 +1,4 @@
+import { ImprovementRadar } from "./ImprovementRadar.js";
 import { HOME_DRAFT, useDraftField, useDraftStore } from "../store/drafts.js";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WorktreeIsolationChoice, type IsolationChoice } from "./home/WorktreeIsolationChoice.js";
@@ -1481,6 +1482,8 @@ export function HomePage() {
           )}
           <ModelListFallbackHint backend={backend} className="px-4 pb-3" />
         </div>
+
+        <ImprovementRadar backend={backend} onModelsRefreshed={() => loadBackendModels(backend)} />
 
         {/* ── Below-card controls ── */}
         <div className="mt-3 sm:mt-4 space-y-2">

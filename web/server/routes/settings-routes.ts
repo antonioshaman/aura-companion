@@ -1,3 +1,4 @@
+import { installedCliVersion, modelFreshness } from "../model-freshness.js";
 import type { Hono } from "hono";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -433,7 +434,7 @@ export function registerSettingsRoutes(api: Hono): void {
       });
       claude = result.kind === "ok" ? "ok" : result.kind === "no-key" ? "no-key" : "unavailable";
     }
-    const codex = existsSync(codexModelsCachePath()) ? "ok" : "absent";
+    const codex = existsSync(codexModelsCachePath()) ? "local-cache" : "absent";
     return c.json({ claude, codex });
   });
 
@@ -457,6 +458,24 @@ export function registerSettingsRoutes(api: Hono): void {
       claudeSupportsPluginDir: !!claudeBin && claudeSupportsPluginDir(claudeBin),
       hasRuntime: (bin) => resolveBinary(bin) !== null,
     }));
+  });
+
+  // Separate metadata keeps existing array/catalog and diagnostic consumers stable.
+  api.get("/settings/models/freshness", async (c) => {
+    const meta = readAnthropicCacheFileMeta();
+    const claude = modelFreshness({ present: meta.present, fetchedAt: meta.fetchedAt, valid: meta.modelCount !== null, keyConfigured: !!getSettings().anthropicApiKey.trim() }, "claude");
+    let raw: Record<string, unknown> = {};
+    let valid = false;
+    const present = existsSync(codexModelsCachePath());
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(codexModelsCachePath(), "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid catalog");
+      raw = parsed as Record<string, unknown>;
+      valid = Array.isArray(raw.models) && raw.models.every((m: unknown) => !!m && typeof m === "object" && typeof (m as { slug?: unknown }).slug === "string");
+    } catch { /* Missing and malformed are distinct via present. */ }
+    const codex = modelFreshness({ present, valid, fetchedAt: raw.fetched_at, clientVersion: typeof raw.client_version === "string" ? raw.client_version : null }, "codex");
+    [claude.installedCliVersion, codex.installedCliVersion] = await Promise.all([installedCliVersion("claude"), installedCliVersion("codex")]);
+    return c.json({ claude, codex });
   });
 
   api.get("/settings/diagnostics", (c) => {
