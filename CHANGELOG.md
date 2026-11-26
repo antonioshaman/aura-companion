@@ -6,7 +6,6 @@
 ### Features
 
 * **radar:** add improvement discovery and model freshness ([96c6bd9](https://github.com/antonioshaman/aura-companion/commit/96c6bd9ee9572cdd2fed0f8eea3acc3eb77335e2))
-* **radar:** add improvement discovery and model freshness ([96c6bd9](https://github.com/antonioshaman/aura-companion/commit/96c6bd9ee9572cdd2fed0f8eea3acc3eb77335e2))
 
 ## [2.12.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.11.0...aura-companion-v2.12.0) (2026-11-17)
 
