@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.13.0...aura-companion-v2.13.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **models:** refresh account catalogs through Codex CLI ([9421b53](https://github.com/antonioshaman/aura-companion/commit/9421b53c31e345cf6502aa9c15d5890fbcacab43))
+
 ## [2.13.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.12.0...aura-companion-v2.13.0) (2026-11-26)
 
 
