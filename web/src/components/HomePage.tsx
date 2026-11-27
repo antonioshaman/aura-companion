@@ -376,7 +376,7 @@ export function HomePage() {
   }, [backend, savedAnthropicModel]);
 
   useEffect(() => {
-    if (backend !== "codex") return;
+    if (backend !== "codex" || modelTouchedRef.current) return;
     if (!dynamicModelsForBackend || dynamicModelsForBackend.length === 0) return;
     if (dynamicModelsForBackend.some((m) => m.value === model)) return;
     setModel(dynamicModelsForBackend[0]!.value);

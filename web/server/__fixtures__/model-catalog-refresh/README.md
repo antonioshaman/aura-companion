@@ -1,0 +1,3 @@
+Captured 2026-11-27 from installed codex-cli0.162.1: initialize → initialized → model/list(limit100,includeHidden:false), stdio, no thread/turn. `model-list.jsonl` is the exact model/list response line (unmodified JSON, no credentials/account identifiers); it exercises the account catalog parser offline. Initialization is supplied separately in the test because its environment-specific userAgent is irrelevant to the model contract.
+
+`startup-notification.jsonl` captures the unsolicited remoteControl status sent between replies. Host name, installation ID and timestamp are replaced with fixtures; envelope and status fields are unchanged.

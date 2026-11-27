@@ -1,3 +1,5 @@
+vi.mock("./codex-model-refresh.js", () => ({ refreshCodexModels: vi.fn().mockResolvedValue("ok") }));
+import { refreshCodexModels } from "./codex-model-refresh.js";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
@@ -4639,6 +4641,7 @@ describe("GET /api/backends/:id/models", () => {
     vi.mocked(readFileSync).mockReturnValue(cacheContent);
 
     const res = await app.request("/api/backends/codex/models", { method: "GET" });
+    expect(refreshCodexModels).toHaveBeenCalledWith();
 
     expect(res.status).toBe(200);
     const json = await res.json();

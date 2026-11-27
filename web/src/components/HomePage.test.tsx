@@ -2312,3 +2312,15 @@ describe("HomePage accessible names", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull());
   });
 });
+
+// A refreshed provider catalog must not silently replace an explicit user choice.
+it("keeps an explicitly selected Codex model when the refreshed catalog changes",async()=>{
+ localStorage.setItem("cc-backend","codex");
+ mockApi.getBackends.mockResolvedValue([{id:"claude",name:"Claude",available:true},{id:"codex",name:"Codex",available:true}]);
+ mockStoreState.dynamicBackendModels={codex:[{value:"model-a",label:"Model A",icon:""},{value:"model-b",label:"Model B",icon:""}]};
+ try{
+  const {rerender}=render(<HomePage/>);await screen.findByText("Model A");fireEvent.click(screen.getByText("Model A"));fireEvent.click(screen.getByRole("button",{name:"Model B"}));
+  mockStoreState.dynamicBackendModels={codex:[{value:"model-new",label:"Model New",icon:""}]};rerender(<HomePage/>);
+  expect(screen.getByTestId("new-session-model-picker")).toHaveTextContent("model-b");expect(screen.getByTestId("new-session-model-picker")).not.toHaveTextContent("Model New");
+ }finally{mockStoreState.dynamicBackendModels={};}
+});
