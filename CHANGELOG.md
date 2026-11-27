@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.13.1...aura-companion-v2.13.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **codex:** reconnect once after a WebSocket failure ([92bf8e1](https://github.com/antonioshaman/aura-companion/commit/92bf8e189093fefde784edc0e59a993d60c67a4f))
+
 ## [2.13.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.13.0...aura-companion-v2.13.1) (2026-11-27)
 
 
