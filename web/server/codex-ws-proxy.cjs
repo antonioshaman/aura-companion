@@ -171,15 +171,11 @@ function connect() {
     scheduleReconnect(`WebSocket closed (code=${code}${why})`);
   });
 
-  ws.once("error", (err) => {
+  ws.on("error", (err) => {
     if (closed || exiting) return;
-    // Retry during startup; after a successful connection, use reconnect logic.
-    if (!opened) {
-      setTimeout(connect, Math.min(100 * connectAttempt, 500));
-      return;
-    }
-    // Post-open error — attempt reconnection with backoff
-    scheduleReconnect(`WebSocket error: ${err && err.message ? err.message : String(err)}`);
+    // ws emits close after a connection error. Let close own retry scheduling
+    // so one failed socket cannot create two app-server subscriptions.
+    log(`WebSocket error: ${err.message}`);
   });
 }
 
