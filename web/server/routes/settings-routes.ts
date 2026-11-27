@@ -1,3 +1,4 @@
+import { refreshCodexModels } from "../codex-model-refresh.js";
 import { installedCliVersion, modelFreshness } from "../model-freshness.js";
 import type { Hono } from "hono";
 import { existsSync, readFileSync } from "node:fs";
@@ -414,13 +415,7 @@ export function registerSettingsRoutes(api: Hono): void {
     }
   });
 
-  // Operator-triggered model-list refresh. The GET /backends/:id/models
-  // handler is deliberately cache-honest (Hunt R4 — no `?force=1` escape
-  // hatch), so an explicit refresh is a distinct POST intent: force a fresh
-  // Anthropic /v1/models fetch (repopulating the server cache) so the next
-  // GET returns the latest catalogue. Codex has no server-side cache to bust
-  // — its list is read straight from the CLI's own models_cache.json on
-  // every GET — so we only report whether that file is present.
+  // Explicit refresh; Codex obtains the account catalog without a thread/turn.
   api.post("/settings/models/refresh", async (c) => {
     const settings = getSettings();
     const key = settings.anthropicApiKey.trim();
@@ -434,7 +429,7 @@ export function registerSettingsRoutes(api: Hono): void {
       });
       claude = result.kind === "ok" ? "ok" : result.kind === "no-key" ? "no-key" : "unavailable";
     }
-    const codex = existsSync(codexModelsCachePath()) ? "local-cache" : "absent";
+    const codex = await refreshCodexModels(true);
     return c.json({ claude, codex });
   });
 

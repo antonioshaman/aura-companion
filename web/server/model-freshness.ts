@@ -4,7 +4,7 @@ import { resolveBinary } from "./path-resolver.js";
 export interface ModelFreshness {
   status: "fresh" | "stale" | "missing" | "malformed" | "no-key";
   fetchedAt: number | null; catalogClientVersion: string | null; installedCliVersion: string | null;
-  refresh: "upstream" | "local-only"; scope: "installation";
+  refresh: "upstream" | "cli"; scope: "installation";
 }
 /** Freshness says nothing about entitlement. A missing/invalid date is not fresh. */
 export function modelFreshness(input: { present: boolean; fetchedAt: unknown; valid: boolean; clientVersion?: string | null; keyConfigured?: boolean }, backend: "claude" | "codex", now = Date.now()): ModelFreshness {
@@ -13,7 +13,7 @@ export function modelFreshness(input: { present: boolean; fetchedAt: unknown; va
   return {
     status: input.keyConfigured === false ? "no-key" : !input.present ? "missing" : !input.valid ? "malformed" : date === null || now - date > 86_400_000 ? "stale" : "fresh",
     fetchedAt: date, catalogClientVersion: input.clientVersion ?? null, installedCliVersion: null,
-    refresh: backend === "claude" ? "upstream" : "local-only", scope: "installation",
+    refresh: backend === "claude" ? "upstream" : "cli", scope: "installation",
   };
 }
 const versionCache = new Map<string, { until: number; value: Promise<string | null> }>();

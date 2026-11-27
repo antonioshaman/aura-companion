@@ -137,7 +137,7 @@ beforeEach(() => {
     ],
   });
   mockApi.relaunchSession.mockResolvedValue({ ok: true });
-  mockApi.refreshModels.mockResolvedValue({ claude: "ok", codex: "local-cache" });
+  mockApi.refreshModels.mockResolvedValue({ claude: "ok", codex: "ok" });
   mockApi.getDeliveryMetrics.mockResolvedValue({
     stallThresholdMs: 60_000,
     global: { userMessages: 5, firstOutputs: 5, stalledMessages: 0, noResponseRequestedReplies: 0, driftRecoveries: 0, nudges: 0, backgroundTasksKilled: 0, awaitingReply: 0 },
@@ -1539,7 +1539,7 @@ describe("SettingsPage", () => {
       expect(mockApi.getModelDiagnostics).toHaveBeenCalled();
     });
     // The per-backend outcome banner is shown.
-    expect(await screen.findByText(/Claude: ok\. Codex: local cache read; refresh it using the Codex CLI\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Claude: ok\. Codex: catalog refreshed via Codex CLI\./)).toBeInTheDocument();
   });
 
   // A failing refresh surfaces the error message in the panel rather than

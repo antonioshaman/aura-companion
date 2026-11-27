@@ -1,3 +1,5 @@
+vi.mock("../codex-model-refresh.js", () => ({ refreshCodexModels: vi.fn().mockResolvedValue("ok") }));
+import { refreshCodexModels } from "../codex-model-refresh.js";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { homedir } from "node:os";
@@ -77,9 +79,10 @@ describe("POST /api/settings/models/refresh", () => {
 
     const res = await app.request("/api/settings/models/refresh", { method: "POST" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ claude: "ok", codex: "local-cache" });
+    expect(await res.json()).toEqual({ claude: "ok", codex: "ok" });
 
     // The refresh MUST bypass the fresh-memory cache — verified via the flag.
+    expect(refreshCodexModels).toHaveBeenCalledWith(true);
     expect(mockGetAnthropicModels).toHaveBeenCalledTimes(1);
     const [key, opts] = mockGetAnthropicModels.mock.calls[0];
     expect(key).toBe("sk-ant-api03-test");
@@ -92,7 +95,7 @@ describe("POST /api/settings/models/refresh", () => {
     mockGetSettings.mockReturnValue({ anthropicApiKey: "   " });
 
     const res = await app.request("/api/settings/models/refresh", { method: "POST" });
-    expect(await res.json()).toEqual({ claude: "no-key", codex: "absent" });
+    expect(await res.json()).toEqual({ claude: "no-key", codex: "ok" });
     expect(mockGetAnthropicModels).not.toHaveBeenCalled();
   });
 
@@ -194,7 +197,7 @@ describe("model freshness metadata", () => {
     const res = await app.request("/api/settings/models/freshness");
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data.codex).toMatchObject({ status: "stale", catalogClientVersion: "old", installedCliVersion: "test-cli 1.0", refresh: "local-only", scope: "installation" });
+    expect(data.codex).toMatchObject({ status: "stale", catalogClientVersion: "old", installedCliVersion: "test-cli 1.0", refresh: "cli", scope: "installation" });
     expect(data.codex).not.toHaveProperty("models");
   });
   it("treats malformed and missing catalogs differently", async () => {
@@ -202,4 +205,10 @@ describe("model freshness metadata", () => {
     codexCacheExists = true; codexCacheContent = "null";
     expect((await (await app.request("/api/settings/models/freshness")).json()).codex.status).toBe("malformed");
   });
+});
+
+// Provider failure is semantic HTTP200, not a spurious successful cache reread.
+it("reports a failed Codex upstream refresh without claiming success",async()=>{
+ vi.mocked(refreshCodexModels).mockResolvedValueOnce("unavailable");
+ const res=await app.request("/api/settings/models/refresh",{method:"POST"});expect((await res.json()).codex).toBe("unavailable");expect(refreshCodexModels).toHaveBeenCalledWith(true);
 });

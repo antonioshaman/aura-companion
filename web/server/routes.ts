@@ -1,3 +1,4 @@
+import { refreshCodexModels } from "./codex-model-refresh.js";
 import { registerRadarRoutes } from "./routes/radar-routes.js";
 import type { RadarRunner } from "./radar/radar-runner.js";
 import type { RadarStore } from "./radar/radar-store.js";
@@ -2485,6 +2486,8 @@ export function createRoutes(
     const backendId = c.req.param("id");
 
     if (backendId === "codex") {
+      // Refresh stale/missing account data once/hour; failures keep the CLI-owned cache.
+      await refreshCodexModels();
       // Read Codex model list from its local cache file
       const cachePath = join(homedir(), ".codex", "models_cache.json");
       if (!existsSync(cachePath)) {

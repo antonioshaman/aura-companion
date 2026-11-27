@@ -12,7 +12,7 @@ const idea = { id: "a".repeat(24), title: "Оценить интеграцию t
 const view: RadarView = { version: 1, config: { enabled: false, sources: [{ kind: "repo", value: "openai/codex" }] }, ideas: [idea], decisions: {}, lastAttempt: 1000, lastSuccess: 1000, outcome: "success", sourceErrors: [], running: false, capabilities: [{ id: "council", title: "Council Mode", evidence: "web/server/session-group-coordinator.ts" }], counts: { proposals: 1, implemented: 1 } };
 beforeEach(() => {
   vi.resetAllMocks(); vi.mocked(api.radar).mockResolvedValue(structuredClone(view));
-  const model = { status: "stale" as const, fetchedAt: 1000, installedCliVersion: "codex-cli old", catalogClientVersion: "old", scope: "installation" as const, refresh: "local-only" as const };
+  const model = { status: "stale" as const, fetchedAt: 1000, installedCliVersion: "codex-cli old", catalogClientVersion: "old", scope: "installation" as const, refresh: "cli" as const };
   vi.mocked(api.modelFreshness).mockResolvedValue({ claude: model, codex: model });
 });
 describe("quiet improvement radar", () => {
@@ -53,10 +53,10 @@ describe("quiet improvement radar", () => {
     const refreshed = vi.fn().mockResolvedValue(undefined);
     const { container } = render(<ImprovementRadar backend="codex" onModelsRefreshed={refreshed} />); await screen.findByText(/1 предложение/); fireEvent.click(container.querySelector("summary")!);
     fireEvent.click(screen.getByText("Актуальность моделей"));
-    vi.mocked(api.refreshModels).mockResolvedValue({ claude: "no-key", codex: "local-cache" });
-    fireEvent.click(screen.getByRole("button", { name: "Перечитать локальный каталог" }));
+    vi.mocked(api.refreshModels).mockResolvedValue({ claude: "no-key", codex: "ok" });
+    fireEvent.click(screen.getByRole("button", { name: "Обновить каталог Codex" }));
     await waitFor(() => expect(api.refreshModels).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText(/Локальный каталог перечитан/)).toBeVisible(); expect(api.runRadar).not.toHaveBeenCalled();
+    expect(await screen.findByText(/Каталог Codex обновлён/)).toBeVisible(); expect(api.runRadar).not.toHaveBeenCalled();
     expect(refreshed).toHaveBeenCalledTimes(1);
   });
 });
@@ -82,7 +82,7 @@ it("runs a manual scan, retains results after refresh failure, and restores deci
   fireEvent.click(screen.getByRole("button", { name: "Снова предлагать" }));
   await waitFor(() => expect(api.decideRadar).toHaveBeenCalledWith(idea.id, "restore"));
   fireEvent.click(screen.getByText("Актуальность моделей")); vi.mocked(api.refreshModels).mockRejectedValue(new Error("network"));
-  fireEvent.click(screen.getByRole("button", { name: "Перечитать локальный каталог" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновить каталог Codex" }));
   expect(await screen.findByText(/Обновление не удалось/)).toBeVisible(); expect(screen.getByText(idea.title)).toBeVisible();
 });
 it("does not leave a failed initial load looking like infinite loading", async () => {
@@ -118,10 +118,10 @@ it("retries a failed initial load and enables the scanner after recovery",async(
 
 // WILLISON-2: HTTP success can carry an upstream failure or missing local catalog.
 it.each(["claude","codex"] as const)("reports semantic refresh failure for %s", async backend=>{
- const reload=vi.fn().mockResolvedValue(undefined);vi.mocked(api.refreshModels).mockResolvedValue({claude:"unavailable",codex:"absent"});
+ const reload=vi.fn().mockResolvedValue(undefined);vi.mocked(api.refreshModels).mockResolvedValue({claude:"unavailable",codex:"unavailable"});
  const {container}=render(<ImprovementRadar backend={backend} onModelsRefreshed={reload}/>);await screen.findByText(/1 предложение/);fireEvent.click(container.querySelector("summary")!);fireEvent.click(screen.getByText("Актуальность моделей"));
- fireEvent.click(screen.getByRole("button",{name:backend==="claude"?"Проверить каталог Claude":"Перечитать локальный каталог"}));
- await screen.findByText(backend==="claude"?/Источник каталога Claude недоступен/:/Локальный каталог Codex отсутствует/);expect(reload).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole("button",{name:backend==="claude"?"Проверить каталог Claude":"Обновить каталог Codex"}));
+ await screen.findByText(backend==="claude"?/Не удалось обновить каталог Claude/:/Не удалось обновить каталог Codex/);expect(reload).not.toHaveBeenCalled();
 });
 
 // FOWLER-1 / UX-1: archived decisions remain recognizable even after scan candidates disappear.

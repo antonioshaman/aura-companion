@@ -64,9 +64,9 @@ export function ImprovementRadar({ backend, onModelsRefreshed }: { backend: "cla
     try {
       const result = await api.refreshModels();
       const outcome = result[backend];
-      if (outcome === "ok" || outcome === "local-cache") await onModelsRefreshed?.();
+      if (outcome === "ok") await onModelsRefreshed?.();
       setModels(await api.modelFreshness());
-      setModelError(outcome === "unavailable" ? "Источник каталога Claude недоступен. Предыдущий каталог сохранён." : outcome === "absent" ? "Локальный каталог Codex отсутствует. Запустите актуальный Codex CLI для получения каталога." : outcome === "no-key" ? "Без API-ключа каталог подписки Claude Code здесь не проверяется." : backend === "codex" ? "Локальный каталог перечитан. Для новых моделей запустите актуальный Codex CLI; доступность аккаунта не подтверждается анонсом." : "Каталог Claude обновлён.");
+      setModelError(outcome === "unavailable" ? `Не удалось обновить каталог ${backend === "codex" ? "Codex" : "Claude"}. Предыдущий список сохранён.` : outcome === "no-key" ? "Без API-ключа каталог подписки Claude Code здесь не проверяется." : `Каталог ${backend === "codex" ? "Codex" : "Claude"} обновлён.`);
     } catch { setModelError("Обновление не удалось. Предыдущий каталог сохранён."); }
     finally { setBusy(false); }
   }
@@ -116,7 +116,7 @@ export function ImprovementRadar({ backend, onModelsRefreshed }: { backend: "cla
         </ul>
         {candidates.length > 10 && <p className="text-cc-muted">Показаны первые 10 из {candidates.length}. Остальные появятся после разбора списка.</p>}
         {view && Object.values(view.decisions).some(d => d === "dismissed") && <details><summary className={control}>Отклонённые идеи</summary>{Object.entries(view.decisions).filter(([, d]) => d === "dismissed").map(([key]) => <p key={key}>{(view.decisionIdeas?.[key] ?? view.ideas.find(i => i.id === key))?.title ?? "Ранее найденная идея"} {view.decisionIdeas?.[key]?.url && <a href={view.decisionIdeas[key].url} target="_blank" rel="noopener noreferrer" className="underline">Источник (новая вкладка)</a>} <button type="button" disabled={busy} className={control} onClick={() => { void act(() => api.decideRadar(key, "restore"), true); }}>Снова предлагать</button></p>)}</details>}
-        <details><summary className={control}>Актуальность моделей</summary><div className="space-y-2 py-2"><p>{fresh ? labels[fresh.status] : "Свежесть не проверена"}. Каталог установки: {date(fresh?.fetchedAt ?? null)}.</p><p>Установленный CLI: {fresh?.installedCliVersion ?? "не определён"}. CLI каталога: {fresh?.catalogClientVersion ?? "нет данных"}.</p><p className="text-cc-muted">Публичный анонс не подтверждает доступ модели аккаунту. Проверка не устанавливает CLI и не меняет выбранную модель.</p><button type="button" disabled={busy} className={control} onClick={() => { void refreshModels(); }}>{backend === "codex" ? "Перечитать локальный каталог" : "Проверить каталог Claude"}</button>{modelError && <p role="status">{modelError}</p>}</div></details>
+        <details><summary className={control}>Актуальность моделей</summary><div className="space-y-2 py-2"><p>{fresh ? labels[fresh.status] : "Свежесть не проверена"}. Каталог установки: {date(fresh?.fetchedAt ?? null)}.</p><p>Установленный CLI: {fresh?.installedCliVersion ?? "не определён"}. CLI каталога: {fresh?.catalogClientVersion ?? "нет данных"}.</p><p className="text-cc-muted">При открытии новой сессии каталог проверяется автоматически, не чаще раза в час. Публичный анонс не подтверждает доступ модели аккаунту. Проверка не устанавливает CLI и не меняет выбранную модель.</p><button type="button" disabled={busy} className={control} onClick={() => { void refreshModels(); }}>{backend === "codex" ? "Обновить каталог Codex" : "Проверить каталог Claude"}</button>{modelError && <p role="status">{modelError}</p>}</div></details>
       </section>
     </details>
   </div>;

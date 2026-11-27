@@ -1414,7 +1414,7 @@ export const api = {
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
   refreshModels: () =>
-    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "local-cache" | "absent" }>(
+    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "ok" | "unavailable" }>(
       "/settings/models/refresh",
     ),
   radar: () => get<RadarView>("/radar"),
